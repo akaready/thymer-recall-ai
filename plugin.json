@@ -1,0 +1,131 @@
+{
+	"ver": 1,
+	"name": "Recall.ai Meetings",
+	"icon": "microphone",
+	"description": "Send Recall.ai bots to meeting URLs and stream transcripts and summaries into Thymer.",
+	"instructions": "Enter your Recall.ai and Anthropic API keys, then create meeting records with URLs. Browsers block direct API calls, so host the bridge (backend/bridge-worker.js as a Cloudflare Worker) and paste its URL as the Bridge URL. Bots join meetings, transcripts stream in, and summaries generate when complete.",
+	"author": "@akaready",
+	"homepage": "https://akaready.com",
+	"repository": "https://github.com/akaready/thymer-recall-ai",
+	"coffee": "https://buymeacoffee.com/akaready",
+	"item_name": "Meeting",
+	"fields": [
+		{
+			"id": "title",
+			"label": "Title",
+			"type": "text",
+			"icon": "ti-abc",
+			"many": false,
+			"read_only": false,
+			"active": true
+		},
+		{
+			"id": "meeting_url",
+			"label": "Meeting URL",
+			"type": "url",
+			"icon": "ti-link",
+			"many": false,
+			"read_only": false,
+			"active": true
+		},
+		{
+			"id": "join_at",
+			"label": "Join At",
+			"type": "datetime",
+			"icon": "ti-calendar-time",
+			"many": false,
+			"read_only": false,
+			"active": true
+		},
+		{
+			"id": "transcript",
+			"label": "Transcript",
+			"type": "text",
+			"icon": "ti-file-text",
+			"many": false,
+			"read_only": false,
+			"active": true
+		},
+		{
+			"id": "summary",
+			"label": "Summary",
+			"type": "text",
+			"icon": "ti-sparkles",
+			"many": false,
+			"read_only": false,
+			"active": true
+		},
+		{
+			"id": "recall_bot_id",
+			"label": "Recall Bot ID",
+			"type": "text",
+			"icon": "ti-robot",
+			"many": false,
+			"read_only": false,
+			"active": true
+		},
+		{
+			"id": "recall_status",
+			"label": "Recall Status",
+			"type": "text",
+			"icon": "ti-activity",
+			"many": false,
+			"read_only": false,
+			"active": true
+		},
+		{
+			"id": "last_error",
+			"label": "Last Error",
+			"type": "text",
+			"icon": "ti-alert-triangle",
+			"many": false,
+			"read_only": false,
+			"active": true
+		}
+	],
+	"views": [
+		{
+			"id": "table",
+			"label": "Meetings",
+			"description": "Recall.ai meeting bot control table.",
+			"type": "table",
+			"icon": "ti-table",
+			"shown": true,
+			"read_only": false,
+			"sort_field_id": "join_at",
+			"sort_dir": "desc",
+			"group_by_field_id": null,
+			"field_ids": [
+				"title",
+				"meeting_url",
+				"join_at",
+				"recall_status",
+				"recall_bot_id",
+				"summary"
+			],
+			"query": ""
+		}
+	],
+	"page_field_ids": [
+		"title",
+		"meeting_url",
+		"join_at",
+		"transcript",
+		"summary",
+		"recall_bot_id",
+		"recall_status",
+		"last_error"
+	],
+	"managed": {
+		"fields": false,
+		"views": false,
+		"sidebar": true
+	},
+	"version": "1.0.0",
+	"__source_repo": "https://github.com/akaready/thymer-recall-ai",
+	"__source_files": {
+		"branch": "main",
+		"json": "plugin.json",
+		"js": "plugin.js"
+	}
+}
