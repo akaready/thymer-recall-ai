@@ -278,6 +278,7 @@ var plugins = (() => {
   line-height: 1;
   color: var(--tps-text-muted);
   transform: translateY(2px);
+  margin-right: var(--tps-space-1, 4px);
 }
 
 .tps-plugin-header-iconify {
@@ -1516,7 +1517,7 @@ var plugins = (() => {
   __name(syncPluginVersionOnLoad, "syncPluginVersionOnLoad");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.0.0";
+  var PLUGIN_VERSION = "1.0.1";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
