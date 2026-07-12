@@ -1661,7 +1661,7 @@ var plugins = (() => {
   __name(syncPluginVersionOnLoad, "syncPluginVersionOnLoad");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.0.2";
+  var PLUGIN_VERSION = "1.0.3";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -1677,6 +1677,20 @@ var plugins = (() => {
   var CONFIG_KEY = "recallAi";
   var INLINE_BUTTON_CLASS = `${ROOT_CLASS}__inline-button`;
   var INLINE_APPLIED_ATTR = "data-recall-ai-inline";
+  var EDITOR_SCOPE = ".editor-panel";
+  var INLINE_SKIP_SELECTOR = [
+    ".sidebar",
+    ".tps-panel",
+    ".CodeMirror",
+    ".cm-editor",
+    ".plugin-code-editor",
+    ".listview-overlaybuttons",
+    // the editor's hover-handle overlay singleton
+    ".options-cell-handle",
+    // table-view row handle
+    ".table-view-cell"
+  ].join(", ");
+  var INLINE_REF_SELECTOR = ".lineitem-ref, .lineitem-ref-title, .lineitem-lineref";
   var DEFAULT_SETTINGS = Object.freeze({
     version: 1,
     recallApiKey: "",
@@ -1797,6 +1811,7 @@ var plugins = (() => {
         this.ui.injectCSS(this._css());
       });
       this._safe("register nav buttons", () => this._registerNavigationButtons());
+      this._safe("register status cell", () => this._registerStatusCellRenderer());
       this._safe("register settings panel", () => this._registerSettingsPanel());
       this._safe("register events", () => this._registerEvents());
       this._safe("attach editor observer", () => this._attachEditorObserver());
@@ -1844,6 +1859,53 @@ var plugins = (() => {
         onlyWhenExpanded: true,
         onClick: /* @__PURE__ */ __name(({ record }) => void this._syncRecord(record, { summarize: true }), "onClick")
       });
+    }
+    /**
+     * Renders the per-row Transcribe action inside the Recall Status cell.
+     *
+     * properties.render() returns a FRESH element and Thymer owns insertion, so this is
+     * inherently idempotent — unlike decorating host DOM, it cannot duplicate or orphan a
+     * node on re-render. It is also why the button never goes near the row drag handle.
+     */
+    _registerStatusCellRenderer() {
+      if (!this.properties || !this.properties.render) return;
+      const render = /* @__PURE__ */ __name(({ record, view }) => this._renderStatusCell(record, view), "render");
+      const names = [FIELDS.STATUS];
+      const field = this._fieldById(FIELDS.STATUS);
+      if (field && field.label && field.label !== FIELDS.STATUS) names.push(field.label);
+      for (const name of names) {
+        try {
+          this.properties.render(name, render);
+        } catch {
+        }
+      }
+    }
+    /** @returns {HTMLElement|null} null = let Thymer render the property normally. */
+    _renderStatusCell(record, view) {
+      if (!record) return null;
+      if (!view || String(view.type || "").toLowerCase() !== "table") return null;
+      const wrap = document.createElement("span");
+      wrap.className = `${ROOT_CLASS}__cell`;
+      const statusText = this._text(record, FIELDS.STATUS);
+      if (statusText) {
+        const chip = document.createElement("span");
+        chip.className = `${ROOT_CLASS}__cell-status`;
+        chip.textContent = statusText;
+        wrap.appendChild(chip);
+      }
+      const state = this._recordVisualState(record);
+      if (state.kind === "idle") {
+        const btn = this.ui.createButton({
+          icon: "microphone",
+          label: "Transcribe",
+          onClick: /* @__PURE__ */ __name(() => void this._startBot(record), "onClick")
+        });
+        btn.classList.add(`${ROOT_CLASS}__cell-button`);
+        btn.addEventListener("mousedown", (ev) => ev.stopPropagation());
+        btn.addEventListener("click", (ev) => ev.stopPropagation());
+        wrap.appendChild(btn);
+      }
+      return wrap;
     }
     _registerSettingsPanel() {
       this._commandItem = this.ui.addCommandPaletteCommand({
@@ -2540,18 +2602,31 @@ ${transcriptText}`
       });
       this._decorateInlineRefs(root);
     }
+    /**
+     * Structural guids are not real inline references: journal date-group headers
+     * ("nest-...") and the open page's own title node both carry a data-guid.
+     */
+    _isStructuralGuid(guid) {
+      if (!guid) return true;
+      if (guid.startsWith("nest-")) return true;
+      if (this._activeRecordGuid && guid === this._activeRecordGuid) return true;
+      return false;
+    }
     _decorateInlineRefs(root = this._observedRoot || document.body) {
       if (!root || !this._recordsByGuid.size) return;
       const leaves = root.querySelectorAll("span[data-guid]");
       for (const leaf of leaves) {
         if (!(leaf instanceof HTMLElement)) continue;
+        if (!leaf.closest(EDITOR_SCOPE)) continue;
+        if (leaf.closest(INLINE_SKIP_SELECTOR)) continue;
         if (leaf.querySelector("[data-guid]")) continue;
-        if (leaf.closest(".sidebar") || leaf.closest(".tps-panel")) continue;
         const guid = leaf.getAttribute("data-guid");
         if (!guid || !this._recordsByGuid.has(guid)) continue;
-        const next = leaf.nextElementSibling;
+        if (this._isStructuralGuid(guid)) continue;
+        const anchor = leaf.closest(INLINE_REF_SELECTOR) || leaf;
+        const next = anchor.nextElementSibling;
         if (next && next.classList && next.classList.contains(INLINE_BUTTON_CLASS) && next.getAttribute("data-guid") === guid) {
-          leaf.setAttribute(INLINE_APPLIED_ATTR, guid);
+          anchor.setAttribute(INLINE_APPLIED_ATTR, guid);
           continue;
         }
         const record = this._recordsByGuid.get(guid);
@@ -2569,8 +2644,8 @@ ${transcriptText}`
           ev.stopPropagation();
           void this._startBot(this._recordsByGuid.get(guid));
         });
-        leaf.insertAdjacentElement("afterend", btn);
-        leaf.setAttribute(INLINE_APPLIED_ATTR, guid);
+        anchor.insertAdjacentElement("afterend", btn);
+        anchor.setAttribute(INLINE_APPLIED_ATTR, guid);
       }
     }
     _recordTitle(record) {
@@ -2841,6 +2916,21 @@ ${transcriptText}`
 			.${ROOT_CLASS}__inline-button:hover {
 				border-color: var(--tps-accent, currentColor);
 				color: var(--tps-accent, currentColor);
+			}
+			.${ROOT_CLASS}__cell {
+				display: inline-flex;
+				align-items: center;
+				gap: 8px;
+				min-width: 0;
+			}
+			.${ROOT_CLASS}__cell-status {
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+				color: var(--text-muted, currentColor);
+			}
+			.${ROOT_CLASS}__cell-button {
+				flex: none;
 			}
 			.${ROOT_CLASS}__nav-label {
 				display: inline-flex;
