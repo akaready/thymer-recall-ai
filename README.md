@@ -106,6 +106,8 @@ GET recordings[].media_shortcuts.transcript.data.download_url from the bot respo
 
 The default interval is 30 seconds. You can also click `Sync` later on a Meeting record with a `Recall Bot ID` to fetch the final transcript and generate the summary.
 
+> **Kill switch note:** the toggle in the settings-panel header disables the whole plugin at runtime — including transcript polling. A meeting recorded while the plugin is disabled won't stream into Thymer until you re-enable and `Sync`.
+
 When `Bridge URL` is set, the plugin also asks Recall to send real-time `transcript.data` events to `POST /api/recall/realtime` on the bridge. The bridge keeps a short transcript buffer so polling can write live speaker-attributed transcript lines into Thymer while the meeting is running. Bind a Cloudflare KV namespace named `RECALL_TRANSCRIPTS` if you want live updates to survive Worker isolate changes; final post-meeting transcript and summary polling works without KV. Recall perfect diarization is enabled with `recording_config.transcript.diarization.use_separate_streams_when_available`.
 
 
