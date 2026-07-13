@@ -32,7 +32,7 @@ Enjoy! 🙏
 ## 📋 Fields
 
 - `Meeting URL` is the meeting link sent to Recall.
-- `Meeting Time` is optional — it's when the meeting starts, which is also when the bot walks in
+- `Date` is optional — it's when the meeting starts, which is also when the bot walks in
   (sent to Recall as `join_at`). Leave it empty to send a bot immediately. There is deliberately
   only this one field: the plugin never sends a bot in early, so "when the meeting starts" and
   "when the bot joins" are the same moment.
@@ -97,7 +97,7 @@ Put the bridge address and both keys into the **Connection** section of the sett
 
 Add a meeting link to a Meeting record. What the button says depends on when the meeting is:
 
-| `Meeting Time` | Button | What happens |
+| `Date` | Button | What happens |
 | --- | --- | --- |
 | Empty, or **under 10 min** away | **Join Now** | The notetaker joins **immediately**. |
 | **10+ minutes** away | **Schedule Bot** | The notetaker is **booked** and joins by itself when the meeting starts. A **Join now** button sits next to it if you'd rather send one in early anyway. |
@@ -108,7 +108,7 @@ says to use sparingly and doesn't promise will be punctual. Ad-hoc is still the 
 "I'm in a meeting right now" — which is why **Join Now** is always one click away.
 
 Want it fully hands-off? Turn on **Send the bot automatically to scheduled meetings** in settings
-(off by default) and any meeting with a `Meeting Time` 10+ minutes out gets a notetaker with no
+(off by default) and any meeting with a `Date` 10+ minutes out gets a notetaker with no
 click at all. It deliberately never auto-sends for imminent meetings, so a bot is never billed
 sitting in an empty room.
 

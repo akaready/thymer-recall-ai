@@ -2870,7 +2870,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.4.0";
+  var PLUGIN_VERSION = "1.4.1";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3608,7 +3608,7 @@ ${report}
     }
     /**
      * @param {object} record
-     * @param {{immediate?: boolean}} [opts] immediate: ignore Meeting Time and send the bot in
+     * @param {{immediate?: boolean}} [opts] immediate: ignore the Date and send the bot in
      *   right now. Lets you override a scheduled meeting without clearing the field.
      */
     async _startBot(record, { immediate: immediate2 = false } = {}) {
@@ -4067,7 +4067,7 @@ ${transcriptText}`
       }, 300);
     }
     /**
-     * Opt-in (autoSchedule, default off): book a bot for any meeting whose Meeting Time is far
+     * Opt-in (autoSchedule, default off): book a bot for any meeting whose Date is far
      * enough out that Recall treats it as a scheduled bot. Deliberately never fires for
      * imminent/past meetings — an auto-sent ad-hoc bot would walk into a room nobody is in yet
      * and bill for it.
@@ -4325,7 +4325,7 @@ ${transcriptText}`
               type: "checkbox",
               name: "autoSchedule",
               label: "Send the bot automatically to scheduled meetings",
-              desc: "When a Meeting has a Meeting Time at least 10 minutes away, book the notetaker without waiting for a click. Meetings starting sooner still need a click, so a bot is never sent into a room early. Each bot uses Recall credits.",
+              desc: "When a Meeting has a Date at least 10 minutes away, book the notetaker without waiting for a click. Meetings starting sooner still need a click, so a bot is never sent into a room early. Each bot uses Recall credits.",
               checked: !!draft.autoSchedule,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("autoSchedule", !!event.target.checked, { rerender: true }), "onChange")
             }),
@@ -4419,7 +4419,7 @@ ${transcriptText}`
         h(
           "li",
           {},
-          "Add a meeting link to a Meeting record and click Join Now \u2014 the notetaker walks in straight away. If you also set a Meeting Time 10+ minutes out, the button becomes Schedule Bot instead and Recall sends the notetaker in on its own when the meeting starts. Either way the transcript arrives as people talk, and the summary is written once the meeting ends."
+          "Add a meeting link to a Meeting record and click Join Now \u2014 the notetaker walks in straight away. If you also set a Date 10+ minutes out, the button becomes Schedule Bot instead and Recall sends the notetaker in on its own when the meeting starts. Either way the transcript arrives as people talk, and the summary is written once the meeting ends."
         )
       );
     }
