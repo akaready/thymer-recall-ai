@@ -2416,7 +2416,7 @@ ${report}
     return wrap;
   }
   __name(renderPluginHeaderHelper, "renderPluginHeaderHelper");
-  function pluginHeaderFromConfig(conf, { version, helper, helperOpen, helperDefaultOpen, onHelperToggle, killSwitch, feedback } = {}) {
+  function pluginHeaderFromConfig(conf, { version, helper, helperOpen, helperDefaultOpen, onHelperToggle, killSwitch, feedback, scope } = {}) {
     const resolvedHelper = helper ?? conf.instructions;
     return pluginHeader({
       title: conf.name || "",
@@ -2432,7 +2432,8 @@ ${report}
       repository: conf.repository,
       coffee: conf.coffee,
       killSwitch,
-      feedback
+      feedback,
+      scope
     });
   }
   __name(pluginHeaderFromConfig, "pluginHeaderFromConfig");
