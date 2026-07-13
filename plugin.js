@@ -2870,7 +2870,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.4.1";
+  var PLUGIN_VERSION = "1.5.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -2909,6 +2909,7 @@ ${report}
     anthropicModel: "claude-sonnet-4-6",
     bridgeUrl: "",
     meetingUrlFieldId: "",
+    joinAtFieldId: "",
     transcriptFieldId: "",
     summaryFieldId: "",
     botImageUrl: "",
@@ -2935,6 +2936,7 @@ ${report}
       anthropicModel: str("anthropicModel"),
       bridgeUrl: str("bridgeUrl"),
       meetingUrlFieldId: str("meetingUrlFieldId"),
+      joinAtFieldId: str("joinAtFieldId"),
       transcriptFieldId: str("transcriptFieldId"),
       summaryFieldId: str("summaryFieldId"),
       botImageUrl: str("botImageUrl"),
@@ -3185,7 +3187,8 @@ ${report}
         wrap.appendChild(chip);
       }
       const state = this._recordVisualState(record);
-      if (state.kind === "idle" || state.kind === "schedulable") {
+      const sendable = (state.kind === "idle" || state.kind === "schedulable") && !!this._meetingUrl(record);
+      if (sendable) {
         const cellButton = /* @__PURE__ */ __name((icon, label, opts) => {
           const btn = this.ui.createButton({
             icon,
@@ -3608,7 +3611,7 @@ ${report}
     }
     /**
      * @param {object} record
-     * @param {{immediate?: boolean}} [opts] immediate: ignore the Date and send the bot in
+     * @param {{immediate?: boolean}} [opts] immediate: ignore Join At and send the bot in
      *   right now. Lets you override a scheduled meeting without clearing the field.
      */
     async _startBot(record, { immediate: immediate2 = false } = {}) {
@@ -4008,6 +4011,7 @@ ${transcriptText}`
     }
     _mappingSettingFor(field) {
       if (field === FIELDS.MEETING_URL) return "meetingUrlFieldId";
+      if (field === FIELDS.JOIN_AT) return "joinAtFieldId";
       if (field === FIELDS.TRANSCRIPT) return "transcriptFieldId";
       if (field === FIELDS.SUMMARY) return "summaryFieldId";
       return "";
@@ -4067,7 +4071,7 @@ ${transcriptText}`
       }, 300);
     }
     /**
-     * Opt-in (autoSchedule, default off): book a bot for any meeting whose Date is far
+     * Opt-in (autoSchedule, default off): book a bot for any meeting whose Join At time is far
      * enough out that Recall treats it as a scheduled bot. Deliberately never fires for
      * imminent/past meetings — an auto-sent ad-hoc bot would walk into a room nobody is in yet
      * and bill for it.
@@ -4101,7 +4105,7 @@ ${transcriptText}`
       }
     }
     _joinAtIso(record) {
-      const prop = record.prop(FIELDS.JOIN_AT);
+      const prop = this._prop(record, this._mappedFieldId(FIELDS.JOIN_AT));
       if (!prop) return null;
       try {
         const dt = prop.datetime && prop.datetime();
@@ -4300,9 +4304,10 @@ ${transcriptText}`
         }),
         section({
           label: "Field Mapping",
-          hint: "Choose the properties Recall reads and writes. Leave on auto-detect for the default plugin fields.",
+          hint: "Point these at your own properties to retire the built-in ones. Auto-detect uses the plugin defaults.",
           body: [
             this._fieldSelectInput("Meeting URL field", "meetingUrlFieldId", ["url", "text"]),
+            this._fieldSelectInput("Join At field", "joinAtFieldId", ["datetime", "date"]),
             this._fieldSelectInput("Transcript field", "transcriptFieldId", ["text"]),
             this._fieldSelectInput("Summary field", "summaryFieldId", ["text"])
           ]
@@ -4325,7 +4330,7 @@ ${transcriptText}`
               type: "checkbox",
               name: "autoSchedule",
               label: "Send the bot automatically to scheduled meetings",
-              desc: "When a Meeting has a Date at least 10 minutes away, book the notetaker without waiting for a click. Meetings starting sooner still need a click, so a bot is never sent into a room early. Each bot uses Recall credits.",
+              desc: "When a Meeting has a Join At time at least 10 minutes away, book the notetaker without waiting for a click. Meetings starting sooner still need a click, so a bot is never sent into a room early. Each bot uses Recall credits.",
               checked: !!draft.autoSchedule,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("autoSchedule", !!event.target.checked, { rerender: true }), "onChange")
             }),
@@ -4419,7 +4424,7 @@ ${transcriptText}`
         h(
           "li",
           {},
-          "Add a meeting link to a Meeting record and click Join Now \u2014 the notetaker walks in straight away. If you also set a Date 10+ minutes out, the button becomes Schedule Bot instead and Recall sends the notetaker in on its own when the meeting starts. Either way the transcript arrives as people talk, and the summary is written once the meeting ends."
+          "Add a meeting link to a Meeting record and click Join Now \u2014 the notetaker walks in straight away. If you also set a Join At time 10+ minutes out, the button becomes Schedule Bot instead and Recall sends the notetaker in on its own when the meeting starts. Either way the transcript arrives as people talk, and the summary is written once the meeting ends."
         )
       );
     }
