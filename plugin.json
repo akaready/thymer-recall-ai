@@ -3,7 +3,7 @@
 	"name": "Recall.ai Meetings",
 	"icon": "microphone",
 	"description": "Send Recall.ai bots to meeting URLs and stream transcripts and summaries into Thymer.",
-	"instructions": "Three things before your first meeting: a Recall key (it sends the notetaker), a Claude key (it writes the summary), and a bridge — a tiny free helper you put online in about two minutes, because browsers are not allowed to call Recall and Claude directly. The Setup section in this panel walks you through all three with links. After that, put a meeting link on a Meeting record and click Transcribe: the notetaker joins, the transcript arrives as people talk, and the summary is written when the meeting ends.",
+	"instructions": "Three things before your first meeting: a Recall key (it sends the notetaker), a Claude key (it writes the summary), and a bridge — a tiny free helper you put online in about two minutes, because browsers are not allowed to call Recall and Claude directly. The Setup section in this panel walks you through all three with links. After that, put a meeting link on a Meeting record and click Join Now — the notetaker walks straight in. If the meeting is 10+ minutes away, set a Meeting Time instead and the button becomes Schedule Bot, so the notetaker shows up on its own when the meeting starts. Either way the transcript arrives as people talk, and the summary is written when the meeting ends.",
 	"author": "@akaready",
 	"homepage": "https://akaready.com",
 	"repository": "https://github.com/akaready/thymer-recall-ai",
@@ -30,7 +30,7 @@
 		},
 		{
 			"id": "join_at",
-			"label": "Join At",
+			"label": "Meeting Time",
 			"type": "datetime",
 			"icon": "ti-calendar-time",
 			"many": false,

@@ -32,7 +32,10 @@ Enjoy! 🙏
 ## 📋 Fields
 
 - `Meeting URL` is the meeting link sent to Recall.
-- `Join At` is optional; when set, it is passed as Recall `join_at`.
+- `Meeting Time` is optional — it's when the meeting starts, which is also when the bot walks in
+  (sent to Recall as `join_at`). Leave it empty to send a bot immediately. There is deliberately
+  only this one field: the plugin never sends a bot in early, so "when the meeting starts" and
+  "when the bot joins" are the same moment.
 - `Transcript` receives the fetched Recall transcript.
 - `Summary` receives the Claude summary.
 - `Recall Bot ID`, `Recall Status`, and `Last Error` track integration state.
@@ -90,12 +93,26 @@ no secrets.
 
 Put the bridge address and both keys into the **Connection** section of the settings panel.
 
-### 5. Transcribe a meeting
+### 5. Send the notetaker
 
-Add a meeting link to a Meeting record and click **Transcribe**. The notetaker joins, the transcript
-arrives as people talk, and the summary is written once the meeting ends.
+Add a meeting link to a Meeting record. What the button says depends on when the meeting is:
 
-You can also start one from the **Recall Status** column in the table view, or from the microphone
+| `Meeting Time` | Button | What happens |
+| --- | --- | --- |
+| Empty, or **under 10 min** away | **Join Now** | The notetaker joins **immediately**. |
+| **10+ minutes** away | **Schedule Bot** | The notetaker is **booked** and joins by itself when the meeting starts. A **Join now** button sits next to it if you'd rather send one in early anyway. |
+
+Why the 10-minute line? It's Recall's, not ours: a bot booked 10+ minutes ahead is a *scheduled*
+bot, which Recall **guarantees** joins on time. Anything sooner is an *ad-hoc* bot, which Recall
+says to use sparingly and doesn't promise will be punctual. Ad-hoc is still the right call for
+"I'm in a meeting right now" — which is why **Join Now** is always one click away.
+
+Want it fully hands-off? Turn on **Send the bot automatically to scheduled meetings** in settings
+(off by default) and any meeting with a `Meeting Time` 10+ minutes out gets a notetaker with no
+click at all. It deliberately never auto-sends for imminent meetings, so a bot is never billed
+sitting in an empty room.
+
+You can also send one from the **Recall Status** column in the table view, or from the microphone
 button on an inline reference to a Meeting record in the editor.
 
 &nbsp;

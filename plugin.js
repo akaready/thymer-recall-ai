@@ -2918,6 +2918,7 @@ ${report}
     joinChatMessage: "This meeting is being recorded and transcribed.",
     sendJoinChatMessage: true,
     pollSeconds: 30,
+    autoSchedule: false,
     autoSummarize: true,
     summaryPrompt: "Summarize this meeting transcript for a Thymer note. Include: 1) a concise overview, 2) decisions made, 3) action items with owners when mentioned, and 4) open questions. Keep the output skimmable and factual."
   });
@@ -2941,6 +2942,7 @@ ${report}
       joinChatMessage: str("joinChatMessage"),
       sendJoinChatMessage: bool("sendJoinChatMessage"),
       pollSeconds: clampNumber(src.pollSeconds, 10, 300, DEFAULT_SETTINGS.pollSeconds),
+      autoSchedule: bool("autoSchedule"),
       autoSummarize: bool("autoSummarize"),
       summaryPrompt: str("summaryPrompt")
     };
@@ -2979,6 +2981,7 @@ ${report}
     ["claude-sonnet-5", "Claude Sonnet 5 \u2014 higher quality"],
     ["claude-opus-4-8", "Claude Opus 4.8 \u2014 most capable"]
   ]);
+  var SCHEDULED_LEAD_MS = 10 * 60 * 1e3;
   var DONE_STATUSES = /* @__PURE__ */ new Set(["done", "bot.done", "recording_done"]);
   var FATAL_STATUSES = /* @__PURE__ */ new Set(["fatal", "bot.fatal", "call_ended_by_host", "bot_rejected"]);
   var TELEMETRY_ENDPOINT = "https://thymer-plugins.goatcounter.com/count";
@@ -3090,6 +3093,7 @@ ${report}
         await this._refreshRecordIndex();
         await this._restorePolling();
         this._decorateInlineRefs();
+        this._autoScheduleSweep();
       });
       this._log("loaded", { settingsLoaded: !!this._settings });
     }
@@ -3107,6 +3111,7 @@ ${report}
       this._detachSettingsLifecycle = null;
       this._recordsByGuid = /* @__PURE__ */ new Map();
       this._pollers = /* @__PURE__ */ new Map();
+      this._autoScheduled = /* @__PURE__ */ new Set();
       this._activeRecordGuid = "";
       this._settingsStore = createSettingsStore(this, {
         slug: "recall-ai",
@@ -3128,10 +3133,10 @@ ${report}
     }
     _registerNavigationButtons() {
       this._navButton = this.addCollectionNavigationButton({
-        label: "Transcribe",
+        label: "Join Now",
         htmlLabel: navButtonLabel("idle"),
         icon: "microphone",
-        tooltip: "Send the Recall.ai transcriber to this meeting",
+        tooltip: "Send the notetaker into this meeting now",
         onlyWhenExpanded: false,
         onClick: /* @__PURE__ */ __name(({ record }) => {
           this._activeRecordGuid = record && record.guid || "";
@@ -3180,16 +3185,22 @@ ${report}
         wrap.appendChild(chip);
       }
       const state = this._recordVisualState(record);
-      if (state.kind === "idle") {
-        const btn = this.ui.createButton({
-          icon: "microphone",
-          label: "Transcribe",
-          onClick: /* @__PURE__ */ __name(() => void this._startBot(record), "onClick")
-        });
-        btn.classList.add(`${ROOT_CLASS}__cell-button`);
-        btn.addEventListener("mousedown", (ev) => ev.stopPropagation());
-        btn.addEventListener("click", (ev) => ev.stopPropagation());
-        wrap.appendChild(btn);
+      if (state.kind === "idle" || state.kind === "schedulable") {
+        const cellButton = /* @__PURE__ */ __name((icon, label, opts) => {
+          const btn = this.ui.createButton({
+            icon,
+            label,
+            onClick: /* @__PURE__ */ __name(() => void this._startBot(record, opts), "onClick")
+          });
+          btn.classList.add(`${ROOT_CLASS}__cell-button`);
+          btn.addEventListener("mousedown", (ev) => ev.stopPropagation());
+          btn.addEventListener("click", (ev) => ev.stopPropagation());
+          return btn;
+        }, "cellButton");
+        wrap.appendChild(cellButton(state.icon, state.label, {}));
+        if (state.kind === "schedulable") {
+          wrap.appendChild(cellButton("microphone", "Join now", { immediate: true }));
+        }
       }
       return wrap;
     }
@@ -3595,7 +3606,12 @@ ${report}
       const el2 = this._panelEl && this._panelEl.querySelector ? this._panelEl.querySelector(".tps-scope") : null;
       if (el2) el2.replaceWith(scopeCluster(this._scopeArgs()));
     }
-    async _startBot(record) {
+    /**
+     * @param {object} record
+     * @param {{immediate?: boolean}} [opts] immediate: ignore Meeting Time and send the bot in
+     *   right now. Lets you override a scheduled meeting without clearing the field.
+     */
+    async _startBot(record, { immediate: immediate2 = false } = {}) {
       if (!record) return this._toast("Open a Meeting record first", "The Recall.ai button needs an active record in this collection.");
       if (!this._settings.recallApiKey) return this._toast("Recall API key required", "Open Plugin: Recall.ai Meetings and add a Recall API key.");
       const meetingUrl = this._meetingUrl(record);
@@ -3625,7 +3641,7 @@ ${report}
       }
     }
     async _createRecallBot(record, meetingUrl) {
-      const payload = this._createBotPayload(record, meetingUrl);
+      const payload = this._createBotPayload(record, meetingUrl, { immediate });
       if (this._bridgeUrl()) {
         return await this._bridgeJson("/api/recall/bots", {
           recallApiKey: this._settings.recallApiKey,
@@ -3645,7 +3661,7 @@ ${report}
       if (!response.ok) throw new Error(recallError(json, response.status));
       return json;
     }
-    _createBotPayload(record, meetingUrl) {
+    _createBotPayload(record, meetingUrl, { immediate: immediate2 = false } = {}) {
       const payload = {
         meeting_url: meetingUrl,
         bot_name: this._settings.botName || DEFAULT_SETTINGS.botName,
@@ -3676,7 +3692,7 @@ ${report}
           events: ["transcript.data", "transcript.partial_data"]
         }];
       }
-      const joinAt = this._joinAtIso(record);
+      const joinAt = immediate2 ? null : this._joinAtIso(record);
       if (joinAt) payload.join_at = joinAt;
       if (this._settings.sendJoinChatMessage && this._settings.joinChatMessage) {
         payload.chat = {
@@ -3891,13 +3907,26 @@ ${transcriptText}`
       } catch {
       }
     }
+    /** Join At as epoch ms, or null when unset/unparseable. */
+    _joinAtMs(record) {
+      const iso = this._joinAtIso(record);
+      if (!iso) return null;
+      const ms = Date.parse(iso);
+      return Number.isFinite(ms) ? ms : null;
+    }
+    /** True when Join At is far enough out that Recall treats it as a scheduled bot. */
+    _isScheduledDispatch(record) {
+      const ms = this._joinAtMs(record);
+      return ms != null && ms - Date.now() >= SCHEDULED_LEAD_MS;
+    }
     _recordVisualState(record) {
-      if (!record) return {
+      const IDLE = {
         kind: "idle",
         icon: "microphone",
-        label: "Transcribe",
-        tooltip: "Send the Recall.ai transcriber to this meeting"
+        label: "Join Now",
+        tooltip: "Send the notetaker into this meeting now"
       };
+      if (!record) return IDLE;
       const status = this._text(record, FIELDS.STATUS).toLowerCase();
       const botId = this._text(record, FIELDS.BOT_ID);
       if (status === "summarizing") return {
@@ -3912,18 +3941,25 @@ ${transcriptText}`
         label: "Processing",
         tooltip: "Waiting for Recall.ai to finish the transcript"
       };
+      if (botId && this._joinAtMs(record) > Date.now() && !isTerminalStatus(status) && status !== "error") return {
+        kind: "scheduled",
+        icon: "clock",
+        label: "Scheduled",
+        tooltip: "The notetaker is booked and will join when the meeting starts"
+      };
       if (botId && !isTerminalStatus(status) && status !== "error") return {
         kind: "recording",
         icon: "circle-dot",
         label: "Recording",
         tooltip: "Recall.ai bot is in or joining this meeting"
       };
-      return {
-        kind: "idle",
-        icon: "microphone",
-        label: "Transcribe",
-        tooltip: "Send the Recall.ai transcriber to this meeting"
+      if (this._isScheduledDispatch(record)) return {
+        kind: "schedulable",
+        icon: "calendar-time",
+        label: "Schedule Bot",
+        tooltip: "Book the notetaker now; it joins when the meeting starts"
       };
+      return IDLE;
     }
     async _restorePolling() {
       const records = this._recordsByGuid && this._recordsByGuid.values ? this._recordsByGuid.values() : [];
@@ -4024,8 +4060,34 @@ ${transcriptText}`
       if (this._recordRefreshTimer) clearTimeout(this._recordRefreshTimer);
       this._recordRefreshTimer = setTimeout(() => {
         this._recordRefreshTimer = null;
-        void this._refreshRecordIndex().then(() => this._decorateInlineRefs());
+        void this._refreshRecordIndex().then(() => {
+          this._decorateInlineRefs();
+          this._autoScheduleSweep();
+        });
       }, 300);
+    }
+    /**
+     * Opt-in (autoSchedule, default off): book a bot for any meeting whose Meeting Time is far
+     * enough out that Recall treats it as a scheduled bot. Deliberately never fires for
+     * imminent/past meetings — an auto-sent ad-hoc bot would walk into a room nobody is in yet
+     * and bill for it.
+     */
+    _autoScheduleSweep() {
+      if (this._disabled) return;
+      if (!this._settings.autoSchedule) return;
+      if (!this._settings.recallApiKey) return;
+      for (const record of this._recordsByGuid.values()) void this._maybeAutoSchedule(record);
+    }
+    async _maybeAutoSchedule(record) {
+      const guid = record && record.guid;
+      if (!guid || this._autoScheduled.has(guid)) return;
+      if (this._text(record, FIELDS.BOT_ID)) return;
+      if (!this._meetingUrl(record)) return;
+      if (!this._isScheduledDispatch(record)) return;
+      this._autoScheduled.add(guid);
+      this._log("auto-scheduling bot", { recordGuid: guid });
+      await this._startBot(record);
+      if (!this._text(record, FIELDS.BOT_ID)) this._autoScheduled.delete(guid);
     }
     async _refreshRecordIndex() {
       try {
@@ -4261,6 +4323,14 @@ ${transcriptText}`
             this._numberInput("Poll every seconds", "pollSeconds", 10, 300),
             optionRow({
               type: "checkbox",
+              name: "autoSchedule",
+              label: "Send the bot automatically to scheduled meetings",
+              desc: "When a Meeting has a Meeting Time at least 10 minutes away, book the notetaker without waiting for a click. Meetings starting sooner still need a click, so a bot is never sent into a room early. Each bot uses Recall credits.",
+              checked: !!draft.autoSchedule,
+              onChange: /* @__PURE__ */ __name((event) => this._updateSetting("autoSchedule", !!event.target.checked, { rerender: true }), "onChange")
+            }),
+            optionRow({
+              type: "checkbox",
               name: "sendJoinChatMessage",
               label: "Send join chat message",
               desc: "Notify participants when the bot joins, when supported by the meeting platform.",
@@ -4349,7 +4419,7 @@ ${transcriptText}`
         h(
           "li",
           {},
-          "Add a meeting link to a Meeting record and click Transcribe. The bot joins, the transcript arrives as people talk, and the summary is written once the meeting ends."
+          "Add a meeting link to a Meeting record and click Join Now \u2014 the notetaker walks in straight away. If you also set a Meeting Time 10+ minutes out, the button becomes Schedule Bot instead and Recall sends the notetaker in on its own when the meeting starts. Either way the transcript arrives as people talk, and the summary is written once the meeting ends."
         )
       );
     }
@@ -4807,7 +4877,13 @@ ${transcriptText}`
     if (kind === "processing") {
       return `<span class="${ROOT_CLASS}__nav-label"><span class="${ROOT_CLASS}__nav-spinner" aria-hidden="true"></span><span>Processing</span></span>`;
     }
-    return "Transcribe";
+    if (kind === "scheduled") {
+      return `<span class="${ROOT_CLASS}__nav-label"><span>Scheduled</span></span>`;
+    }
+    if (kind === "schedulable") {
+      return "Schedule Bot";
+    }
+    return "Join Now";
   }
   __name(navButtonLabel, "navButtonLabel");
   return __toCommonJS(plugin_exports);
