@@ -2662,8 +2662,215 @@ ${report}
   }
   __name(setPluginDisabled, "setPluginDisabled");
 
+  // ../../shared/plugin-settings.js
+  function createSettingsStore(plugin, {
+    slug,
+    key = "settings",
+    version,
+    normalize = /* @__PURE__ */ __name((raw) => raw && typeof raw === "object" ? raw : {}, "normalize"),
+    scopeKey = null,
+    readSynced = null,
+    pickSynced = null
+  }) {
+    const readSyncedBlob = readSynced || ((custom) => custom?.[key]);
+    const pickSyncedSubset = pickSynced || ((s) => s);
+    let current = {};
+    let diverged = false;
+    let pushInFlight = false;
+    const workspaceGuid = /* @__PURE__ */ __name(() => {
+      try {
+        const guid = plugin.getWorkspaceGuid?.();
+        if (guid) return guid;
+      } catch {
+      }
+      return "default";
+    }, "workspaceGuid");
+    const storageKey = /* @__PURE__ */ __name(() => {
+      const scope = scopeKey ? `/${scopeKey()}` : "";
+      return `${slug}/${workspaceGuid()}${scope}/settings`;
+    }, "storageKey");
+    const readCustom = /* @__PURE__ */ __name(() => {
+      try {
+        const conf = plugin.getConfiguration?.();
+        const custom = conf && conf.custom;
+        return custom && typeof custom === "object" ? (
+          /** @type {Record<string, unknown>} */
+          custom
+        ) : {};
+      } catch {
+        return {};
+      }
+    }, "readCustom");
+    const readLocalRaw = /* @__PURE__ */ __name(() => {
+      try {
+        const raw = localStorage.getItem(storageKey());
+        if (raw === null) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : {};
+      } catch {
+        return null;
+      }
+    }, "readLocalRaw");
+    const normalizedStringify = /* @__PURE__ */ __name((raw) => JSON.stringify(normalize(raw)), "normalizedStringify");
+    const store = {
+      /** Read-only: never writes either store. */
+      load() {
+        const local = readLocalRaw();
+        if (local !== null) {
+          current = normalize(local);
+          diverged = true;
+        } else {
+          current = normalize(readSyncedBlob(readCustom()) || {});
+          diverged = false;
+        }
+        return { settings: current, diverged };
+      },
+      get() {
+        return current;
+      },
+      isDiverged() {
+        return diverged;
+      },
+      /**
+       * Every edit is device-local. First edit snapshots the FULL settings
+       * (inherited values of untouched keys survive). localStorage throwing
+       * (private mode) leaves the edit in memory for the session — still
+       * reported diverged so the pill/push UI works, and push still syncs.
+       */
+      update(patch) {
+        current = normalize({ ...current, ...patch });
+        if (normalizedStringify(readSyncedBlob(readCustom())) === JSON.stringify(current)) {
+          try {
+            localStorage.removeItem(storageKey());
+          } catch {
+          }
+          diverged = false;
+          return { settings: current, diverged };
+        }
+        diverged = true;
+        try {
+          localStorage.setItem(storageKey(), JSON.stringify(current));
+        } catch {
+        }
+        return { settings: current, diverged };
+      },
+      /**
+       * The explicit ↑ "Apply to all devices": ONE saveConfiguration (which
+       * reloads the plugin), then the local blob is cleared so this device
+       * goes back to following the synced config. Resolves true when the
+       * settings are known to be in synced config (pushed or already equal).
+       */
+      async pushToAll() {
+        if (pushInFlight) return false;
+        pushInFlight = true;
+        try {
+          const api = await resolveConfigApi(plugin);
+          if (!api || typeof api.saveConfiguration !== "function") return false;
+          let conf = {};
+          try {
+            conf = api.getConfiguration?.() || plugin.getConfiguration?.() || {};
+          } catch {
+            return false;
+          }
+          if (typeof conf.name !== "string" || !conf.name.trim()) return false;
+          const custom = conf.custom && typeof conf.custom === "object" ? conf.custom : {};
+          const subset = pickSyncedSubset(normalize(current));
+          try {
+            localStorage.removeItem(storageKey());
+          } catch {
+          }
+          diverged = false;
+          try {
+            if (normalizedStringify(readSyncedBlob(
+              /** @type {any} */
+              custom
+            )) !== normalizedStringify(subset)) {
+              await api.saveConfiguration(configWithPluginVersion(conf, { [key]: subset }, version));
+            }
+          } catch (err) {
+            try {
+              localStorage.setItem(storageKey(), JSON.stringify(current));
+            } catch {
+            }
+            diverged = true;
+            throw err;
+          }
+          return true;
+        } catch {
+          return false;
+        } finally {
+          pushInFlight = false;
+        }
+      },
+      /** The ↺ "Discard device changes": drop local, re-adopt synced. */
+      discardLocal() {
+        try {
+          localStorage.removeItem(storageKey());
+        } catch {
+        }
+        current = normalize(readSyncedBlob(readCustom()) || {});
+        diverged = false;
+        return current;
+      },
+      /**
+       * For folding into `setPluginDisabled(plugin, off, version, customPatch)`
+       * so a kill-switch toggle carries staged device settings in the SAME
+       * save (one reload, no race — CLAUDE.md rule). Call markFlushed() after
+       * that save succeeds if the fold should count as a push.
+       */
+      pendingCustomPatch() {
+        return diverged ? { [key]: pickSyncedSubset(normalize(current)) } : {};
+      },
+      markFlushed() {
+        try {
+          localStorage.removeItem(storageKey());
+        } catch {
+        }
+        diverged = false;
+      },
+      /**
+       * Live-follow for non-diverged devices: when another device pushes,
+       * `global-plugin.updated` fires here; re-read the synced blob and, if
+       * it changed semantically, hand the fresh settings to the plugin's
+       * central apply (which each plugin already guards with its kill
+       * switch). Returns a detach function for onUnload.
+       */
+      attachLifecycle({ onRemoteChange } = {}) {
+        const handlerIds = [];
+        try {
+          const id = plugin.events?.on?.("global-plugin.updated", (event) => {
+            try {
+              if (diverged) return;
+              if (event?.source?.isLocal) return;
+              const guid = plugin.getGuid?.();
+              const eventGuid = event?.pluginGuid || event?.guid || event?.rootId || null;
+              if (eventGuid && guid && eventGuid !== guid) return;
+              const next = normalize(readSyncedBlob(readCustom()) || {});
+              if (JSON.stringify(next) === JSON.stringify(current)) return;
+              current = next;
+              onRemoteChange?.(current);
+            } catch {
+            }
+          });
+          if (id) handlerIds.push(id);
+        } catch {
+        }
+        return () => {
+          for (const id of handlerIds) {
+            try {
+              plugin.events?.off?.(id);
+            } catch {
+            }
+          }
+        };
+      }
+    };
+    return store;
+  }
+  __name(createSettingsStore, "createSettingsStore");
+
   // plugin.js
-  var PLUGIN_VERSION = "1.2.0";
+  var PLUGIN_VERSION = "1.3.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -2713,6 +2920,40 @@ ${report}
     autoSummarize: true,
     summaryPrompt: "Summarize this meeting transcript for a Thymer note. Include: 1) a concise overview, 2) decisions made, 3) action items with owners when mentioned, and 4) open questions. Keep the output skimmable and factual."
   });
+  var SECRET_KEYS = Object.freeze(["recallApiKey", "anthropicApiKey", "botImageData", "botImageName"]);
+  function normalizePrefs(raw) {
+    const src = raw && typeof raw === "object" ? raw : {};
+    const str = /* @__PURE__ */ __name((key) => typeof src[key] === "string" ? src[key] : DEFAULT_SETTINGS[key], "str");
+    const bool = /* @__PURE__ */ __name((key) => typeof src[key] === "boolean" ? src[key] : DEFAULT_SETTINGS[key], "bool");
+    return {
+      version: 1,
+      recallRegion: str("recallRegion"),
+      anthropicModel: str("anthropicModel"),
+      bridgeUrl: str("bridgeUrl"),
+      meetingUrlFieldId: str("meetingUrlFieldId"),
+      transcriptFieldId: str("transcriptFieldId"),
+      summaryFieldId: str("summaryFieldId"),
+      botImageUrl: str("botImageUrl"),
+      botName: str("botName"),
+      joinChatMessage: str("joinChatMessage"),
+      sendJoinChatMessage: bool("sendJoinChatMessage"),
+      pollSeconds: clampNumber(src.pollSeconds, 10, 300, DEFAULT_SETTINGS.pollSeconds),
+      autoSummarize: bool("autoSummarize"),
+      summaryPrompt: str("summaryPrompt")
+    };
+  }
+  __name(normalizePrefs, "normalizePrefs");
+  function normalizeSecrets(raw) {
+    const src = raw && typeof raw === "object" ? raw : {};
+    const str = /* @__PURE__ */ __name((key) => typeof src[key] === "string" ? src[key] : "", "str");
+    return {
+      recallApiKey: str("recallApiKey"),
+      anthropicApiKey: str("anthropicApiKey"),
+      botImageData: str("botImageData"),
+      botImageName: str("botImageName")
+    };
+  }
+  __name(normalizeSecrets, "normalizeSecrets");
   var RECALL_REGIONS = Object.freeze({
     "us-east-1": "https://us-east-1.recall.ai",
     "us-west-2": "https://us-west-2.recall.ai",
@@ -2806,14 +3047,17 @@ ${report}
       this._disabled = readKillSwitch(this);
       this._initState();
       this._safe("load settings", () => {
-        this._settings = this._loadSettings();
-        this._draft = { ...this._settings };
+        this._migrateLegacyLocalSettings();
+        this._secrets = this._loadSecrets();
+        this._prefs = this._settingsStore.load().settings;
+        this._recomputeSettings();
       });
       this._safe("inject css", () => {
         this.ui.injectCSS(PANEL_CSS);
         this.ui.injectCSS(this._css());
       });
       this._safe("register settings panel", () => this._registerSettingsPanel());
+      this._safe("attach settings lifecycle", () => this._registerSettingsLifecycle());
       this._safe("heal mounted panel", () => {
         const staleRoot = document.querySelector(".plg-recall-ai-panel");
         if (staleRoot && staleRoot.parentElement) {
@@ -2847,11 +3091,26 @@ ${report}
       this._observedRoot = null;
       this._attachRetryTimer = null;
       this._recordRefreshTimer = null;
-      this._settingsSaveTimer = null;
+      this._detachSettingsLifecycle = null;
       this._recordsByGuid = /* @__PURE__ */ new Map();
       this._pollers = /* @__PURE__ */ new Map();
       this._activeRecordGuid = "";
-      this._settings = { ...DEFAULT_SETTINGS };
+      this._settingsStore = createSettingsStore(this, {
+        slug: "recall-ai",
+        key: CONFIG_KEY,
+        // synced blob stays at conf.custom.recallAi
+        version: PLUGIN_VERSION,
+        normalize: /* @__PURE__ */ __name((raw) => normalizePrefs(raw), "normalize"),
+        // Per-collection scoping preserved from the legacy key shape.
+        scopeKey: /* @__PURE__ */ __name(() => this.collection && this.collection.getGuid ? this.collection.getGuid() : "collection", "scopeKey")
+      });
+      this._prefs = normalizePrefs(null);
+      this._secrets = normalizeSecrets(null);
+      this._recomputeSettings();
+    }
+    /** Runtime + panel read ONE merged view; prefs and secrets are disjoint key sets. */
+    _recomputeSettings() {
+      this._settings = { ...this._prefs, ...this._secrets };
       this._draft = { ...this._settings };
     }
     _registerNavigationButtons() {
@@ -2987,7 +3246,11 @@ ${report}
       this._settingsPanel = null;
       if (this._attachRetryTimer) clearTimeout(this._attachRetryTimer);
       if (this._recordRefreshTimer) clearTimeout(this._recordRefreshTimer);
-      if (this._settingsSaveTimer) clearTimeout(this._settingsSaveTimer);
+      try {
+        if (this._detachSettingsLifecycle) this._detachSettingsLifecycle();
+      } catch {
+      }
+      this._detachSettingsLifecycle = null;
       for (const poller of this._pollers && this._pollers.values ? this._pollers.values() : []) clearInterval(poller.timer);
       if (this._pollers && this._pollers.clear) this._pollers.clear();
       this._safe("strip inline buttons", () => this._stripInlineButtons());
@@ -2998,67 +3261,169 @@ ${report}
       const next = await this.ui.createPanel(active ? { afterPanel: active } : void 0);
       if (next) next.navigateToCustomType(PANEL_TYPE);
     }
-    _loadSettings() {
-      const conf = this.getConfiguration ? this.getConfiguration() : {};
-      const raw = conf && conf.custom && conf.custom[CONFIG_KEY] ? conf.custom[CONFIG_KEY] : {};
-      const local = this._loadLocalSettings();
-      const settings = { ...DEFAULT_SETTINGS, ...raw, ...local };
-      return {
-        ...settings,
-        version: 1,
-        bridgeUrl: typeof settings.bridgeUrl === "string" ? settings.bridgeUrl : DEFAULT_SETTINGS.bridgeUrl,
-        meetingUrlFieldId: typeof settings.meetingUrlFieldId === "string" ? settings.meetingUrlFieldId : DEFAULT_SETTINGS.meetingUrlFieldId,
-        transcriptFieldId: typeof settings.transcriptFieldId === "string" ? settings.transcriptFieldId : DEFAULT_SETTINGS.transcriptFieldId,
-        summaryFieldId: typeof settings.summaryFieldId === "string" ? settings.summaryFieldId : DEFAULT_SETTINGS.summaryFieldId,
-        botImageUrl: typeof settings.botImageUrl === "string" ? settings.botImageUrl : DEFAULT_SETTINGS.botImageUrl,
-        botImageData: typeof settings.botImageData === "string" ? settings.botImageData : DEFAULT_SETTINGS.botImageData,
-        botImageName: typeof settings.botImageName === "string" ? settings.botImageName : DEFAULT_SETTINGS.botImageName,
-        sendJoinChatMessage: typeof settings.sendJoinChatMessage === "boolean" ? settings.sendJoinChatMessage : DEFAULT_SETTINGS.sendJoinChatMessage,
-        autoSummarize: typeof settings.autoSummarize === "boolean" ? settings.autoSummarize : DEFAULT_SETTINGS.autoSummarize,
-        pollSeconds: clampNumber(settings.pollSeconds, 10, 300, DEFAULT_SETTINGS.pollSeconds)
-      };
-    }
-    _loadLocalSettings() {
+    /**
+     * SECRETS live only in this device's localStorage — intentionally outside
+     * the settings store and outside synced config. Do not fold this key into
+     * any saveConfiguration payload, ever.
+     */
+    _secretsStorageKey() {
+      let workspace = "";
       try {
-        const raw = localStorage.getItem(this._settingsStorageKey());
-        return raw ? JSON.parse(raw) || {} : {};
+        workspace = (this.getWorkspaceGuid ? this.getWorkspaceGuid() : "") || "";
       } catch {
-        return {};
+      }
+      let collection = "";
+      try {
+        collection = (this.collection && this.collection.getGuid ? this.collection.getGuid() : "") || "";
+      } catch {
+      }
+      return `recall-ai/${workspace || "default"}/${collection || "collection"}/secrets`;
+    }
+    _loadSecrets() {
+      try {
+        const raw = localStorage.getItem(this._secretsStorageKey());
+        return normalizeSecrets(raw ? JSON.parse(raw) : null);
+      } catch {
+        return normalizeSecrets(null);
       }
     }
-    _settingsStorageKey() {
-      const workspace = this.getWorkspaceGuid ? this.getWorkspaceGuid() : "workspace";
-      const collection = this.collection && this.collection.getGuid ? this.collection.getGuid() : "collection";
-      return `${CONFIG_KEY}/${workspace}/${collection}/settings`;
+    _saveSecrets() {
+      try {
+        localStorage.setItem(this._secretsStorageKey(), JSON.stringify(this._secrets));
+      } catch (err) {
+        this._toast("Unable to save keys on this device", this._errorMessage(err));
+      }
+    }
+    /**
+     * One-time migration (≤1.2.0 → 1.3.0): settings used to live in a single
+     * device-local blob at `recallAi/<ws>/<coll>/settings`, secrets included,
+     * with nothing synced. Split it — secrets into the local-only secrets
+     * entry, prefs into the shared store's device blob (so this device comes
+     * up "This device"-diverged with its prior settings intact, losslessly) —
+     * then delete the legacy key.
+     */
+    _migrateLegacyLocalSettings() {
+      let workspace = "";
+      try {
+        workspace = (this.getWorkspaceGuid ? this.getWorkspaceGuid() : "") || "";
+      } catch {
+      }
+      let collection = "";
+      try {
+        collection = (this.collection && this.collection.getGuid ? this.collection.getGuid() : "") || "";
+      } catch {
+      }
+      const legacyKey = `${CONFIG_KEY}/${workspace || "workspace"}/${collection || "collection"}/settings`;
+      let raw = null;
+      try {
+        raw = localStorage.getItem(legacyKey);
+      } catch {
+      }
+      if (raw === null) return;
+      let legacy = null;
+      try {
+        legacy = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      try {
+        const secrets = normalizeSecrets(legacy);
+        if (Object.values(secrets).some(Boolean) && localStorage.getItem(this._secretsStorageKey()) === null) {
+          localStorage.setItem(this._secretsStorageKey(), JSON.stringify(secrets));
+        }
+        const prefs = normalizePrefs(legacy);
+        let synced = null;
+        try {
+          const conf = this.getConfiguration ? this.getConfiguration() : {};
+          synced = conf && conf.custom ? conf.custom[CONFIG_KEY] : null;
+        } catch {
+        }
+        const storeKey = `recall-ai/${workspace || "default"}/${collection || "collection"}/settings`;
+        if (JSON.stringify(prefs) !== JSON.stringify(normalizePrefs(synced)) && localStorage.getItem(storeKey) === null) {
+          localStorage.setItem(storeKey, JSON.stringify(prefs));
+        }
+        localStorage.removeItem(legacyKey);
+      } catch {
+      }
     }
     _updateSetting(key, value, { rerender = false } = {}) {
-      const next = key === "pollSeconds" ? clampNumber(value, 10, 300, DEFAULT_SETTINGS.pollSeconds) : value;
-      this._draft = { ...this._draft, [key]: next };
-      this._settings = { ...this._settings, [key]: next };
-      this._scheduleLocalSettingsSave();
+      if (SECRET_KEYS.includes(key)) {
+        this._secrets = normalizeSecrets({ ...this._secrets, [key]: value });
+        this._saveSecrets();
+        this._recomputeSettings();
+        if (rerender) this._renderPanel();
+        return;
+      }
+      const prevPollSeconds = this._prefs.pollSeconds;
+      this._prefs = this._settingsStore.update({ [key]: value }).settings;
+      this._recomputeSettings();
+      if (this._prefs.pollSeconds !== prevPollSeconds) this._restartPollingIntervals();
       if (rerender) this._renderPanel();
+      else this._refreshScopePill();
     }
-    _scheduleLocalSettingsSave() {
-      if (this._settingsSaveTimer) clearTimeout(this._settingsSaveTimer);
-      this._settingsSaveTimer = setTimeout(() => {
-        this._settingsSaveTimer = null;
-        this._flushLocalSettings();
-      }, 450);
+    /**
+     * Live-follow for non-diverged devices. The shared store's own lifecycle
+     * listens for 'global-plugin.updated', but a CollectionPlugin's config
+     * lives on the collection root, whose remote saves fire 'collection.updated'
+     * instead — attach both (the store's is a cheap no-op today), same adopt
+     * path. Registered BEFORE the kill-switch early-return so a disabled
+     * panel still tracks remote pushes.
+     */
+    _registerSettingsLifecycle() {
+      this._detachSettingsLifecycle = this._settingsStore.attachLifecycle({
+        onRemoteChange: /* @__PURE__ */ __name((prefs) => this._onRemoteSettingsChange(prefs), "onRemoteChange")
+      });
+      const on = this.events && this.events.on ? this.events.on.bind(this.events) : null;
+      if (!on) return;
+      this._handlerIds.push(on("collection.updated", (event) => {
+        try {
+          if (this._settingsStore.isDiverged()) return;
+          if (event && event.source && event.source.isLocal) return;
+          const guid = (this.collection && this.collection.getGuid ? this.collection.getGuid() : "") || (this.getGuid ? this.getGuid() : "");
+          if (event && event.collectionGuid && guid && event.collectionGuid !== guid) return;
+          const next = this._settingsStore.load().settings;
+          if (JSON.stringify(next) === JSON.stringify(this._prefs)) return;
+          this._onRemoteSettingsChange(next);
+        } catch {
+        }
+      }));
     }
-    _flushLocalSettings() {
-      if (this._settingsSaveTimer) {
-        clearTimeout(this._settingsSaveTimer);
-        this._settingsSaveTimer = null;
-      }
-      try {
-        const next = { ...this._settings, version: 1, pollSeconds: clampNumber(this._settings.pollSeconds, 10, 300, DEFAULT_SETTINGS.pollSeconds) };
-        localStorage.setItem(this._settingsStorageKey(), JSON.stringify(next));
-        this._settings = next;
-        this._draft = { ...next };
-        this._restartPollingIntervals();
-      } catch (err) {
-        this._toast("Unable to save settings locally", this._errorMessage(err));
-      }
+    /** Adopt remotely pushed prefs (secrets stay device-local), re-apply, re-render. */
+    _onRemoteSettingsChange(prefs) {
+      this._prefs = prefs;
+      this._recomputeSettings();
+      this._restartPollingIntervals();
+      this._renderPanel();
+    }
+    /**
+     * Scope-cluster wiring for the header pill: push = one saveConfiguration
+     * (the reload's hot-reload heal re-renders the panel); discard = two-tap
+     * armed in the shared cluster, then re-adopt synced values here. The pill
+     * reflects synced-prefs divergence only — secrets never influence it.
+     */
+    _scopeArgs() {
+      return {
+        diverged: this._settingsStore.isDiverged(),
+        onPush: /* @__PURE__ */ __name(() => {
+          void this._settingsStore.pushToAll().then((ok) => {
+            if (!ok) return;
+            this._toast("Recall.ai Meetings", "Settings applied to all devices");
+            this._refreshScopePill();
+          });
+        }, "onPush"),
+        onDiscard: /* @__PURE__ */ __name(() => {
+          this._prefs = this._settingsStore.discardLocal();
+          this._recomputeSettings();
+          this._restartPollingIntervals();
+          this._renderPanel();
+          this._toast("Recall.ai Meetings", "Reverted to synced settings");
+        }, "onDiscard")
+      };
+    }
+    /** Swap just the pill cluster — never nukes inputs mid-edit. */
+    _refreshScopePill() {
+      const el2 = this._panelEl && this._panelEl.querySelector ? this._panelEl.querySelector(".tps-scope") : null;
+      if (el2) el2.replaceWith(scopeCluster(this._scopeArgs()));
     }
     async _startBot(record) {
       if (!record) return this._toast("Open a Meeting record first", "The Recall.ai button needs an active record in this collection.");
@@ -3399,6 +3764,7 @@ ${transcriptText}`
       }
     }
     _restartPollingIntervals() {
+      if (this._disabled) return;
       const existing = this._pollers && this._pollers.keys ? Array.from(this._pollers.keys()) : [];
       for (const botId of existing) this._stopPolling(botId);
       void this._restorePolling();
@@ -3675,10 +4041,10 @@ ${transcriptText}`
       this._panelEl.replaceChildren(panel({ pluginClass: `${ROOT_CLASS}-panel` }, [
         pluginHeaderFromConfig(this.getConfiguration(), {
           version: PLUGIN_VERSION,
+          scope: this._scopeArgs(),
           killSwitch: {
             on: !this._disabled,
             onToggle: /* @__PURE__ */ __name((nextOn) => {
-              this._flushLocalSettings();
               void setPluginDisabled(this, !nextOn, PLUGIN_VERSION);
             }, "onToggle")
           },

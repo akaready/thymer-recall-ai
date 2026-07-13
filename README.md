@@ -114,8 +114,14 @@ button on an inline reference to a Meeting record in the editor.
 | **Poll interval** | How often the plugin checks Recall for progress. |
 | **Summary prompt** | The instructions Claude follows when summarizing. |
 
-There is no Save button — edits autosave locally after a short pause, so the plugin never triggers
-Thymer's collection settings preview/save flow.
+There is no Save button — edits apply and persist on this device immediately. The scope pill in the
+panel header shows whether preferences follow the workspace (**All devices**) or this device's own
+edits (**This device**), with push/discard controls to promote or revert them.
+
+**Your API keys and uploaded bot image never sync.** They are stored only on the device where you
+entered them (browser local storage) and are never written into the shared plugin configuration —
+each device you use gets its own keys. Everything else (region, model, field mapping, poll interval,
+prompts, …) can be pushed to all your devices from the scope pill.
 
 &nbsp;
 
