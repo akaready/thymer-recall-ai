@@ -2870,7 +2870,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.3.0";
+  var PLUGIN_VERSION = "1.4.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -2884,6 +2884,7 @@ ${report}
   var ROOT_CLASS = "plg-recall-ai";
   var PANEL_TYPE = "recall-ai-settings";
   var CONFIG_KEY = "recallAi";
+  var SECRETS_CONFIG_KEY = "recallAiSecrets";
   var INLINE_BUTTON_CLASS = `${ROOT_CLASS}__inline-button`;
   var INLINE_APPLIED_ATTR = "data-recall-ai-inline";
   var EDITOR_SCOPE = ".editor-panel";
@@ -2920,7 +2921,9 @@ ${report}
     autoSummarize: true,
     summaryPrompt: "Summarize this meeting transcript for a Thymer note. Include: 1) a concise overview, 2) decisions made, 3) action items with owners when mentioned, and 4) open questions. Keep the output skimmable and factual."
   });
-  var SECRET_KEYS = Object.freeze(["recallApiKey", "anthropicApiKey", "botImageData", "botImageName"]);
+  var API_KEY_FIELDS = Object.freeze(["recallApiKey", "anthropicApiKey"]);
+  var BOT_IMAGE_FIELDS = Object.freeze(["botImageData", "botImageName"]);
+  var SECRET_KEYS = Object.freeze([...API_KEY_FIELDS, ...BOT_IMAGE_FIELDS]);
   function normalizePrefs(raw) {
     const src = raw && typeof raw === "object" ? raw : {};
     const str = /* @__PURE__ */ __name((key) => typeof src[key] === "string" ? src[key] : DEFAULT_SETTINGS[key], "str");
@@ -2954,6 +2957,15 @@ ${report}
     };
   }
   __name(normalizeSecrets, "normalizeSecrets");
+  function normalizeKeySlot(raw) {
+    const src = raw && typeof raw === "object" ? raw : {};
+    const str = /* @__PURE__ */ __name((key) => typeof src[key] === "string" ? src[key] : "", "str");
+    return {
+      recallApiKey: str("recallApiKey"),
+      anthropicApiKey: str("anthropicApiKey")
+    };
+  }
+  __name(normalizeKeySlot, "normalizeKeySlot");
   var RECALL_REGIONS = Object.freeze({
     "us-east-1": "https://us-east-1.recall.ai",
     "us-west-2": "https://us-west-2.recall.ai",
@@ -3052,6 +3064,7 @@ ${report}
         this._prefs = this._settingsStore.load().settings;
         this._recomputeSettings();
       });
+      this._safe("promote api keys", () => void this._promoteLocalKeysToSlot());
       this._safe("inject css", () => {
         this.ui.injectCSS(PANEL_CSS);
         this.ui.injectCSS(this._css());
@@ -3262,9 +3275,9 @@ ${report}
       if (next) next.navigateToCustomType(PANEL_TYPE);
     }
     /**
-     * SECRETS live only in this device's localStorage — intentionally outside
-     * the settings store and outside synced config. Do not fold this key into
-     * any saveConfiguration payload, ever.
+     * Device-local secrets entry: the bot image always, and the API keys only
+     * as a fallback until they are promoted into the per-user synced slot.
+     * Never folded into any saveConfiguration payload.
      */
     _secretsStorageKey() {
       let workspace = "";
@@ -3279,7 +3292,7 @@ ${report}
       }
       return `recall-ai/${workspace || "default"}/${collection || "collection"}/secrets`;
     }
-    _loadSecrets() {
+    _loadLocalSecrets() {
       try {
         const raw = localStorage.getItem(this._secretsStorageKey());
         return normalizeSecrets(raw ? JSON.parse(raw) : null);
@@ -3287,12 +3300,148 @@ ${report}
         return normalizeSecrets(null);
       }
     }
-    _saveSecrets() {
+    /**
+     * Patch-write the device-local entry. Always a PATCH, never a dump of
+     * `this._secrets` — the in-memory view may hold slot-sourced API keys,
+     * and an image edit must not resurrect them into the local entry.
+     */
+    _writeLocalSecretsEntry(patch) {
       try {
-        localStorage.setItem(this._secretsStorageKey(), JSON.stringify(this._secrets));
+        const next = normalizeSecrets({ ...this._loadLocalSecrets(), ...patch });
+        localStorage.setItem(this._secretsStorageKey(), JSON.stringify(next));
       } catch (err) {
-        this._toast("Unable to save keys on this device", this._errorMessage(err));
+        this._toast("Unable to save on this device", this._errorMessage(err));
       }
+    }
+    /** The current user's guid — the official `getActiveUsers()[0]` SDK idiom. */
+    _currentUserGuid() {
+      try {
+        const users = this.data && this.data.getActiveUsers ? this.data.getActiveUsers() : null;
+        const user = users && users[0];
+        return user && typeof user.guid === "string" && user.guid || "";
+      } catch {
+        return "";
+      }
+    }
+    /** This user's synced key slot, or null when unresolvable/absent. */
+    _readSecretsSlot(userGuid = this._currentUserGuid()) {
+      if (!userGuid) return null;
+      try {
+        const conf = this.getConfiguration ? this.getConfiguration() : {};
+        const map = conf && conf.custom ? conf.custom[SECRETS_CONFIG_KEY] : null;
+        const slot = map && typeof map === "object" ? map[userGuid] : null;
+        return slot && typeof slot === "object" ? normalizeKeySlot(slot) : null;
+      } catch {
+        return null;
+      }
+    }
+    /**
+     * The merged in-memory secrets view: API keys from this user's synced slot
+     * (per-field device-local fallback, so a key never vanishes mid-promotion
+     * or when a slot was created elsewhere with only one key), bot image from
+     * this device. With no resolvable user this degrades to exactly the
+     * device-local behavior.
+     */
+    _loadSecrets() {
+      const local = this._loadLocalSecrets();
+      const slot = this._readSecretsSlot();
+      if (!slot) return local;
+      return {
+        ...local,
+        recallApiKey: slot.recallApiKey || local.recallApiKey,
+        anthropicApiKey: slot.anthropicApiKey || local.anthropicApiKey
+      };
+    }
+    /**
+     * Write this user's key slot: read the map from config, spread it, replace
+     * ONLY self's slot, ONE saveConfiguration (which reloads the plugin — the
+     * mounted panel heals onto the fresh instance, same as after a ↑ push).
+     * Same identity guard as the shared store. Resolves false when nothing was
+     * persisted (caller falls back to the device-local entry).
+     */
+    async _writeSecretsSlot(userGuid, keys) {
+      if (!userGuid) return false;
+      try {
+        const api = await resolveConfigApi(this);
+        if (!api || typeof api.saveConfiguration !== "function") return false;
+        let conf = {};
+        try {
+          conf = (api.getConfiguration ? api.getConfiguration() : null) || (this.getConfiguration ? this.getConfiguration() : null) || {};
+        } catch {
+          return false;
+        }
+        if (typeof conf.name !== "string" || !conf.name.trim()) return false;
+        const custom = conf.custom && typeof conf.custom === "object" ? conf.custom : {};
+        const map = custom[SECRETS_CONFIG_KEY] && typeof custom[SECRETS_CONFIG_KEY] === "object" ? custom[SECRETS_CONFIG_KEY] : {};
+        const nextSlot = normalizeKeySlot(keys);
+        if (JSON.stringify(normalizeKeySlot(map[userGuid])) === JSON.stringify(nextSlot)) return true;
+        const nextMap = { ...map, [userGuid]: nextSlot };
+        await api.saveConfiguration(configWithPluginVersion(conf, { [SECRETS_CONFIG_KEY]: nextMap }, PLUGIN_VERSION));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    /** Once the synced slot owns the keys, the local fallback copy goes away (image stays). */
+    _stripLocalKeyFields() {
+      const local = this._loadLocalSecrets();
+      if (!local.recallApiKey && !local.anthropicApiKey) return;
+      this._writeLocalSecretsEntry({ recallApiKey: "", anthropicApiKey: "" });
+    }
+    /**
+     * Commit point for API-key edits (key input `change`, i.e. blur/Enter —
+     * NEVER per keystroke: the save reloads the plugin). Synced slot when a
+     * user is resolvable; device-local entry otherwise or when the save fails
+     * (offline), so a typed key is never lost.
+     */
+    async _commitApiKeys() {
+      const keys = { recallApiKey: this._secrets.recallApiKey, anthropicApiKey: this._secrets.anthropicApiKey };
+      const userGuid = this._currentUserGuid();
+      const synced = userGuid ? await this._writeSecretsSlot(userGuid, keys) : false;
+      if (synced) {
+        this._stripLocalKeyFields();
+      } else {
+        this._writeLocalSecretsEntry(keys);
+      }
+    }
+    /**
+     * One-time promotion (≤1.3.0 device-local keys → per-user synced slot).
+     * Runs on load; guarded by sessionStorage set BEFORE the save attempt
+     * (the syncPluginVersionOnLoad pattern) so a save that never sticks can't
+     * become a reload loop. Skipped entirely when the slot already has keys —
+     * then the slot is the source of truth and the local copy is stripped.
+     */
+    async _promoteLocalKeysToSlot() {
+      const userGuid = this._currentUserGuid();
+      if (!userGuid) return;
+      const local = this._loadLocalSecrets();
+      if (!local.recallApiKey && !local.anthropicApiKey) return;
+      const slot = this._readSecretsSlot(userGuid);
+      if (slot && (slot.recallApiKey || slot.anthropicApiKey)) {
+        this._stripLocalKeyFields();
+        return;
+      }
+      try {
+        let workspace = "";
+        try {
+          workspace = (this.getWorkspaceGuid ? this.getWorkspaceGuid() : "") || "";
+        } catch {
+        }
+        let collection = "";
+        try {
+          collection = (this.collection && this.collection.getGuid ? this.collection.getGuid() : "") || "";
+        } catch {
+        }
+        const guardKey = `recall-ai-secrets-promoted/${workspace || "default"}/${collection || "collection"}`;
+        if (sessionStorage.getItem(guardKey) === "1") return;
+        sessionStorage.setItem(guardKey, "1");
+      } catch {
+      }
+      const ok = await this._writeSecretsSlot(userGuid, {
+        recallApiKey: local.recallApiKey,
+        anthropicApiKey: local.anthropicApiKey
+      });
+      if (ok) this._stripLocalKeyFields();
     }
     /**
      * One-time migration (≤1.2.0 → 1.3.0): settings used to live in a single
@@ -3349,7 +3498,9 @@ ${report}
     _updateSetting(key, value, { rerender = false } = {}) {
       if (SECRET_KEYS.includes(key)) {
         this._secrets = normalizeSecrets({ ...this._secrets, [key]: value });
-        this._saveSecrets();
+        if (BOT_IMAGE_FIELDS.includes(key)) {
+          this._writeLocalSecretsEntry({ [key]: this._secrets[key] });
+        }
         this._recomputeSettings();
         if (rerender) this._renderPanel();
         return;
@@ -3362,12 +3513,13 @@ ${report}
       else this._refreshScopePill();
     }
     /**
-     * Live-follow for non-diverged devices. The shared store's own lifecycle
+     * Live-follow of remote config changes. The shared store's own lifecycle
      * listens for 'global-plugin.updated', but a CollectionPlugin's config
      * lives on the collection root, whose remote saves fire 'collection.updated'
-     * instead — attach both (the store's is a cheap no-op today), same adopt
-     * path. Registered BEFORE the kill-switch early-return so a disabled
-     * panel still tracks remote pushes.
+     * instead — attach both. Prefs are adopted only while following synced;
+     * the per-user API-key slot is ALWAYS re-read (a second device picks up
+     * pushed keys without a manual reload). Registered BEFORE the kill-switch
+     * early-return so a disabled panel still tracks remote pushes.
      */
     _registerSettingsLifecycle() {
       this._detachSettingsLifecycle = this._settingsStore.attachLifecycle({
@@ -3377,20 +3529,38 @@ ${report}
       if (!on) return;
       this._handlerIds.push(on("collection.updated", (event) => {
         try {
-          if (this._settingsStore.isDiverged()) return;
           if (event && event.source && event.source.isLocal) return;
           const guid = (this.collection && this.collection.getGuid ? this.collection.getGuid() : "") || (this.getGuid ? this.getGuid() : "");
           if (event && event.collectionGuid && guid && event.collectionGuid !== guid) return;
-          const next = this._settingsStore.load().settings;
-          if (JSON.stringify(next) === JSON.stringify(this._prefs)) return;
-          this._onRemoteSettingsChange(next);
+          let changed = false;
+          const nextSecrets = this._loadSecrets();
+          if (JSON.stringify(nextSecrets) !== JSON.stringify(this._secrets)) {
+            this._secrets = nextSecrets;
+            changed = true;
+          }
+          if (!this._settingsStore.isDiverged()) {
+            const nextPrefs = this._settingsStore.load().settings;
+            if (JSON.stringify(nextPrefs) !== JSON.stringify(this._prefs)) {
+              this._prefs = nextPrefs;
+              changed = true;
+            }
+          }
+          if (!changed) return;
+          this._recomputeSettings();
+          this._restartPollingIntervals();
+          this._renderPanel();
         } catch {
         }
       }));
     }
-    /** Adopt remotely pushed prefs (secrets stay device-local), re-apply, re-render. */
+    /**
+     * Store-lifecycle adopt path (fires only for 'global-plugin.updated' —
+     * dead for CollectionPlugins today, kept for parity): adopt pushed prefs
+     * AND re-read the key slot, re-apply, re-render.
+     */
     _onRemoteSettingsChange(prefs) {
       this._prefs = prefs;
+      this._secrets = this._loadSecrets();
       this._recomputeSettings();
       this._restartPollingIntervals();
       this._renderPanel();
@@ -4184,16 +4354,20 @@ ${transcriptText}`
       );
     }
     _textInput(label, key, placeholder = "", password = false, hint = "") {
+      const attrs = {
+        type: password ? "password" : "text",
+        value: this._draft[key] || "",
+        placeholder,
+        onInput: /* @__PURE__ */ __name((event) => this._updateSetting(key, event.target.value), "onInput")
+      };
+      if (API_KEY_FIELDS.includes(key)) {
+        attrs.onChange = () => void this._commitApiKeys();
+      }
       return h(
         "label",
         { class: `${ROOT_CLASS}-field` },
         h("span", { class: `${ROOT_CLASS}-field-label` }, label),
-        h("input", {
-          type: password ? "password" : "text",
-          value: this._draft[key] || "",
-          placeholder,
-          onInput: /* @__PURE__ */ __name((event) => this._updateSetting(key, event.target.value), "onInput")
-        }),
+        h("input", attrs),
         hint ? h("span", { class: `${ROOT_CLASS}-field-hint` }, hint) : null
       );
     }

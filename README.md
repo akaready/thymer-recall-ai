@@ -114,14 +114,21 @@ button on an inline reference to a Meeting record in the editor.
 | **Poll interval** | How often the plugin checks Recall for progress. |
 | **Summary prompt** | The instructions Claude follows when summarizing. |
 
-There is no Save button — edits apply and persist on this device immediately. The scope pill in the
-panel header shows whether preferences follow the workspace (**All devices**) or this device's own
-edits (**This device**), with push/discard controls to promote or revert them.
+There is no Save button — edits apply and persist immediately (API keys save when you leave the
+field). The scope pill in the panel header shows whether preferences follow the workspace
+(**All devices**) or this device's own edits (**This device**), with push/discard controls to
+promote or revert them.
 
-**Your API keys and uploaded bot image never sync.** They are stored only on the device where you
-entered them (browser local storage) and are never written into the shared plugin configuration —
-each device you use gets its own keys. Everything else (region, model, field mapping, poll interval,
-prompts, …) can be pushed to all your devices from the scope pill.
+**Your API keys follow you across your devices.** They sync through your workspace's
+end-to-end-encrypted plugin configuration, scoped per user — so in a shared workspace different
+users' keys never mix, and your bots always run on your own keys. One honest caveat: other members
+of a shared workspace can technically inspect the raw plugin configuration, so treat workspace
+members as trusted — the per-user slots prevent accidental cross-user key use, not member-level
+secrecy (Thymer has no per-user-private plugin storage). Keys never appear in this repository or
+the public mirror.
+
+**The uploaded bot image stays per-device.** It is kept in browser local storage only — re-upload
+it on each device where you want it (or use the image URL setting, which does sync).
 
 &nbsp;
 
