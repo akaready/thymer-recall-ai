@@ -26,7 +26,8 @@ plenty. You do **not** need to buy a domain.
 
 ## Step 2 — Create a Worker
 
-1. In the sidebar, click **Workers & Pages**.
+1. In the sidebar, go to **Build → Compute → Workers & Pages**. (There's no top-level
+   "Workers" item — it lives under Build.)
 2. Click **Create application** (or just **Create**).
 3. Choose the **"Hello World"** starter template.
 4. Give it a name — something like `thymer-recall-bridge`.
@@ -81,7 +82,7 @@ Cloudflare may run your bridge on different machines from one moment to the next
 make it forget the live transcript lines it's holding. Giving it a small bit of storage fixes
 that:
 
-1. In Cloudflare, go to **Storage & Databases → KV**.
+1. In Cloudflare, go to **Build → Storage & Databases → KV**.
 2. Create a namespace. **Name it exactly `RECALL_TRANSCRIPTS`.**
 3. Go back to your worker → **Settings → Bindings** → add a **KV namespace** binding, also
    named exactly `RECALL_TRANSCRIPTS`, pointing at the one you just made.
