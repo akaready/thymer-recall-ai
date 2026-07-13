@@ -62,7 +62,17 @@ Paste your address into a browser tab and add `/health` on the end:
 https://thymer-recall-bridge.your-name.workers.dev/health
 ```
 
-If you see a short "ok" response, it's working. 🎉
+You should see exactly this:
+
+```json
+{"ok":true}
+```
+
+That's it — your bridge is alive. 🎉 (Your browser may show it with a "Pretty-print"
+checkbox above it. That's normal — it's just how browsers display JSON.)
+
+If you get an error page instead, the code didn't deploy. Go back to Step 3 and make sure you
+pasted the **entire** file.
 
 ## Step 6 — Tell the plugin about it
 
