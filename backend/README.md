@@ -92,14 +92,47 @@ Cloudflare may run your bridge on different machines from one moment to the next
 make it forget the live transcript lines it's holding. Giving it a small bit of storage fixes
 that:
 
-1. In Cloudflare, go to **Build → Storage & Databases → KV**.
-2. Create a namespace. **Name it exactly `RECALL_TRANSCRIPTS`.**
-3. Go back to your worker → **Settings → Bindings** → add a **KV namespace** binding, also
-   named exactly `RECALL_TRANSCRIPTS`, pointing at the one you just made.
-4. Deploy again.
+There are two halves: **make** the storage, then **connect** it to your worker. The second half
+is the one people get wrong.
 
-Without this you still get the **full transcript and the summary** after the meeting ends —
-you just may not see lines appear live during the call.
+### Part 1 — Make the storage
+
+1. In Cloudflare, go to **Build → Storage & Databases → KV**.
+2. Click **Create** (a small dialog appears asking for a name).
+3. Name it anything you like — `recall-transcripts` is fine. **The namespace's own name does not
+   matter**; nothing ever reads it. Confirm.
+
+### Part 2 — Connect it to your worker
+
+This is the part that actually matters.
+
+4. Go to **Build → Compute → Workers & Pages** and click your worker
+   (`thymer-recall-bridge`).
+5. Open **Settings**, find **Bindings**, and click **Add binding**.
+6. A panel slides out asking what *kind* of binding you want. Pick **KV namespace** from the list.
+7. It then asks you for **two** things — and people mix these up:
+
+   | Field | What to put |
+   | --- | --- |
+   | **Variable name** | Type exactly **`RECALL_TRANSCRIPTS`** — in capitals, no spaces. |
+   | **KV namespace** | Choose the namespace you made in Part 1 from the dropdown. |
+
+   > ⚠️ **The Variable name is the one that must be exact.** It's the name the bridge's code
+   > looks for (`env.RECALL_TRANSCRIPTS`). It does *not* have to match what you called the
+   > namespace. Get this wrong and nothing breaks or warns you — the bridge just quietly keeps
+   > using memory, and you'll wonder why live transcripts still aren't reliable.
+
+8. Save the binding.
+9. **Deploy the worker again.** A binding only takes effect on a *new* deployment. Cloudflare
+   usually prompts you to redeploy — if it doesn't, click **Deploy** yourself.
+
+### Did it work?
+
+Nothing visibly changes, which is unnerving. To check: go back to **Settings → Bindings** and you
+should see `RECALL_TRANSCRIPTS` listed as a KV namespace binding. That's all there is to see.
+
+Without this you still get the **full transcript and the summary** after the meeting ends — you
+just may not see lines appear live during the call.
 
 ---
 
