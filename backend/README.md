@@ -38,7 +38,7 @@ Cloudflare now has a working (but useless) worker. We're about to replace its co
 ## Step 3 — Paste in the bridge code
 
 1. Click **Edit code** (this opens a code editor right in your browser).
-2. Open [`bridge-worker.js`](./bridge-worker.js) from this folder.
+2. Open <a href="./bridge-worker.js" target="_blank" rel="noopener noreferrer"><code>bridge-worker.js</code></a> from this folder — it opens in a new tab so you don't lose these steps.
 3. Copy **the whole file** — every line, top to bottom.
 4. Back in Cloudflare's editor: select everything that's there (Ctrl+A / Cmd+A), delete it,
    and paste in what you copied.
