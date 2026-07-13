@@ -2663,7 +2663,7 @@ ${report}
   __name(setPluginDisabled, "setPluginDisabled");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.1.6";
+  var PLUGIN_VERSION = "1.2.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3685,10 +3685,16 @@ ${transcriptText}`
           feedback: { data: this.data }
         }),
         section({
+          label: "Setup",
+          collapsible: true,
+          defaultOpen: !this._isConfigured(),
+          body: [this._setupSteps()]
+        }),
+        section({
           label: "Connection",
-          hint: "The bridge is a small proxy you host. It is required unless direct browser calls to Recall and Claude happen to work in your setup.",
+          hint: "Your two keys and your bridge address. New here? Do Setup above first.",
           body: [
-            this._textInput("Bridge URL", "bridgeUrl", "https://your-bridge.example.com", false, "Browsers block direct calls to the Recall and Claude APIs (CORS), so requests route through a bridge you host. Deploy backend/bridge-worker.js as a Cloudflare Worker, then paste its URL here \u2014 it forwards your keys server-side and relays live transcripts. Leave blank only if direct calls work for you."),
+            this._textInput("Bridge URL", "bridgeUrl", "https://your-bridge.example.com", false, "The web address of your bridge, from step 3 above."),
             this._bridgeLink(),
             this._textInput("Recall API key", "recallApiKey", "Token from Recall", true),
             this._textInput("Anthropic API key", "anthropicApiKey", "Claude API key for summaries", true)
@@ -3763,6 +3769,51 @@ ${transcriptText}`
             target: "_blank",
             rel: "noopener noreferrer"
           }, "backend/bridge-worker.js + deploy guide on GitHub \u2192")
+        )
+      );
+    }
+    /** Recall API keys are issued per region, so the link has to follow the Region setting. */
+    _recallKeyUrl() {
+      const region = String(this._draft.recallRegion || DEFAULT_SETTINGS.recallRegion).trim();
+      const dashboard = region === "payg" || !region ? "us-west-2" : region;
+      return `https://${dashboard}.recall.ai/dashboard/developers/api-keys`;
+    }
+    /** Once all three are filled in, the Setup section starts collapsed. */
+    _isConfigured() {
+      const s = this._draft || this._settings || {};
+      return !!(String(s.recallApiKey || "").trim() && String(s.anthropicApiKey || "").trim() && String(s.bridgeUrl || "").trim());
+    }
+    _setupSteps() {
+      const link = /* @__PURE__ */ __name((href, text) => h("a", { href, target: "_blank", rel: "noopener noreferrer" }, text), "link");
+      return h(
+        "ol",
+        { class: `${ROOT_CLASS}-steps` },
+        h(
+          "li",
+          {},
+          "Get a Recall key from your ",
+          link(this._recallKeyUrl(), "Recall dashboard"),
+          ". Keys belong to one region, so it has to match the Region you choose below."
+        ),
+        h(
+          "li",
+          {},
+          "Get a Claude key from the ",
+          link("https://console.anthropic.com/settings/keys", "Anthropic console"),
+          ". This is what writes the summary."
+        ),
+        h(
+          "li",
+          {},
+          "Put the bridge online \u2014 it is free, takes about two minutes, and needs no terminal. ",
+          link(this._bridgeWorkerUrl(), "Follow the bridge guide"),
+          ". Thymer runs inside your browser, and browsers are not allowed to call Recall or Claude directly. The bridge is a tiny helper that passes those requests along for you."
+        ),
+        h("li", {}, "Paste the bridge address and both keys into Connection, just below."),
+        h(
+          "li",
+          {},
+          "Add a meeting link to a Meeting record and click Transcribe. The bot joins, the transcript arrives as people talk, and the summary is written once the meeting ends."
         )
       );
     }
@@ -3999,6 +4050,24 @@ ${transcriptText}`
 				font-size: var(--tps-fs-hint);
 			}
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-field-hint a {
+				color: var(--tps-accent);
+				text-decoration: underline;
+				text-underline-offset: 2px;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-steps {
+				margin: 0;
+				padding-left: 20px;
+				display: grid;
+				gap: 10px;
+				color: var(--tps-text-muted);
+				font-size: var(--tps-fs-hint);
+				line-height: 1.5;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-steps li::marker {
+				color: var(--tps-text);
+				font-weight: var(--tps-fw-medium);
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-steps a {
 				color: var(--tps-accent);
 				text-decoration: underline;
 				text-underline-offset: 2px;

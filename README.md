@@ -58,40 +58,64 @@ Enjoy! 🙏
 
 ## 🛠️ Setup
 
-Open `Plugin: Recall.ai Meetings` from the command palette and set:
+You need three things before your first meeting: a **Recall key** (sends the notetaker), a
+**Claude key** (writes the summary), and a **bridge** (a tiny free helper you put online).
 
-- Recall API key
-- Recall region
-- Anthropic API key
-- Claude model
-- Bridge URL, when browser requests are blocked before Recall sees the key
-- Field mappings for Meeting URL, Transcript, and Summary if your collection uses existing properties instead of the defaults
-- Bot name
-- Bot image JPEG URL, optional. The bridge downloads it and sends it as Recall `automatic_video_output`; use a public HTTPS JPEG, 16:9, ideally 1280x720 and under 1.3MB.
-- Optional join chat message
-- Poll interval
-- Summary prompt
+Open `Plugin: Recall.ai Meetings` from the command palette — the **Setup** section in the panel
+walks you through the same steps with clickable links.
 
-There is no Save button in the settings panel. Edits autosave locally after a short debounce so the plugin does not trigger Thymer's collection settings preview/save flow.
+### 1. Get a Recall key
 
-Then open a Meeting record with a `Meeting URL` and click `Transcribe`. Inline references to Meeting records also get a small microphone button when visible in the editor.
+Grab it from your Recall dashboard at `https://<region>.recall.ai/dashboard/developers/api-keys`
+— for example [us-east-1](https://us-east-1.recall.ai/dashboard/developers/api-keys). Pay-as-you-go
+accounts use the [us-west-2](https://us-west-2.recall.ai/dashboard/developers/api-keys) dashboard.
 
+> **Keys belong to one region.** Whichever region you take the key from, pick that same one in the
+> plugin's **Region** setting, or Recall will reject it with a 401.
 
+### 2. Get a Claude key
 
+From the [Anthropic console](https://console.anthropic.com/settings/keys). This writes the summary.
 
+### 3. Put the bridge online
 
+**Free, ~2 minutes, no terminal.** → **[Follow the bridge guide](./backend/)**
 
+Thymer runs inside your browser, and browsers aren't allowed to call Recall and Claude directly —
+they block the request before it leaves your machine (you'd just see `Failed to fetch`). The bridge
+is a tiny program you host that passes those requests along. Your keys stay yours; the bridge stores
+no secrets.
 
+### 4. Paste them into the plugin
 
+Put the bridge address and both keys into the **Connection** section of the settings panel.
 
+### 5. Transcribe a meeting
 
+Add a meeting link to a Meeting record and click **Transcribe**. The notetaker joins, the transcript
+arrives as people talk, and the summary is written once the meeting ends.
 
+You can also start one from the **Recall Status** column in the table view, or from the microphone
+button on an inline reference to a Meeting record in the editor.
 
+&nbsp;
 
+## ⚙️ All settings
 
+| Setting | What it does |
+| --- | --- |
+| **Bridge URL** | Address of your bridge (step 3). |
+| **Recall API key** / **Region** | Your Recall key and the region it came from — they must match. |
+| **Anthropic API key** / **Claude model** | Key and model used to write the summary. |
+| **Field mapping** | Point Meeting URL / Transcript / Summary at existing properties instead of the plugin's defaults. Leave on auto-detect if unsure. |
+| **Bot name** | The name the notetaker shows in the meeting. |
+| **Bot image** | Optional. A public HTTPS JPEG, 16:9, ideally 1280×720 and under 1.3 MB. Sent to Recall as `automatic_video_output`. |
+| **Join chat message** | Optional message the bot posts when it joins. |
+| **Poll interval** | How often the plugin checks Recall for progress. |
+| **Summary prompt** | The instructions Claude follows when summarizing. |
 
-
-
+There is no Save button — edits autosave locally after a short pause, so the plugin never triggers
+Thymer's collection settings preview/save flow.
 
 &nbsp;
 
