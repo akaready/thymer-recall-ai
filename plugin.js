@@ -3109,7 +3109,7 @@ class Plugin extends CollectionPlugin {
   __name(assertCodeSafe, "assertCodeSafe");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.8.2";
+  var PLUGIN_VERSION = "1.8.3";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3136,6 +3136,7 @@ class Plugin extends CollectionPlugin {
     summaryFieldId: FIELDS.SUMMARY
   });
   var CREATE_FIELD_OPTION = "__create__";
+  var STAY_PUT = "__stay__";
   var ROOT_CLASS = "plg-recall-ai";
   var PANEL_TYPE = "recall-ai-settings";
   var CONFIG_KEY = "recallAi";
@@ -3516,6 +3517,19 @@ class Plugin extends CollectionPlugin {
         return "";
       }
     }
+    /** The collection Recall.ai actually runs in, named as the user sees it in the sidebar. */
+    _selfName() {
+      try {
+        const name = this.collection && this.collection.getName ? this.collection.getName() : "";
+        if (name) return name;
+      } catch {
+      }
+      try {
+        return this.getConfiguration()?.name || "this collection";
+      } catch {
+        return "this collection";
+      }
+    }
     /**
      * A journal collection runs `JournalCorePlugin`, and that is what MAKES it a journal. Writing
      * plain CollectionPlugin code over it strips Thymer's journal-ness — the daily notes stop being
@@ -3648,11 +3662,13 @@ ${carried.map((b) => b.text).join("\n\n")}
         { class: `${ROOT_CLASS}-warn` },
         `Recall.ai is also installed in ${dupes.join(", ")}. It should only ever run in one collection \u2014 two copies send two notetakers to the same meeting and bill twice. Open that collection's plugin code and remove Recall.ai from it.`
       ) : null;
+      const selfName = this._selfName();
       const label = /* @__PURE__ */ __name((t) => t.kind === "conflict" ? `${t.name} \u2014 already running ${t.occupant}` : t.kind === "ours" ? `${t.name} \u2014 already has Recall.ai (re-apply)` : t.name, "label");
-      const options = targets.map((t) => [t.guid, label(t)]);
-      const selected = this._mergeTargetGuid && targets.some((t) => t.guid === this._mergeTargetGuid) ? this._mergeTargetGuid : targets[0].guid;
+      const options = [[STAY_PUT, `${selfName} \u2014 current`], ...targets.map((t) => [t.guid, label(t)])];
+      const selected = this._mergeTargetGuid && targets.some((t) => t.guid === this._mergeTargetGuid) ? this._mergeTargetGuid : STAY_PUT;
       this._mergeTargetGuid = selected;
-      const chosen = targets.find((t) => t.guid === selected);
+      const chosen = selected === STAY_PUT ? null : targets.find((t) => t.guid === selected);
+      const hint = !chosen ? `Recall.ai runs in ${selfName}, the collection it created when you installed it. Leave this alone unless you would rather it ran in a collection you already have.` : chosen.kind === "conflict" ? `A collection can only run one collection plugin, and ${chosen.occupant} is already in this one. Remove it there first, or choose another collection.` : chosen.kind === "ours" ? "Recall.ai already runs in this collection. Nothing to do \u2014 re-apply only to repair a broken install." : `Adds the properties Recall.ai writes to ${chosen.name}, points it at the ones it already has, and installs Recall.ai into it.`;
       return h(
         "div",
         { class: `${ROOT_CLASS}-field` },
@@ -3665,15 +3681,16 @@ ${carried.map((b) => b.text).join("\n\n")}
             this._renderPanel();
           }, "onChange")
         }, ...options.map(([value, text]) => h("option", { value, selected: value === selected }, text))),
-        h("span", { class: `${ROOT_CLASS}-field-hint` }, chosen && chosen.kind === "conflict" ? `A collection can only run one collection plugin, and ${chosen.occupant} is already in this one. Remove it there first, or choose another collection.` : chosen && chosen.kind === "ours" ? "Recall.ai already runs in this collection. Nothing to do \u2014 re-apply only to repair a broken install." : "Adds the properties Recall.ai writes to, points it at the ones you already have, and installs it into that collection."),
-        button({
-          label: chosen && chosen.kind === "ours" ? "Re-apply Recall.ai" : "Add Recall.ai to this collection",
-          // Green is a call to action — "do this". Once the plugin IS in the collection there is
-          // nothing to do, so re-apply is a quiet repair affordance, not the thing to reach for.
-          variant: chosen && chosen.kind === "ours" ? "ghost" : "primary",
-          disabled: !chosen || chosen.kind === "conflict",
+        h("span", { class: `${ROOT_CLASS}-field-hint` }, hint),
+        // No button at all while staying put: there is nothing to do, and a live button next to
+        // "current" is how you end up moving a plugin you never meant to move.
+        chosen ? button({
+          label: chosen.kind === "ours" ? "Re-apply Recall.ai" : `Add Recall.ai to ${chosen.name}`,
+          // Green means "do this". Re-apply is a quiet repair affordance, not a call to action.
+          variant: chosen.kind === "ours" ? "ghost" : "primary",
+          disabled: chosen.kind === "conflict",
           onClick: /* @__PURE__ */ __name(() => void this._mergeIntoCollection(this._mergeTargetGuid), "onClick")
-        })
+        }) : null
       );
     }
     _registerSettingsPanel() {
