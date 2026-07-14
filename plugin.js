@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.10.1";
+  var PLUGIN_VERSION = "1.10.2";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3307,7 +3307,12 @@ ${report}
         htmlLabel: navButtonLabel("idle"),
         icon: "microphone",
         tooltip: "Send the notetaker into this meeting now",
-        onlyWhenExpanded: false,
+        // ONLY when a record is open. With `false` this button rendered in the COLLECTION nav
+        // strip, sitting beside the view tabs as though "Join Now" were a view — and there is no
+        // active record at collection level, so the only thing it could do there was toast "Open a
+        // Meeting record first". A button shown where it cannot work is worse than no button.
+        // Sending a bot from the table is already handled per-row, in the Recall Status cell.
+        onlyWhenExpanded: true,
         onClick: /* @__PURE__ */ __name(({ record }) => {
           this._activeRecordGuid = record && record.guid || "";
           void this._startBot(record);
