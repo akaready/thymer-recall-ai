@@ -3109,7 +3109,7 @@ class Plugin extends CollectionPlugin {
   __name(assertCodeSafe, "assertCodeSafe");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.8.1";
+  var PLUGIN_VERSION = "1.8.2";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3516,21 +3516,43 @@ class Plugin extends CollectionPlugin {
         return "";
       }
     }
+    /**
+     * A journal collection runs `JournalCorePlugin`, and that is what MAKES it a journal. Writing
+     * plain CollectionPlugin code over it strips Thymer's journal-ness — the daily notes stop being
+     * daily notes. There is no undo for that and no warning worth offering, so a journal is never a
+     * target: it is filtered out before the user can pick it.
+     */
+    _isProtectedCollection(api, code) {
+      try {
+        if (typeof api.isJournalPlugin === "function" && api.isJournalPlugin()) return true;
+      } catch {
+      }
+      return /\bJournalCorePlugin\b/.test(String(code || ""));
+    }
     async _refreshMergeTargets() {
       try {
         const all = await this.data.getAllCollections();
         const selfGuid = this._selfGuid();
-        this._mergeTargets = (all || []).filter((c) => c && c.getGuid && c.getGuid() !== selfGuid).map((c) => {
+        const targets = [];
+        const alsoRunning = [];
+        for (const c of all || []) {
+          if (!c || !c.getGuid || c.getGuid() === selfGuid) continue;
           let code = "";
           try {
             code = (c.getExistingCodeAndConfig() || {}).code || "";
           } catch {
           }
+          const name = c.getName && c.getName() || "Untitled";
+          if (this._isProtectedCollection(c, code)) continue;
           const verdict = this._classifyCollectionCode(code);
-          return { api: c, guid: c.getGuid(), name: c.getName && c.getName() || "Untitled", ...verdict };
-        });
+          if (verdict.kind === "ours") alsoRunning.push(name);
+          targets.push({ api: c, guid: c.getGuid(), name, ...verdict });
+        }
+        this._mergeTargets = targets;
+        this._alsoRunningIn = alsoRunning;
       } catch (err) {
         this._mergeTargets = [];
+        this._alsoRunningIn = [];
         this._log("merge targets failed", { error: this._errorMessage(err) });
       }
       if (this._panelEl) this._renderPanel();
@@ -3538,6 +3560,17 @@ class Plugin extends CollectionPlugin {
     async _mergeIntoCollection(guid) {
       const target = (this._mergeTargets || []).find((t) => t.guid === guid);
       if (!target) return this._toast("Collection not found", "Reopen the panel and try again.");
+      let targetCode = "";
+      try {
+        targetCode = (target.api.getExistingCodeAndConfig() || {}).code || "";
+      } catch {
+      }
+      if (this._isProtectedCollection(target.api, targetCode)) {
+        return this._toast(
+          `${target.name} is a journal`,
+          "A journal runs Thymer's own JournalCorePlugin, and replacing it would stop the daily notes being daily notes. Pick a different collection."
+        );
+      }
       if (target.kind === "conflict") {
         return this._toast(
           `${target.name} is already running ${target.occupant}`,
@@ -3609,6 +3642,12 @@ ${carried.map((b) => b.text).join("\n\n")}
       const targets = this._mergeTargets;
       if (!targets) return h("p", { class: `${ROOT_CLASS}-field-hint` }, "Looking for collections\u2026");
       if (!targets.length) return h("p", { class: `${ROOT_CLASS}-field-hint` }, "No other collections found.");
+      const dupes = this._alsoRunningIn || [];
+      const dupeWarning = dupes.length ? h(
+        "p",
+        { class: `${ROOT_CLASS}-warn` },
+        `Recall.ai is also installed in ${dupes.join(", ")}. It should only ever run in one collection \u2014 two copies send two notetakers to the same meeting and bill twice. Open that collection's plugin code and remove Recall.ai from it.`
+      ) : null;
       const label = /* @__PURE__ */ __name((t) => t.kind === "conflict" ? `${t.name} \u2014 already running ${t.occupant}` : t.kind === "ours" ? `${t.name} \u2014 already has Recall.ai (re-apply)` : t.name, "label");
       const options = targets.map((t) => [t.guid, label(t)]);
       const selected = this._mergeTargetGuid && targets.some((t) => t.guid === this._mergeTargetGuid) ? this._mergeTargetGuid : targets[0].guid;
@@ -3617,6 +3656,7 @@ ${carried.map((b) => b.text).join("\n\n")}
       return h(
         "div",
         { class: `${ROOT_CLASS}-field` },
+        dupeWarning,
         h("span", { class: `${ROOT_CLASS}-field-label` }, "Collection"),
         h("select", {
           value: selected,
@@ -5163,6 +5203,16 @@ ${transcriptText}`
 				color: var(--tps-text);
 				font-size: var(--tps-fs-label);
 				font-weight: var(--tps-fw-medium);
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-warn {
+				margin: 0 0 10px;
+				padding: 10px 12px;
+				border: 1px solid var(--enum-orange-border, rgba(217, 131, 36, 0.45));
+				border-radius: var(--tps-radius-md, 6px);
+				background: var(--enum-orange-bg, rgba(217, 131, 36, 0.12));
+				color: var(--enum-orange-fg, #d98324);
+				font-size: var(--tps-fs-hint);
+				line-height: 1.45;
 			}
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-field-hint {
 				color: var(--tps-text-muted);
