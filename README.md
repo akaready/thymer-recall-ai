@@ -190,6 +190,22 @@ If Recall shows the API key was never used and Thymer shows `Failed to fetch`, t
 
 &nbsp;
 
+## 🤝 Sharing a collection with other plugins
+
+**Add to an existing collection** installs Recall.ai into a collection you already have, rather than
+using the one it ships with. Two rules keep that from breaking anything:
+
+- A collection runs exactly **one** owning plugin. If another plugin already owns the one you pick,
+  Recall.ai refuses and tells you which. Hook-style plugins are fine — they ride alongside.
+- Hook blocks that other plugins appended (e.g. `Build Title from Properties`) are **carried over**,
+  not deleted. Installing Recall.ai will not silently switch off someone else's feature.
+
+The result is checked before it is written. If anything looks wrong, the install is refused and the
+collection is left exactly as it was.
+
+
+&nbsp;
+
 ## 📊 Anonymous Usage Counter
 
 This plugin pings a <a href="https://www.goatcounter.com/" target="_blank" rel="noopener noreferrer">privacy-respecting counter</a> on first install and once per day of active use. It exists so I can see which plugins are worth continuing to invest in — both "did anyone install it" and "is anyone still using it after a week." Combined with the coffee donations, this is what tells me whether to keep building. It tracks the plugin slug only, no other telemetry or user data, and you can see exactly what I see on the <a href="https://thymer-plugins.goatcounter.com" target="_blank" rel="noopener noreferrer">public dashboard</a>.

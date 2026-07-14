@@ -2880,8 +2880,87 @@ ${report}
   }
   __name(createSettingsStore, "createSettingsStore");
 
+  // ../../shared/collection-code.js
+  var ANY_PATCH_BLOCK = /\/\* (.+?): managed collection hook - begin \*\/[\s\S]*?\/\* \1: managed collection hook - end \*\//g;
+  function extractPatchBlocks(code) {
+    const out = [];
+    const text = String(code || "");
+    for (const m of text.matchAll(ANY_PATCH_BLOCK)) out.push({ name: m[1], text: m[0] });
+    return out;
+  }
+  __name(extractPatchBlocks, "extractPatchBlocks");
+  function stripAllPatchBlocks(code) {
+    return String(code || "").replace(ANY_PATCH_BLOCK, "").replace(/\n{3,}/g, "\n\n").trim();
+  }
+  __name(stripAllPatchBlocks, "stripAllPatchBlocks");
+  function classifyCollectionCode(code) {
+    const text = String(code || "");
+    const blocks = extractPatchBlocks(text);
+    const rest = stripCodeCommentsAndStrings(stripAllPatchBlocks(text));
+    const hasOwnerLogic = OWNER_SIGNALS.some((sig) => rest.includes(sig));
+    if (hasOwnerLogic) return { kind: "owner", patches: blocks, occupant: attributeOccupant(text) };
+    return { kind: blocks.length ? "patched" : "blank", patches: blocks, occupant: "" };
+  }
+  __name(classifyCollectionCode, "classifyCollectionCode");
+  var OWNER_SIGNALS = Object.freeze([
+    "customizeRecordTitle",
+    "customizeSidebarItems",
+    "setSidebarWidget",
+    "addCollectionNavigationButton",
+    "this.properties",
+    "this.views",
+    "this.collection",
+    "this.events",
+    "this.data",
+    "this.ws",
+    "localStorage",
+    "fetch",
+    "savePlugin",
+    "saveConfiguration",
+    "previewPlugin",
+    "insertFromMarkdown",
+    "createRecord",
+    "createLineItem",
+    "prop(",
+    "setName"
+  ]);
+  var KNOWN_OCCUPANTS = Object.freeze([
+    ["plg-recall-ai", "Recall.ai Meetings"],
+    ["plg-collection-icons", "Collection Icons"],
+    ["Build Title from Properties", "Build Title from Properties"]
+  ]);
+  function attributeOccupant(code) {
+    const text = String(code || "");
+    const hit = KNOWN_OCCUPANTS.find(([needle]) => text.includes(needle));
+    return hit ? hit[1] : "another plugin";
+  }
+  __name(attributeOccupant, "attributeOccupant");
+  function stripCodeCommentsAndStrings(code) {
+    return String(code || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "").replace(/'(?:\\.|[^'\\])*'/g, "''").replace(/"(?:\\.|[^"\\])*"/g, '""').replace(/`(?:\\.|[^`\\])*`/g, "``");
+  }
+  __name(stripCodeCommentsAndStrings, "stripCodeCommentsAndStrings");
+  var STUB_MARKER = "/* thymer-collection-stub */";
+  var STUB_OWNER_CLASS = `${STUB_MARKER}
+class Plugin extends CollectionPlugin {
+	onLoad() {}
+	onUnload() {}
+}`;
+  function assertCodeSafe(code) {
+    const text = String(code || "");
+    try {
+      new Function(text);
+    } catch (e) {
+      return { ok: false, reason: `would not parse \u2014 ${e.message}` };
+    }
+    if (!/\bclass\s+Plugin\b|\bvar\s+Plugin\s*=|\bPlugin\s*=\s*class\b/.test(text)) {
+      return { ok: false, reason: "declares no Plugin class \u2014 the collection would not load" };
+    }
+    return { ok: true };
+  }
+  __name(assertCodeSafe, "assertCodeSafe");
+
   // plugin.js
-  var PLUGIN_VERSION = "1.6.0";
+  var PLUGIN_VERSION = "1.7.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -2929,7 +3008,7 @@ ${report}
     "fetch",
     "savePlugin"
   ]);
-  var KNOWN_OCCUPANTS = Object.freeze([
+  var KNOWN_OCCUPANTS2 = Object.freeze([
     ["Build Title from Properties", "Build Title from Properties"],
     ["plg-collection-icons", "Collection Icons"]
   ]);
@@ -3242,14 +3321,18 @@ ${report}
     /**
      * @returns {{kind: 'ours'|'blank'|'conflict', occupant: string}}
      */
+    /**
+     * Who OWNS this collection's class? Patch blocks (see shared/collection-code.js) are hooks that
+     * ride on top of the owner — they are NOT occupants, and must not make us refuse. We used to
+     * classify them as a conflict (their code contains customizeRecordTitle), so a collection with
+     * Build Title's hook was permanently off-limits. We now look past the patches at the real owner.
+     */
     _classifyCollectionCode(code) {
       const text = String(code || "");
       if (text.includes(OURS_MARKER)) return { kind: "ours", occupant: "" };
-      if (!text.trim()) return { kind: "blank", occupant: "" };
-      const hasForeignLogic = FOREIGN_CODE_SIGNALS.some((sig) => text.includes(sig));
-      if (!hasForeignLogic) return { kind: "blank", occupant: "" };
-      const hit = KNOWN_OCCUPANTS.find(([needle]) => text.includes(needle));
-      return { kind: "conflict", occupant: hit ? hit[1] : "another plugin" };
+      const verdict = classifyCollectionCode(text);
+      if (verdict.kind === "owner") return { kind: "conflict", occupant: verdict.occupant };
+      return { kind: "blank", occupant: "" };
     }
     async _refreshMergeTargets() {
       try {
@@ -3276,7 +3359,7 @@ ${report}
       if (target.kind === "conflict") {
         return this._toast(
           `${target.name} is already running ${target.occupant}`,
-          "A collection can only run one collection plugin. Remove that one first, or pick another collection."
+          "A collection can only have one owning plugin. Remove that one first, or pick another collection. (Hook-style plugins like Build Title are fine \u2014 they ride alongside.)"
         );
       }
       try {
@@ -3321,7 +3404,14 @@ ${report}
         conf.custom.recallAi = { ...normalizePrefs(conf.custom.recallAi), ...mapping };
         conf.custom.pluginVersion = PLUGIN_VERSION;
         conf.version = PLUGIN_VERSION;
-        const ok = await target.api.savePlugin(conf, code);
+        const carried = extractPatchBlocks(existing.code || "");
+        const nextCode = carried.length ? `${code.trimEnd()}
+
+${carried.map((b) => b.text).join("\n\n")}
+` : code;
+        const safe = assertCodeSafe(nextCode);
+        if (!safe.ok) throw new Error(`Refusing to write \u2014 the resulting code ${safe.reason}`);
+        const ok = await target.api.savePlugin(conf, nextCode);
         if (!ok) throw new Error("Thymer rejected the write.");
         const mapped = Object.keys(mapping).length ? " Mapped to properties it already had." : "";
         this._toast(
