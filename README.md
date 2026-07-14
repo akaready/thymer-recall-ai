@@ -190,18 +190,18 @@ If Recall shows the API key was never used and Thymer shows `Failed to fetch`, t
 
 &nbsp;
 
-## 🤝 Sharing a collection with other plugins
+## 📁 Its collection
 
-**Add to an existing collection** installs Recall.ai into a collection you already have, rather than
-using the one it ships with. Two rules keep that from breaking anything:
+Installing Recall.ai creates a **Meetings** collection, and that is where it runs for good. A Thymer
+plugin is bound to its collection for its whole life, so there is nothing to choose and nothing to
+configure here — the settings panel simply tells you which collection it is.
 
-- A collection runs exactly **one** owning plugin. If another plugin already owns the one you pick,
-  Recall.ai refuses and tells you which. Hook-style plugins are fine — they ride alongside.
-- Hook blocks that other plugins appended (e.g. `Build Title from Properties`) are **carried over**,
-  not deleted. Installing Recall.ai will not silently switch off someone else's feature.
+You can rename that collection, add your own properties to it, and use it for whatever else you like.
+If it is missing a property Recall.ai needs, the Field Mapping section will offer to create it.
 
-The result is checked before it is written. If anything looks wrong, the install is refused and the
-collection is left exactly as it was.
+Other plugins can still add their own features on top — `Build Title from Properties`, for instance,
+will happily build your meeting titles from their properties. That works because such plugins
+*append* a hook rather than taking the collection over.
 
 
 &nbsp;

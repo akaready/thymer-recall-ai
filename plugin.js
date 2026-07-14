@@ -2527,17 +2527,6 @@ ${report}
     return h("label", { class: "tps-opt" }, input, labelEl, descEl);
   }
   __name(optionRow, "optionRow");
-  function button({ label, variant = "ghost", size = "sm", onClick, disabled }) {
-    const cls = ["tps-button", `tps-button--${variant}`];
-    if (size === "md") cls.push("tps-button--md");
-    return h("button", {
-      type: "button",
-      class: cls.join(" "),
-      disabled: !!disabled,
-      onClick
-    }, label);
-  }
-  __name(button, "button");
 
   // ../../shared/plugin-version.js
   function readPluginVersion(conf, fallback = "0.0.1") {
@@ -3028,88 +3017,8 @@ ${report}
   }
   __name(createSettingsStore, "createSettingsStore");
 
-  // ../../shared/collection-code.js
-  var ANY_PATCH_BLOCK = /\/\* (.+?): managed collection hook - begin \*\/[\s\S]*?\/\* \1: managed collection hook - end \*\//g;
-  function extractPatchBlocks(code) {
-    const out = [];
-    const text = String(code || "");
-    for (const m of text.matchAll(ANY_PATCH_BLOCK)) out.push({ name: m[1], text: m[0] });
-    return out;
-  }
-  __name(extractPatchBlocks, "extractPatchBlocks");
-  function stripAllPatchBlocks(code) {
-    return String(code || "").replace(ANY_PATCH_BLOCK, "").replace(/\n{3,}/g, "\n\n").trim();
-  }
-  __name(stripAllPatchBlocks, "stripAllPatchBlocks");
-  function classifyCollectionCode(code) {
-    const text = String(code || "");
-    const blocks = extractPatchBlocks(text);
-    const rest = stripCodeCommentsAndStrings(stripAllPatchBlocks(text));
-    const hasOwnerLogic = OWNER_SIGNALS.some((sig) => rest.includes(sig));
-    if (hasOwnerLogic) return { kind: "owner", patches: blocks, occupant: attributeOccupant(text) };
-    return { kind: blocks.length ? "patched" : "blank", patches: blocks, occupant: "" };
-  }
-  __name(classifyCollectionCode, "classifyCollectionCode");
-  var OWNER_SIGNALS = Object.freeze([
-    "customizeRecordTitle",
-    "customizeSidebarItems",
-    "setSidebarWidget",
-    "addCollectionNavigationButton",
-    "this.properties",
-    "this.views",
-    "this.collection",
-    "this.events",
-    "this.data",
-    "this.ws",
-    "localStorage",
-    "fetch",
-    "savePlugin",
-    "saveConfiguration",
-    "previewPlugin",
-    "insertFromMarkdown",
-    "createRecord",
-    "createLineItem",
-    "prop(",
-    "setName"
-  ]);
-  var KNOWN_OCCUPANTS = Object.freeze([
-    ["plg-recall-ai", "Recall.ai Meetings"],
-    ["plg-collection-icons", "Collection Icons"],
-    ["Build Title from Properties", "Build Title from Properties"]
-  ]);
-  function attributeOccupant(code) {
-    const text = String(code || "");
-    const hit = KNOWN_OCCUPANTS.find(([needle]) => text.includes(needle));
-    return hit ? hit[1] : "another plugin";
-  }
-  __name(attributeOccupant, "attributeOccupant");
-  function stripCodeCommentsAndStrings(code) {
-    return String(code || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "").replace(/'(?:\\.|[^'\\])*'/g, "''").replace(/"(?:\\.|[^"\\])*"/g, '""').replace(/`(?:\\.|[^`\\])*`/g, "``");
-  }
-  __name(stripCodeCommentsAndStrings, "stripCodeCommentsAndStrings");
-  var STUB_MARKER = "/* thymer-collection-stub */";
-  var STUB_OWNER_CLASS = `${STUB_MARKER}
-class Plugin extends CollectionPlugin {
-	onLoad() {}
-	onUnload() {}
-}`;
-  function assertCodeSafe(code) {
-    const text = String(code || "");
-    try {
-      new Function(text);
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      return { ok: false, reason: `would not parse \u2014 ${message}` };
-    }
-    if (!/\bclass\s+Plugin\b|\bvar\s+Plugin\s*=|\bPlugin\s*=\s*class\b/.test(text)) {
-      return { ok: false, reason: "declares no Plugin class \u2014 the collection would not load" };
-    }
-    return { ok: true };
-  }
-  __name(assertCodeSafe, "assertCodeSafe");
-
   // plugin.js
-  var PLUGIN_VERSION = "1.8.3";
+  var PLUGIN_VERSION = "1.9.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3136,7 +3045,6 @@ class Plugin extends CollectionPlugin {
     summaryFieldId: FIELDS.SUMMARY
   });
   var CREATE_FIELD_OPTION = "__create__";
-  var STAY_PUT = "__stay__";
   var ROOT_CLASS = "plg-recall-ai";
   var PANEL_TYPE = "recall-ai-settings";
   var CONFIG_KEY = "recallAi";
@@ -3158,26 +3066,6 @@ class Plugin extends CollectionPlugin {
   ].join(", ");
   var INLINE_REF_SELECTOR = ".lineitem-ref, .lineitem-ref-title, .lineitem-lineref";
   var PLUGIN_FIELD_IDS = new Set(Object.values(FIELDS));
-  var OURS_MARKER = ROOT_CLASS;
-  var FOREIGN_CODE_SIGNALS = Object.freeze([
-    "customizeRecordTitle",
-    "customizeSidebarItems",
-    "setSidebarWidget",
-    "addCollectionNavigationButton",
-    "this.properties",
-    "this.views",
-    "this.collection",
-    "this.events",
-    "this.data",
-    "this.ws",
-    "localStorage",
-    "fetch",
-    "savePlugin"
-  ]);
-  var KNOWN_OCCUPANTS2 = Object.freeze([
-    ["Build Title from Properties", "Build Title from Properties"],
-    ["plg-collection-icons", "Collection Icons"]
-  ]);
   var DEFAULT_SETTINGS = Object.freeze({
     version: 1,
     recallApiKey: "",
@@ -3491,19 +3379,6 @@ class Plugin extends CollectionPlugin {
      * @returns {{kind: 'ours'|'blank'|'conflict', occupant: string}}
      */
     /**
-     * Who OWNS this collection's class? Patch blocks (see shared/collection-code.js) are hooks that
-     * ride on top of the owner — they are NOT occupants, and must not make us refuse. We used to
-     * classify them as a conflict (their code contains customizeRecordTitle), so a collection with
-     * Build Title's hook was permanently off-limits. We now look past the patches at the real owner.
-     */
-    _classifyCollectionCode(code) {
-      const text = String(code || "");
-      if (text.includes(OURS_MARKER)) return { kind: "ours", occupant: "" };
-      const verdict = classifyCollectionCode(text);
-      if (verdict.kind === "owner") return { kind: "conflict", occupant: verdict.occupant };
-      return { kind: "blank", occupant: "" };
-    }
-    /**
      * This collection's guid.
      *
      * NOT `this.getGuid()` — that is an AppPlugin method and does not exist on CollectionPlugin,
@@ -3530,169 +3405,6 @@ class Plugin extends CollectionPlugin {
         return "this collection";
       }
     }
-    /**
-     * A journal collection runs `JournalCorePlugin`, and that is what MAKES it a journal. Writing
-     * plain CollectionPlugin code over it strips Thymer's journal-ness — the daily notes stop being
-     * daily notes. There is no undo for that and no warning worth offering, so a journal is never a
-     * target: it is filtered out before the user can pick it.
-     */
-    _isProtectedCollection(api, code) {
-      try {
-        if (typeof api.isJournalPlugin === "function" && api.isJournalPlugin()) return true;
-      } catch {
-      }
-      return /\bJournalCorePlugin\b/.test(String(code || ""));
-    }
-    async _refreshMergeTargets() {
-      try {
-        const all = await this.data.getAllCollections();
-        const selfGuid = this._selfGuid();
-        const targets = [];
-        const alsoRunning = [];
-        for (const c of all || []) {
-          if (!c || !c.getGuid || c.getGuid() === selfGuid) continue;
-          let code = "";
-          try {
-            code = (c.getExistingCodeAndConfig() || {}).code || "";
-          } catch {
-          }
-          const name = c.getName && c.getName() || "Untitled";
-          if (this._isProtectedCollection(c, code)) continue;
-          const verdict = this._classifyCollectionCode(code);
-          if (verdict.kind === "ours") alsoRunning.push(name);
-          targets.push({ api: c, guid: c.getGuid(), name, ...verdict });
-        }
-        this._mergeTargets = targets;
-        this._alsoRunningIn = alsoRunning;
-      } catch (err) {
-        this._mergeTargets = [];
-        this._alsoRunningIn = [];
-        this._log("merge targets failed", { error: this._errorMessage(err) });
-      }
-      if (this._panelEl) this._renderPanel();
-    }
-    async _mergeIntoCollection(guid) {
-      const target = (this._mergeTargets || []).find((t) => t.guid === guid);
-      if (!target) return this._toast("Collection not found", "Reopen the panel and try again.");
-      let targetCode = "";
-      try {
-        targetCode = (target.api.getExistingCodeAndConfig() || {}).code || "";
-      } catch {
-      }
-      if (this._isProtectedCollection(target.api, targetCode)) {
-        return this._toast(
-          `${target.name} is a journal`,
-          "A journal runs Thymer's own JournalCorePlugin, and replacing it would stop the daily notes being daily notes. Pick a different collection."
-        );
-      }
-      if (target.kind === "conflict") {
-        return this._toast(
-          `${target.name} is already running ${target.occupant}`,
-          "A collection can only have one owning plugin. Remove that one first, or pick another collection. (Hook-style plugins like Build Title are fine \u2014 they ride alongside.)"
-        );
-      }
-      try {
-        const self = this.data.getPluginByGuid(this._selfGuid());
-        const mine = self && self.getExistingCodeAndConfig ? self.getExistingCodeAndConfig() : null;
-        const code = mine && mine.code ? mine.code : "";
-        const myFields = mine && mine.json && mine.json.fields || [];
-        if (!code.trim()) throw new Error("Could not read this plugin's own code.");
-        const existing = target.api.getExistingCodeAndConfig() || {};
-        const conf = JSON.parse(JSON.stringify(existing.json || {}));
-        conf.fields = Array.isArray(conf.fields) ? conf.fields : [];
-        const have = new Set(conf.fields.map((f) => String(f.id)));
-        const added = [];
-        const addField = /* @__PURE__ */ __name((id) => {
-          if (have.has(id)) return;
-          const f = myFields.find((x) => String(x.id) === id) || FIELD_DEFS[id];
-          if (!f) return;
-          conf.fields.push(JSON.parse(JSON.stringify(f)));
-          have.add(id);
-          added.push(f.label || id);
-        }, "addField");
-        [FIELDS.BOT_ID, FIELDS.STATUS, FIELDS.LAST_ERROR, FIELDS.TRANSCRIPT, FIELDS.SUMMARY].forEach(addField);
-        const mapping = {};
-        const pick = /* @__PURE__ */ __name((types) => conf.fields.find((f) => types.includes(String(f.type || "").toLowerCase()) && !PLUGIN_FIELD_IDS.has(String(f.id)) && String(f.id) !== "title"), "pick");
-        const mapOrAdd = /* @__PURE__ */ __name((id, types, settingKey) => {
-          const cand = pick(types);
-          if (cand) mapping[settingKey] = String(cand.id);
-          else addField(id);
-        }, "mapOrAdd");
-        mapOrAdd(FIELDS.MEETING_URL, ["url"], "meetingUrlFieldId");
-        mapOrAdd(FIELDS.JOIN_AT, ["datetime", "date"], "joinAtFieldId");
-        const table = (conf.views || []).find((v) => String(v.type || "") === "table");
-        if (table && Array.isArray(table.field_ids) && !table.field_ids.includes(FIELDS.STATUS)) {
-          table.field_ids.push(FIELDS.STATUS);
-        }
-        if (Array.isArray(conf.page_field_ids)) {
-          for (const id of [FIELDS.TRANSCRIPT, FIELDS.SUMMARY, FIELDS.STATUS]) {
-            if (have.has(id) && !conf.page_field_ids.includes(id)) conf.page_field_ids.push(id);
-          }
-        }
-        conf.custom = conf.custom && typeof conf.custom === "object" ? conf.custom : {};
-        conf.custom.recallAi = { ...normalizePrefs(conf.custom.recallAi), ...mapping };
-        conf.custom.pluginVersion = PLUGIN_VERSION;
-        conf.version = PLUGIN_VERSION;
-        const carried = extractPatchBlocks(existing.code || "");
-        const nextCode = carried.length ? `${code.trimEnd()}
-
-${carried.map((b) => b.text).join("\n\n")}
-` : code;
-        const safe = assertCodeSafe(nextCode);
-        if (!safe.ok) throw new Error(`Refusing to write \u2014 the resulting code ${safe.reason}`);
-        const ok = await target.api.savePlugin(conf, nextCode);
-        if (!ok) throw new Error("Thymer rejected the write.");
-        const mapped = Object.keys(mapping).length ? " Mapped to properties it already had." : "";
-        this._toast(
-          `Recall.ai added to ${target.name}`,
-          (added.length ? `Added ${added.join(", ")}.` : "No new properties needed.") + mapped + " Open that collection to finish setup."
-        );
-        void this._refreshMergeTargets();
-      } catch (err) {
-        this._toast("Could not add Recall.ai", this._errorMessage(err));
-      }
-    }
-    _mergeUI() {
-      const targets = this._mergeTargets;
-      if (!targets) return h("p", { class: `${ROOT_CLASS}-field-hint` }, "Looking for collections\u2026");
-      if (!targets.length) return h("p", { class: `${ROOT_CLASS}-field-hint` }, "No other collections found.");
-      const dupes = this._alsoRunningIn || [];
-      const dupeWarning = dupes.length ? h(
-        "p",
-        { class: `${ROOT_CLASS}-warn` },
-        `Recall.ai is also installed in ${dupes.join(", ")}. It should only ever run in one collection \u2014 two copies send two notetakers to the same meeting and bill twice. Open that collection's plugin code and remove Recall.ai from it.`
-      ) : null;
-      const selfName = this._selfName();
-      const label = /* @__PURE__ */ __name((t) => t.kind === "conflict" ? `${t.name} \u2014 already running ${t.occupant}` : t.kind === "ours" ? `${t.name} \u2014 already has Recall.ai (re-apply)` : t.name, "label");
-      const options = [[STAY_PUT, `${selfName} \u2014 current`], ...targets.map((t) => [t.guid, label(t)])];
-      const selected = this._mergeTargetGuid && targets.some((t) => t.guid === this._mergeTargetGuid) ? this._mergeTargetGuid : STAY_PUT;
-      this._mergeTargetGuid = selected;
-      const chosen = selected === STAY_PUT ? null : targets.find((t) => t.guid === selected);
-      const hint = !chosen ? `Recall.ai runs in ${selfName}, the collection it created when you installed it. Leave this alone unless you would rather it ran in a collection you already have.` : chosen.kind === "conflict" ? `A collection can only run one collection plugin, and ${chosen.occupant} is already in this one. Remove it there first, or choose another collection.` : chosen.kind === "ours" ? "Recall.ai already runs in this collection. Nothing to do \u2014 re-apply only to repair a broken install." : `Adds the properties Recall.ai writes to ${chosen.name}, points it at the ones it already has, and installs Recall.ai into it.`;
-      return h(
-        "div",
-        { class: `${ROOT_CLASS}-field` },
-        dupeWarning,
-        h("span", { class: `${ROOT_CLASS}-field-label` }, "Collection"),
-        h("select", {
-          value: selected,
-          onChange: /* @__PURE__ */ __name((event) => {
-            this._mergeTargetGuid = event.target.value;
-            this._renderPanel();
-          }, "onChange")
-        }, ...options.map(([value, text]) => h("option", { value, selected: value === selected }, text))),
-        h("span", { class: `${ROOT_CLASS}-field-hint` }, hint),
-        // No button at all while staying put: there is nothing to do, and a live button next to
-        // "current" is how you end up moving a plugin you never meant to move.
-        chosen ? button({
-          label: chosen.kind === "ours" ? "Re-apply Recall.ai" : `Add Recall.ai to ${chosen.name}`,
-          // Green means "do this". Re-apply is a quiet repair affordance, not a call to action.
-          variant: chosen.kind === "ours" ? "ghost" : "primary",
-          disabled: chosen.kind === "conflict",
-          onClick: /* @__PURE__ */ __name(() => void this._mergeIntoCollection(this._mergeTargetGuid), "onClick")
-        }) : null
-      );
-    }
     _registerSettingsPanel() {
       this._commandItem = this.ui.addCommandPaletteCommand({
         label: "Plugin: Recall.ai Meetings",
@@ -3707,7 +3419,6 @@ ${carried.map((b) => b.text).join("\n\n")}
         const root = pluginPanel.getElement();
         if (!root) return;
         this._settingsPanel = pluginPanel;
-        void this._refreshMergeTargets();
         this._panelEl = root;
         this._draft = { ...this._settings };
         this._renderPanel();
@@ -4784,17 +4495,22 @@ ${transcriptText}`
           },
           feedback: { data: this.data }
         }),
-        // FIRST, deliberately. Everything below is scoped to the collection Recall.ai runs in —
-        // Field Mapping in particular can only offer THIS collection's properties. Deciding to
-        // move to another collection afterwards makes that mapping work worthless, so the
-        // "where does this live" question has to be answered before anything else.
-        // Not collapsible: this is the first decision, and everything below is scoped to whatever
-        // it resolves to. A collapsed section reads as optional, and folding it away invites
-        // mapping fields against a collection you are about to leave.
+        // An ANNOUNCEMENT, not a control. This used to be a dropdown that "chose" the collection,
+        // which was a lie: it never moved anything, it wrote a SECOND copy of the plugin into
+        // another collection and left this one running. Two installs meant two pollers and two
+        // notetakers in the same meeting, billed twice — and before it was guarded, it would
+        // cheerfully overwrite a journal's JournalCorePlugin and stop the daily notes being daily
+        // notes. A plugin is bound to its collection for its whole life; the panel should say so
+        // and nothing more.
         section({
           label: "Collection",
-          hint: "Recall.ai runs in this collection. To use one you already have instead, move it now \u2014 the settings below apply to whichever collection it ends up in.",
-          body: [this._mergeUI()]
+          body: [
+            h(
+              "p",
+              { class: `${ROOT_CLASS}-field-hint` },
+              `Recall.ai runs in ${this._selfName()}, the collection it created when you installed it. Everything below applies to that collection.`
+            )
+          ]
         }),
         section({
           label: "Setup",
@@ -5220,16 +4936,6 @@ ${transcriptText}`
 				color: var(--tps-text);
 				font-size: var(--tps-fs-label);
 				font-weight: var(--tps-fw-medium);
-			}
-			.${ROOT_CLASS}-panel .${ROOT_CLASS}-warn {
-				margin: 0 0 10px;
-				padding: 10px 12px;
-				border: 1px solid var(--enum-orange-border, rgba(217, 131, 36, 0.45));
-				border-radius: var(--tps-radius-md, 6px);
-				background: var(--enum-orange-bg, rgba(217, 131, 36, 0.12));
-				color: var(--enum-orange-fg, #d98324);
-				font-size: var(--tps-fs-hint);
-				line-height: 1.45;
 			}
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-field-hint {
 				color: var(--tps-text-muted);
