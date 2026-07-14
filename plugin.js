@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.10.0";
+  var PLUGIN_VERSION = "1.10.1";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -5165,6 +5165,9 @@ ${transcriptText}`
     if (debug.kv === "MISSING") {
       return "The bridge has no KV namespace bound, so live transcript rows are being thrown away. In Cloudflare, open the Worker \u2192 Settings \u2192 Bindings and bind a KV namespace named RECALL_TRANSCRIPTS.";
     }
+    if (debug.recordings > 0 && debug.realtimeEndpoints === 0) {
+      return "Recall has registered no realtime endpoint for this bot, so nothing will stream live \u2014 though the full transcript will still arrive when the meeting ends. The webhook is attached when the bot is CREATED and cannot be added afterwards, so a bot sent before the Bridge URL was working will never stream. Send a new bot now that the bridge is set up.";
+    }
     const parts = [];
     const status = debug.botStatus || latestRecallStatus(bot);
     if (status) parts.push(`bot=${status}`);
@@ -5172,6 +5175,14 @@ ${transcriptText}`
     if (debug.transcriptArtifacts != null) parts.push(`transcripts=${debug.transcriptArtifacts}`);
     if (Array.isArray(debug.transcriptStatuses) && debug.transcriptStatuses.length) parts.push(`transcript_status=${debug.transcriptStatuses.join(",")}`);
     if (debug.hasDownloadUrl != null) parts.push(`download_url=${debug.hasDownloadUrl ? "yes" : "no"}`);
+    if (debug.realtimeEndpoints != null) parts.push(`realtime_endpoints=${debug.realtimeEndpoints}`);
+    if (Array.isArray(debug.realtimeEndpointStatuses) && debug.realtimeEndpointStatuses.length) {
+      parts.push(`realtime_status=${debug.realtimeEndpointStatuses.join(",")}`);
+    }
+    if (Array.isArray(debug.realtimeEndpointEvents) && debug.realtimeEndpointEvents.length) {
+      parts.push(`realtime_events=${debug.realtimeEndpointEvents.flat().join(",")}`);
+    }
+    if (debug.kv != null) parts.push(`kv=${debug.kv}`);
     if (debug.liveRows != null) parts.push(`live_rows=${debug.liveRows}`);
     if (transcript && transcript.pending) return `Transcript not ready yet${parts.length ? ` (${parts.join("; ")})` : ""}.`;
     if (transcript && transcript.live) return `No live transcript rows received yet${parts.length ? ` (${parts.join("; ")})` : ""}.`;
