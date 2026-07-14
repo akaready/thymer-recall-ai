@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.9.1";
+  var PLUGIN_VERSION = "1.10.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3090,7 +3090,7 @@ ${report}
   });
   var API_KEY_FIELDS = Object.freeze(["recallApiKey", "anthropicApiKey"]);
   var BOT_IMAGE_FIELDS = Object.freeze(["botImageData", "botImageName"]);
-  var SECRET_KEYS = Object.freeze([...API_KEY_FIELDS, ...BOT_IMAGE_FIELDS]);
+  var SECRET_KEYS = Object.freeze([...API_KEY_FIELDS]);
   function normalizePrefs(raw) {
     const src = raw && typeof raw === "object" ? raw : {};
     const str = /* @__PURE__ */ __name((key) => typeof src[key] === "string" ? src[key] : DEFAULT_SETTINGS[key], "str");
@@ -3105,6 +3105,8 @@ ${report}
       transcriptFieldId: str("transcriptFieldId"),
       summaryFieldId: str("summaryFieldId"),
       botImageUrl: str("botImageUrl"),
+      botImageData: str("botImageData"),
+      botImageName: str("botImageName"),
       botName: str("botName"),
       joinChatMessage: str("joinChatMessage"),
       sendJoinChatMessage: bool("sendJoinChatMessage"),
@@ -3120,9 +3122,7 @@ ${report}
     const str = /* @__PURE__ */ __name((key) => typeof src[key] === "string" ? src[key] : "", "str");
     return {
       recallApiKey: str("recallApiKey"),
-      anthropicApiKey: str("anthropicApiKey"),
-      botImageData: str("botImageData"),
-      botImageName: str("botImageName")
+      anthropicApiKey: str("anthropicApiKey")
     };
   }
   __name(normalizeSecrets, "normalizeSecrets");
@@ -3710,9 +3710,6 @@ ${report}
     _updateSetting(key, value, { rerender = false } = {}) {
       if (SECRET_KEYS.includes(key)) {
         this._secrets = normalizeSecrets({ ...this._secrets, [key]: value });
-        if (BOT_IMAGE_FIELDS.includes(key)) {
-          this._writeLocalSecretsEntry({ [key]: this._secrets[key] });
-        }
         this._recomputeSettings();
         if (rerender) this._renderPanel();
         return;
@@ -4498,28 +4495,22 @@ ${transcriptText}`
           },
           feedback: { data: this.data }
         }),
-        // An ANNOUNCEMENT, not a control. This used to be a dropdown that "chose" the collection,
-        // which was a lie: it never moved anything, it wrote a SECOND copy of the plugin into
-        // another collection and left this one running. Two installs meant two pollers and two
-        // notetakers in the same meeting, billed twice — and before it was guarded, it would
-        // cheerfully overwrite a journal's JournalCorePlugin and stop the daily notes being daily
-        // notes. A plugin is bound to its collection for its whole life; the panel should say so
-        // and nothing more.
-        section({
-          label: "Collection",
-          body: [
-            h(
-              "p",
-              { class: `${ROOT_CLASS}-field-hint` },
-              `Recall.ai runs in ${this._selfName()}, the collection it created when you installed it. Everything below applies to that collection.`
-            )
-          ]
-        }),
+        // Setup owns the collection note. It is an ANNOUNCEMENT, not a control: a plugin is bound
+        // to its collection for life. (It used to be a dropdown that "chose" the collection, which
+        // was a lie — it wrote a SECOND copy of the plugin elsewhere and left this one running.)
+        // It does not deserve a section of its own, so it lives here, under the toggle.
         section({
           label: "Setup",
           collapsible: true,
           defaultOpen: !this._isConfigured(),
-          body: [this._setupSteps()]
+          body: [
+            h(
+              "p",
+              { class: `${ROOT_CLASS}-collection-note` },
+              `Recall.ai runs in ${this._selfName()}, the collection it created when you installed it. Everything here applies to that collection.`
+            ),
+            this._setupSteps()
+          ]
         }),
         section({
           label: "Connection",
@@ -4675,18 +4666,52 @@ ${transcriptText}`
         hint ? h("span", { class: `${ROOT_CLASS}-field-hint` }, hint) : null
       );
     }
+    /**
+     * The bot's avatar. A DIV, never a <label> — label-forwarding would make a click anywhere in the
+     * row (including "Remove") reopen the file picker, the same trap that bites stepper buttons.
+     * The native <input type="file"> is hidden and driven by our own button, because "Choose File /
+     * No file chosen" is the browser's chrome, not ours, and cannot be styled.
+     */
     _fileInput(label, dataKey, nameKey) {
       const filename = this._draft[nameKey] || "";
+      const data = this._draft[dataKey] || "";
+      const picker = h("input", {
+        type: "file",
+        accept: "image/jpeg,image/jpg",
+        class: `${ROOT_CLASS}-file-native`,
+        onChange: /* @__PURE__ */ __name((event) => void this._setBotImageFile(event.target.files && event.target.files[0], dataKey, nameKey), "onChange")
+      });
+      const choose = h(
+        "button",
+        {
+          type: "button",
+          class: `${ROOT_CLASS}-upload`,
+          onClick: /* @__PURE__ */ __name(() => picker.click(), "onClick")
+        },
+        h("i", { class: `ti ti-upload ${ROOT_CLASS}-upload-icon`, "aria-hidden": "true" }),
+        filename ? "Replace" : "Choose JPEG"
+      );
+      const body = filename ? h(
+        "div",
+        { class: `${ROOT_CLASS}-file-set` },
+        data ? h("img", { class: `${ROOT_CLASS}-avatar`, src: `data:image/jpeg;base64,${data}`, alt: "" }) : null,
+        h("span", { class: `${ROOT_CLASS}-file-name` }, filename),
+        choose,
+        h("button", {
+          type: "button",
+          class: `${ROOT_CLASS}-file-remove`,
+          onClick: /* @__PURE__ */ __name(() => {
+            this._updateSetting(dataKey, "");
+            this._updateSetting(nameKey, "", { rerender: true });
+          }, "onClick")
+        }, "Remove")
+      ) : choose;
       return h(
-        "label",
+        "div",
         { class: `${ROOT_CLASS}-field` },
         h("span", { class: `${ROOT_CLASS}-field-label` }, label),
-        h("input", {
-          type: "file",
-          accept: "image/jpeg,image/jpg",
-          onChange: /* @__PURE__ */ __name((event) => void this._setBotImageFile(event.target.files && event.target.files[0], dataKey, nameKey), "onChange")
-        }),
-        filename ? h("span", { class: `${ROOT_CLASS}-field-hint` }, `Using ${filename}`) : null
+        picker,
+        body
       );
     }
     async _setBotImageFile(file, dataKey, nameKey) {
@@ -4695,8 +4720,8 @@ ${transcriptText}`
         this._toast("JPEG required", "Choose a .jpg or .jpeg file for the bot image.");
         return;
       }
-      if (file.size > 13e5) {
-        this._toast("Image too large", "Choose a JPEG under 1.3MB.");
+      if (file.size > 5e6) {
+        this._toast("Image too large", "Choose a JPEG under 5MB.");
         return;
       }
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -4948,6 +4973,105 @@ ${transcriptText}`
 				color: var(--tps-accent);
 				text-decoration: underline;
 				text-underline-offset: 2px;
+			}
+			/* The native file input is hidden, not removed \u2014 it still does the picking. */
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-file-native {
+				position: absolute;
+				width: 1px;
+				height: 1px;
+				padding: 0;
+				margin: -1px;
+				overflow: hidden;
+				clip: rect(0 0 0 0);
+				white-space: nowrap;
+				border: 0;
+			}
+			/* Green = a semantic success action, matching Save Settings: green border and text over a
+			   subtle green fill. Full perimeter, never a single-edge accent. */
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-upload {
+				display: inline-flex;
+				align-items: center;
+				gap: 6px;
+				align-self: flex-start;
+				width: auto;
+				height: var(--tps-control-h-md, 32px);
+				padding: 0 14px;
+				font: inherit;
+				font-size: var(--tps-fs-button, 12px);
+				font-weight: var(--tps-fw-medium, 500);
+				color: var(--tps-success, #10b981);
+				background: var(--tps-success-soft, color-mix(in srgb, var(--tps-success, #10b981) 12%, transparent));
+				border: 1px solid color-mix(in srgb, var(--tps-success, #10b981) 45%, transparent);
+				border-radius: var(--tps-radius-sm, 4px);
+				cursor: pointer;
+				transition: background-color var(--tps-dur-fast, 80ms) var(--tps-ease-out, ease),
+				            border-color var(--tps-dur-fast, 80ms) var(--tps-ease-out, ease);
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-upload:hover {
+				background: color-mix(in srgb, var(--tps-success, #10b981) 20%, transparent);
+				border-color: color-mix(in srgb, var(--tps-success, #10b981) 70%, transparent);
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-upload:focus-visible {
+				outline: 2px solid var(--tps-success, #10b981);
+				outline-offset: 2px;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-upload-icon {
+				font-size: 14px;
+				line-height: 1;
+			}
+			/* Already set: show the image, its name, and the two things you can do to it. */
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-file-set {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				padding: 8px 10px;
+				border: 1px solid var(--tps-divider);
+				border-radius: var(--tps-radius-md, 6px);
+				background: var(--tps-bg-input);
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-avatar {
+				flex: 0 0 auto;
+				width: 36px;
+				height: 36px;
+				border-radius: var(--tps-radius-circle, 50%);
+				object-fit: cover;
+				box-shadow: inset 0 0 0 1px var(--tps-swatch-inset, rgba(127, 127, 127, 0.18));
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-file-name {
+				flex: 1 1 auto;
+				min-width: 0;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+				font-size: var(--tps-fs-hint);
+				color: var(--tps-text);
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-file-remove {
+				flex: 0 0 auto;
+				width: auto;
+				height: var(--tps-control-h-sm, 28px);
+				padding: 0 10px;
+				font: inherit;
+				font-size: var(--tps-fs-button, 12px);
+				color: var(--tps-text-muted);
+				background: transparent;
+				border: 1px solid var(--tps-divider);
+				border-radius: var(--tps-radius-sm, 4px);
+				cursor: pointer;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-file-remove:hover {
+				color: var(--tps-danger);
+				border-color: color-mix(in srgb, var(--tps-danger) 40%, transparent);
+				background: var(--tps-danger-soft);
+			}
+			/* Sits above the numbered steps, inside Setup \u2014 context, not a step. */
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-collection-note {
+				margin: 0 0 12px;
+				padding: 0 0 12px;
+				border-bottom: 1px solid var(--tps-divider);
+				color: var(--tps-text-muted);
+				font-size: var(--tps-fs-hint);
+				line-height: 1.5;
 			}
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-steps {
 				margin: 0;
