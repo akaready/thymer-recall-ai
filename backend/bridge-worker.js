@@ -13,7 +13,16 @@ export default {
 		if (request.method === 'OPTIONS') return optionsResponse();
 		const url = new URL(request.url);
 		try {
-			if (request.method === 'GET' && url.pathname === '/health') return json({ ok: true });
+			if (request.method === 'GET' && url.pathname === '/health') {
+				// Report the KV binding. Without it the realtime transcript is silently discarded, and a
+				// bare {ok:true} would let you believe the bridge was fine while it dropped every row.
+				const store = transcriptStore(env);
+				return json({
+					ok: true,
+					kv: store ? 'bound' : 'MISSING',
+					kvHint: store ? undefined : 'Bind a KV namespace named RECALL_TRANSCRIPTS to this Worker, or the live transcript cannot be stored.',
+				});
+			}
 			if (request.method !== 'POST') return json({ error: 'Not found' }, 404);
 			if (url.pathname === '/api/recall/bots') return await createRecallBot(request, env);
 			if (url.pathname === '/api/recall/bot') return await getRecallBot(request, env);
@@ -367,14 +376,22 @@ async function loadLiveSession(botId, env) {
 
 async function saveLiveSession(session, env) {
 	const store = transcriptStore(env);
-	if (!store || !store.put) return;
+	if (!store || !store.put) {
+		// Workers run many isolates: the isolate Recall POSTs to is usually NOT the one the plugin
+		// polls. Without KV the rows live in one isolate's memory and are never seen again — which
+		// looks exactly like "Recall never sent a transcript". Say so, loudly, every time.
+		console.error('[recall-ai bridge] NO KV BINDING — the live transcript is being discarded. Bind a KV namespace named RECALL_TRANSCRIPTS to this Worker.', { botId: session.botId });
+		return;
+	}
 	try {
 		await store.put(`bot:${session.botId}`, JSON.stringify({
 			botId: session.botId,
 			rows: session.rows,
 			updatedAt: session.updatedAt,
 		}), { expirationTtl: 60 * 60 * 24 * 7 });
-	} catch {}
+	} catch (err) {
+		console.error('[recall-ai bridge] KV write failed — live transcript row lost', { botId: session.botId, error: errorMessage(err) });
+	}
 }
 
 function transcriptStore(env) {
@@ -450,6 +467,9 @@ async function transcriptDebug(env, region, apiKey, bot, live) {
 		transcriptArtifacts: shortcuts.length,
 		transcriptStatuses: shortcuts.map(transcript => transcript && transcript.status && (transcript.status.code || transcript.status)).filter(Boolean),
 		hasDownloadUrl: !!transcriptDownloadUrl(bot),
+		// The single most useful field here. liveRows=0 has two very different causes — Recall never
+		// called us, or we had nowhere to put what it sent — and they are indistinguishable without it.
+		kv: transcriptStore(env) ? 'bound' : 'MISSING',
 		liveRows: live && Array.isArray(live.results) ? live.results.length : 0,
 		liveUpdatedAt: live ? live.updatedAt : null,
 		...realtime,

@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.9.0";
+  var PLUGIN_VERSION = "1.9.1";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3948,15 +3948,18 @@ ${report}
           rows: transcriptRowCount(transcript),
           debug: transcript && transcript.debug || null
         });
+        const ended = !!bot && isMeetingEndedStatus(status);
+        const terminal = !!bot && isTerminalStatus(status);
         if (transcriptText) {
           this._setMappedField(record, FIELDS.TRANSCRIPT, transcriptText);
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._log("transcript written", { botId, characters: transcriptText.length });
-        } else {
+        } else if (terminal || transcript && transcript.debug && transcript.debug.kv === "MISSING") {
           this._setField(record, FIELDS.LAST_ERROR, describeTranscriptState(transcript, bot));
+        } else {
+          this._setField(record, FIELDS.LAST_ERROR, "");
+          this._log("transcript pending", { botId, state: describeTranscriptState(transcript, bot) });
         }
-        const ended = !!bot && isMeetingEndedStatus(status);
-        const terminal = !!bot && isTerminalStatus(status);
         const hasSummary = !!this._text(record, this._mappedFieldId(FIELDS.SUMMARY));
         if (ended && summarize && this._settings.autoSummarize && !hasSummary) {
           if (!transcriptText) {
@@ -5035,6 +5038,9 @@ ${transcriptText}`
   __name(transcriptRowCount, "transcriptRowCount");
   function describeTranscriptState(transcript, bot) {
     const debug = transcript && transcript.debug || {};
+    if (debug.kv === "MISSING") {
+      return "The bridge has no KV namespace bound, so live transcript rows are being thrown away. In Cloudflare, open the Worker \u2192 Settings \u2192 Bindings and bind a KV namespace named RECALL_TRANSCRIPTS.";
+    }
     const parts = [];
     const status = debug.botStatus || latestRecallStatus(bot);
     if (status) parts.push(`bot=${status}`);
