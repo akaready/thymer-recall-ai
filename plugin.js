@@ -2571,11 +2571,16 @@ ${report}
     if (!plugin) return null;
     if (typeof plugin.saveConfiguration === "function") return plugin;
     try {
-      const guid = typeof plugin.getGuid === "function" ? plugin.getGuid() : null;
       const data = plugin.data;
+      const guid = typeof plugin.getGuid === "function" && plugin.getGuid() || plugin.collection && typeof plugin.collection.getGuid === "function" && plugin.collection.getGuid() || null;
       if (guid && data && typeof data.getPluginByGuid === "function") {
         const byGuid = data.getPluginByGuid(guid);
         if (byGuid && typeof byGuid.saveConfiguration === "function") return byGuid;
+      }
+      if (guid && data && typeof data.getAllCollections === "function") {
+        const all = await data.getAllCollections();
+        const found = (all || []).find((c) => c && typeof c.getGuid === "function" && c.getGuid() === guid);
+        if (found && typeof found.saveConfiguration === "function") return found;
       }
       if (data && typeof data.getAllGlobalPlugins === "function") {
         const all = await data.getAllGlobalPlugins();
@@ -3104,7 +3109,7 @@ class Plugin extends CollectionPlugin {
   __name(assertCodeSafe, "assertCodeSafe");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.8.0";
+  var PLUGIN_VERSION = "1.8.1";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3497,10 +3502,24 @@ class Plugin extends CollectionPlugin {
       if (verdict.kind === "owner") return { kind: "conflict", occupant: verdict.occupant };
       return { kind: "blank", occupant: "" };
     }
+    /**
+     * This collection's guid.
+     *
+     * NOT `this.getGuid()` — that is an AppPlugin method and does not exist on CollectionPlugin,
+     * so calling it threw `this.getGuid is not a function` and killed the merge outright. The guid
+     * lives on `this.collection`.
+     */
+    _selfGuid() {
+      try {
+        return (this.collection && this.collection.getGuid ? this.collection.getGuid() : "") || "";
+      } catch {
+        return "";
+      }
+    }
     async _refreshMergeTargets() {
       try {
         const all = await this.data.getAllCollections();
-        const selfGuid = this.getGuid ? this.getGuid() : "";
+        const selfGuid = this._selfGuid();
         this._mergeTargets = (all || []).filter((c) => c && c.getGuid && c.getGuid() !== selfGuid).map((c) => {
           let code = "";
           try {
@@ -3526,7 +3545,7 @@ class Plugin extends CollectionPlugin {
         );
       }
       try {
-        const self = this.data.getPluginByGuid(this.getGuid());
+        const self = this.data.getPluginByGuid(this._selfGuid());
         const mine = self && self.getExistingCodeAndConfig ? self.getExistingCodeAndConfig() : null;
         const code = mine && mine.code ? mine.code : "";
         const myFields = mine && mine.json && mine.json.fields || [];
@@ -3606,10 +3625,12 @@ ${carried.map((b) => b.text).join("\n\n")}
             this._renderPanel();
           }, "onChange")
         }, ...options.map(([value, text]) => h("option", { value, selected: value === selected }, text))),
-        h("span", { class: `${ROOT_CLASS}-field-hint` }, chosen && chosen.kind === "conflict" ? `A collection can only run one collection plugin, and ${chosen.occupant} is already in this one. Remove it there first, or choose another collection.` : "Adds the properties Recall.ai writes to, points it at the ones you already have, and installs it into that collection."),
+        h("span", { class: `${ROOT_CLASS}-field-hint` }, chosen && chosen.kind === "conflict" ? `A collection can only run one collection plugin, and ${chosen.occupant} is already in this one. Remove it there first, or choose another collection.` : chosen && chosen.kind === "ours" ? "Recall.ai already runs in this collection. Nothing to do \u2014 re-apply only to repair a broken install." : "Adds the properties Recall.ai writes to, points it at the ones you already have, and installs it into that collection."),
         button({
           label: chosen && chosen.kind === "ours" ? "Re-apply Recall.ai" : "Add Recall.ai to this collection",
-          variant: "primary",
+          // Green is a call to action — "do this". Once the plugin IS in the collection there is
+          // nothing to do, so re-apply is a quiet repair affordance, not the thing to reach for.
+          variant: chosen && chosen.kind === "ours" ? "ghost" : "primary",
           disabled: !chosen || chosen.kind === "conflict",
           onClick: /* @__PURE__ */ __name(() => void this._mergeIntoCollection(this._mergeTargetGuid), "onClick")
         })
@@ -3953,7 +3974,7 @@ ${carried.map((b) => b.text).join("\n\n")}
       this._handlerIds.push(on("collection.updated", (event) => {
         try {
           if (event && event.source && event.source.isLocal) return;
-          const guid = (this.collection && this.collection.getGuid ? this.collection.getGuid() : "") || (this.getGuid ? this.getGuid() : "");
+          const guid = this._selfGuid();
           if (event && event.collectionGuid && guid && event.collectionGuid !== guid) return;
           let changed = false;
           const nextSecrets = this._loadSecrets();
@@ -4000,7 +4021,11 @@ ${carried.map((b) => b.text).join("\n\n")}
         localUnavailable: !!this._settingsStore.isLocalUnavailable(),
         onPush: /* @__PURE__ */ __name(() => {
           void this._settingsStore.pushToAll().then((ok) => {
-            if (!ok) return;
+            if (!ok) {
+              this._refreshScopePill();
+              this._toast("Could not apply to all devices", "Thymer did not hand over a writable config handle for this collection.");
+              return;
+            }
             this._toast("Recall.ai Meetings", "Settings applied to all devices");
             this._refreshScopePill();
           });
@@ -4706,11 +4731,12 @@ ${transcriptText}`
         // Field Mapping in particular can only offer THIS collection's properties. Deciding to
         // move to another collection afterwards makes that mapping work worthless, so the
         // "where does this live" question has to be answered before anything else.
+        // Not collapsible: this is the first decision, and everything below is scoped to whatever
+        // it resolves to. A collapsed section reads as optional, and folding it away invites
+        // mapping fields against a collection you are about to leave.
         section({
           label: "Collection",
           hint: "Recall.ai runs in this collection. To use one you already have instead, move it now \u2014 the settings below apply to whichever collection it ends up in.",
-          collapsible: true,
-          defaultOpen: !this._isConfigured(),
           body: [this._mergeUI()]
         }),
         section({
