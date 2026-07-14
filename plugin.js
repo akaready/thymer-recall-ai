@@ -3104,7 +3104,7 @@ class Plugin extends CollectionPlugin {
   __name(assertCodeSafe, "assertCodeSafe");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.7.2";
+  var PLUGIN_VERSION = "1.8.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3115,6 +3115,22 @@ class Plugin extends CollectionPlugin {
     STATUS: "recall_status",
     LAST_ERROR: "last_error"
   });
+  var FIELD_DEFS = Object.freeze({
+    [FIELDS.MEETING_URL]: { id: FIELDS.MEETING_URL, label: "Meeting URL", type: "url", icon: "ti-link", many: false, read_only: false, active: true },
+    [FIELDS.JOIN_AT]: { id: FIELDS.JOIN_AT, label: "Join At", type: "datetime", icon: "ti-calendar-time", many: false, read_only: false, active: true },
+    [FIELDS.TRANSCRIPT]: { id: FIELDS.TRANSCRIPT, label: "Transcript", type: "text", icon: "ti-file-text", many: false, read_only: false, active: true },
+    [FIELDS.SUMMARY]: { id: FIELDS.SUMMARY, label: "Summary", type: "text", icon: "ti-sparkles", many: false, read_only: false, active: true },
+    [FIELDS.BOT_ID]: { id: FIELDS.BOT_ID, label: "Recall Bot ID", type: "text", icon: "ti-robot", many: false, read_only: false, active: true },
+    [FIELDS.STATUS]: { id: FIELDS.STATUS, label: "Recall Status", type: "text", icon: "ti-activity", many: false, read_only: false, active: true },
+    [FIELDS.LAST_ERROR]: { id: FIELDS.LAST_ERROR, label: "Last Error", type: "text", icon: "ti-alert-triangle", many: false, read_only: false, active: true }
+  });
+  var CANONICAL_FIELD_FOR_SETTING = Object.freeze({
+    meetingUrlFieldId: FIELDS.MEETING_URL,
+    joinAtFieldId: FIELDS.JOIN_AT,
+    transcriptFieldId: FIELDS.TRANSCRIPT,
+    summaryFieldId: FIELDS.SUMMARY
+  });
+  var CREATE_FIELD_OPTION = "__create__";
   var ROOT_CLASS = "plg-recall-ai";
   var PANEL_TYPE = "recall-ai-settings";
   var CONFIG_KEY = "recallAi";
@@ -3159,7 +3175,7 @@ class Plugin extends CollectionPlugin {
   var DEFAULT_SETTINGS = Object.freeze({
     version: 1,
     recallApiKey: "",
-    recallRegion: "us-east-1",
+    recallRegion: "us-west-2",
     anthropicApiKey: "",
     anthropicModel: "claude-sonnet-4-6",
     bridgeUrl: "",
@@ -3522,7 +3538,7 @@ class Plugin extends CollectionPlugin {
         const added = [];
         const addField = /* @__PURE__ */ __name((id) => {
           if (have.has(id)) return;
-          const f = myFields.find((x) => String(x.id) === id);
+          const f = myFields.find((x) => String(x.id) === id) || FIELD_DEFS[id];
           if (!f) return;
           conf.fields.push(JSON.parse(JSON.stringify(f)));
           have.add(id);
@@ -4384,7 +4400,7 @@ ${transcriptText}`
       return headers;
     }
     _recallBaseUrl() {
-      return RECALL_REGIONS[this._settings.recallRegion] || RECALL_REGIONS["us-east-1"];
+      return RECALL_REGIONS[this._settings.recallRegion] || RECALL_REGIONS["us-west-2"];
     }
     _bridgeUrl() {
       return String(this._settings.bridgeUrl || "").trim().replace(/\/+$/, "");
@@ -4686,6 +4702,17 @@ ${transcriptText}`
           },
           feedback: { data: this.data }
         }),
+        // FIRST, deliberately. Everything below is scoped to the collection Recall.ai runs in —
+        // Field Mapping in particular can only offer THIS collection's properties. Deciding to
+        // move to another collection afterwards makes that mapping work worthless, so the
+        // "where does this live" question has to be answered before anything else.
+        section({
+          label: "Collection",
+          hint: "Recall.ai runs in this collection. To use one you already have instead, move it now \u2014 the settings below apply to whichever collection it ends up in.",
+          collapsible: true,
+          defaultOpen: !this._isConfigured(),
+          body: [this._mergeUI()]
+        }),
         section({
           label: "Setup",
           collapsible: true,
@@ -4704,7 +4731,7 @@ ${transcriptText}`
         }),
         section({
           label: "Field Mapping",
-          hint: "Point these at your own properties to retire the built-in ones. Auto-detect uses the plugin defaults.",
+          hint: "Which of this collection's properties Recall.ai should read and write. Moving to another collection (top) changes what can be listed here, so do that first.",
           body: [
             this._fieldSelectInput("Meeting URL field", "meetingUrlFieldId", ["url", "text"]),
             this._fieldSelectInput("Join At field", "joinAtFieldId", ["datetime", "date"]),
@@ -4713,18 +4740,11 @@ ${transcriptText}`
           ]
         }),
         section({
-          label: "Add to an existing collection",
-          hint: "Run Recall.ai on a collection you already have, instead of this one.",
-          collapsible: true,
-          defaultOpen: false,
-          body: [this._mergeUI()]
-        }),
-        section({
           label: "Recall",
           body: [
             this._selectInput("Region", "recallRegion", [
-              ["us-east-1", "US East 1"],
               ["us-west-2", "US West 2"],
+              ["us-east-1", "US East 1"],
               ["eu-central-1", "EU Central 1"],
               ["ap-northeast-1", "Japan"],
               ["payg", "Pay-as-you-go"]
@@ -4911,15 +4931,17 @@ ${transcriptText}`
         })
       );
     }
-    _selectInput(label, key, options) {
+    _selectInput(label, key, options, { onChange, hint } = {}) {
+      const current = this._draft[key] || DEFAULT_SETTINGS[key];
       return h(
         "label",
         { class: `${ROOT_CLASS}-field` },
         h("span", { class: `${ROOT_CLASS}-field-label` }, label),
         h("select", {
-          value: this._draft[key] || DEFAULT_SETTINGS[key],
-          onChange: /* @__PURE__ */ __name((event) => this._updateSetting(key, event.target.value, { rerender: true }), "onChange")
-        }, ...options.map(([value, label2]) => h("option", { value, selected: (this._draft[key] || DEFAULT_SETTINGS[key]) === value }, label2)))
+          value: current,
+          onChange: /* @__PURE__ */ __name((event) => onChange ? onChange(event.target.value) : this._updateSetting(key, event.target.value, { rerender: true }), "onChange")
+        }, ...options.map(([value, optionLabel]) => h("option", { value, selected: current === value }, optionLabel))),
+        hint ? h("span", { class: `${ROOT_CLASS}-field-hint` }, hint) : null
       );
     }
     _modelSelectInput(label, key) {
@@ -4930,6 +4952,41 @@ ${transcriptText}`
       }
       return this._selectInput(label, key, options);
     }
+    /**
+     * Add the canonical property to this collection, for the case the dropdown exists to solve:
+     * the collection simply has no property of the right type, so Auto-detect finds nothing and
+     * there is nothing to pick. Offering only a list of unusable properties is a dead end.
+     *
+     * It is created under its CANONICAL id, so Auto-detect picks it up with no mapping to set.
+     * `saveConfiguration` reloads the plugin; the panel re-mounts itself in `onLoad`.
+     */
+    async _createCollectionField(canonicalId) {
+      const def = FIELD_DEFS[canonicalId];
+      if (!def) return;
+      try {
+        const api = await resolveConfigApi(this);
+        if (!api || typeof api.saveConfiguration !== "function") {
+          throw new Error("Thymer did not hand over a writable config handle.");
+        }
+        const live = api.getConfiguration?.() || this.getConfiguration?.() || {};
+        const conf = JSON.parse(JSON.stringify(live));
+        conf.fields = Array.isArray(conf.fields) ? conf.fields : [];
+        if (conf.fields.some((field) => String(field.id) === canonicalId)) return;
+        conf.fields.push({ ...def });
+        if (Array.isArray(conf.page_field_ids) && !conf.page_field_ids.includes(canonicalId)) {
+          conf.page_field_ids.push(canonicalId);
+        }
+        const table = (conf.views || []).find((view) => String(view.type || "") === "table");
+        if (table && Array.isArray(table.field_ids) && !table.field_ids.includes(canonicalId)) {
+          table.field_ids.push(canonicalId);
+        }
+        const ok = await api.saveConfiguration(conf);
+        if (ok === false) throw new Error("Thymer rejected the change.");
+        this._toast(`Added "${def.label}"`, "Auto-detect will use it from now on.");
+      } catch (err) {
+        this._toast(`Could not add "${def.label}"`, this._errorMessage(err));
+      }
+    }
     _fieldSelectInput(label, key, types) {
       const allowed = new Set((types || []).map((type) => String(type).toLowerCase()));
       const fields = this._collectionFields().filter((field) => !allowed.size || allowed.has(String(field.type || "").toLowerCase()));
@@ -4939,7 +4996,21 @@ ${transcriptText}`
       }
       const current = this._draft[key] || "";
       if (current && !options.some(([value]) => value === current)) options.push([current, current]);
-      return this._selectInput(label, key, options);
+      const canonical = CANONICAL_FIELD_FOR_SETTING[key] || "";
+      const def = canonical ? FIELD_DEFS[canonical] : null;
+      const missing = !!def && !this._fieldById(canonical);
+      if (missing) options.push([CREATE_FIELD_OPTION, `Create a "${def.label}" property\u2026`]);
+      return this._selectInput(label, key, options, {
+        onChange: /* @__PURE__ */ __name((value) => {
+          if (value === CREATE_FIELD_OPTION) {
+            void this._createCollectionField(canonical);
+            this._renderPanel();
+            return;
+          }
+          this._updateSetting(key, value, { rerender: true });
+        }, "onChange"),
+        hint: missing && !fields.length ? `This collection has no ${(types || []).join(" or ")} property for Recall.ai to use. Create one above.` : ""
+      });
     }
     _textareaInput(label, key, rows = 4) {
       return h(
