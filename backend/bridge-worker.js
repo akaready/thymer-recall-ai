@@ -27,6 +27,7 @@ export default {
 			if (url.pathname === '/api/recall/bots') return await createRecallBot(request, env);
 			if (url.pathname === '/api/recall/bot') return await getRecallBot(request, env);
 			if (url.pathname === '/api/recall/transcript') return await getRecallTranscript(request, env);
+			if (url.pathname === '/api/recall/leave') return await leaveRecallCall(request, env);
 			if (url.pathname === '/api/recall/realtime') return await receiveRealtimeTranscript(request, env);
 			if (url.pathname === '/api/anthropic/summary') return await createSummary(request, env);
 			return json({ error: 'Not found' }, 404);
@@ -91,6 +92,23 @@ async function getRecallBot(request, env) {
 	const data = await safeJson(response);
 	if (!response.ok) return json({ error: recallError(data, response.status), detail: data }, response.status);
 	return json(data);
+}
+
+/** Pull the notetaker out of the call. Recall keeps whatever it has already recorded. */
+async function leaveRecallCall(request, env) {
+	const body = await readJson(request);
+	const apiKey = body.recallApiKey || env.RECALL_API_KEY;
+	if (!apiKey) return json({ error: 'Missing Recall API key' }, 400);
+	if (!body.botId) return json({ error: 'Missing bot id' }, 400);
+	const response = await recallFetch(env, body.recallRegion, `/api/v1/bot/${encodeURIComponent(body.botId)}/leave_call/`, {
+		method: 'POST',
+		headers: recallHeaders(apiKey),
+		body: JSON.stringify({}),
+	});
+	const data = await safeJson(response);
+	// Recall answers 200/202 with the bot, or 204 with nothing at all.
+	if (!response.ok) return json({ error: recallErrorMessage(data, response.status), detail: data }, response.status);
+	return json(data && typeof data === 'object' ? data : { ok: true });
 }
 
 async function getRecallTranscript(request, env) {

@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.10.2";
+  var PLUGIN_VERSION = "1.11.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3315,6 +3315,11 @@ ${report}
         onlyWhenExpanded: true,
         onClick: /* @__PURE__ */ __name(({ record }) => {
           this._activeRecordGuid = record && record.guid || "";
+          const kind = this._recordVisualState(record).kind;
+          if (kind === "recording" || kind === "scheduled") return void this._stopBot(record);
+          if (kind === "summarizing" || kind === "processing") {
+            return this._toast("Recall.ai is still working", "The meeting is over and the transcript is being processed. Nothing to do.");
+          }
           void this._startBot(record);
         }, "onClick")
       });
@@ -3822,6 +3827,14 @@ ${report}
     async _startBot(record, { immediate = false } = {}) {
       if (!record) return this._toast("Open a Meeting record first", "The Recall.ai button needs an active record in this collection.");
       if (!this._settings.recallApiKey) return this._toast("Recall API key required", "Open Plugin: Recall.ai Meetings and add a Recall API key.");
+      const activeBot = this._text(record, FIELDS.BOT_ID);
+      const activeStatus = this._text(record, FIELDS.STATUS);
+      if (activeBot && !isTerminalStatus(activeStatus) && activeStatus !== "error") {
+        return this._toast(
+          "A notetaker is already on this meeting",
+          `Bot ${activeBot} is ${activeStatus || "active"}. Sending another would put two bots in the same call and bill you twice. Stop this one first.`
+        );
+      }
       const meetingUrl = this._meetingUrl(record);
       if (!meetingUrl) {
         this._setField(record, FIELDS.LAST_ERROR, "Missing meeting URL.");
@@ -3847,6 +3860,39 @@ ${report}
         this._setField(record, FIELDS.LAST_ERROR, this._errorMessage(err));
         this._toast("Unable to send transcriber", this._errorMessage(err));
       }
+    }
+    /**
+     * Pull the notetaker out of the call. Recall keeps whatever it already recorded, so polling
+     * carries on and the transcript and summary still land — this ends the bot's attendance, it does
+     * not throw the meeting away.
+     */
+    async _stopBot(record) {
+      const botId = record ? this._text(record, FIELDS.BOT_ID) : "";
+      if (!botId) return this._toast("No notetaker to stop", "This meeting has no active Recall bot.");
+      try {
+        this._setField(record, FIELDS.STATUS, "leaving call");
+        this._updateNavButtonForRecord(record);
+        if (this._bridgeUrl()) {
+          await this._bridgeJson("/api/recall/leave", {
+            recallApiKey: this._settings.recallApiKey,
+            recallRegion: this._settings.recallRegion,
+            botId
+          });
+        } else {
+          const response = await fetchWithBackoff(`${this._recallBaseUrl()}/api/v1/bot/${encodeURIComponent(botId)}/leave_call/`, {
+            method: "POST",
+            headers: this._recallHeaders(),
+            body: JSON.stringify({})
+          });
+          if (!response.ok) throw new Error(recallError(await response.json().catch(() => ({})), response.status));
+        }
+        this._toast("Notetaker leaving", "Recall keeps what it already recorded \u2014 the transcript and summary will still arrive.");
+        void this._syncRecord(record, { summarize: true, quiet: true, botId });
+      } catch (err) {
+        this._setField(record, FIELDS.LAST_ERROR, this._errorMessage(err));
+        this._toast("Could not stop the notetaker", this._errorMessage(err));
+      }
+      this._updateNavButtonForRecord(record);
     }
     /**
      * @param {{immediate?: boolean}} [opts] Threaded from `_startBot`. It MUST be a parameter: when
@@ -4162,13 +4208,13 @@ ${transcriptText}`
         kind: "scheduled",
         icon: "clock",
         label: "Scheduled",
-        tooltip: "The notetaker is booked and will join when the meeting starts"
+        tooltip: "The notetaker is booked \u2014 click to cancel it"
       };
       if (botId && !isTerminalStatus(status) && status !== "error") return {
         kind: "recording",
         icon: "circle-dot",
         label: "Recording",
-        tooltip: "Recall.ai bot is in or joining this meeting"
+        tooltip: "Recall.ai bot is in this meeting \u2014 click to stop it"
       };
       if (this._isScheduledDispatch(record)) return {
         kind: "schedulable",
