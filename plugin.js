@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.11.0";
+  var PLUGIN_VERSION = "1.12.1";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -4074,6 +4074,7 @@ ${report}
         this._setField(record, FIELDS.STATUS, "summarized");
         this._updateNavButtonForRecord(record);
         this._log("summary written", { characters: summary.length });
+        await this._writeNotesToBody(record, { summary, transcriptText });
       } catch (err) {
         this._setField(record, FIELDS.LAST_ERROR, `Summary failed: ${this._errorMessage(err)}`);
         this._setField(record, FIELDS.STATUS, "summary_failed");
@@ -4114,6 +4115,58 @@ ${transcriptText}`
       const json = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(anthropicError(json, response.status));
       return Array.isArray(json.content) ? json.content.map((part) => part && part.type === "text" ? part.text : "").join("\n").trim() : "";
+    }
+    /**
+     * Render summary + transcript into the record BODY as real Thymer blocks (headings, bold,
+     * checkboxes) via insertFromMarkdown — a property can only show markdown as literal text.
+     *
+     * ADDITIVE and guarded ONCE per bot. insertFromMarkdown appends (it does not replace), line items
+     * expose no getText() to find our old blocks, and delete() refuses items with children — so a
+     * "clear then rewrite" would be fragile and could clobber the user's own notes. Instead we write
+     * exactly once per recording: the localStorage guard keyed on the bot id makes the poll loop's
+     * repeated calls a no-op after the first. A genuinely new recording (new bot id) writes a new
+     * section, which is what you want.
+     */
+    async _writeNotesToBody(record, { summary, transcriptText }) {
+      if (!record || typeof record.insertFromMarkdown !== "function") return;
+      const botId = this._text(record, FIELDS.BOT_ID);
+      const guardKey = `recall-ai/${this._selfGuid() || "collection"}/${record.guid || ""}/notes-body`;
+      try {
+        if (botId && localStorage.getItem(guardKey) === botId) return;
+      } catch {
+      }
+      const esc = /* @__PURE__ */ __name((md) => String(md || "").replace(/#(?=\d)/g, "\\#"), "esc");
+      const hasSummary = !!(summary && summary.trim());
+      const hasTranscript = !!(transcriptText && transcriptText.trim());
+      if (!hasSummary && !hasTranscript) return;
+      try {
+        const newHeading = /* @__PURE__ */ __name(async (title, afterItem) => {
+          if (typeof record.getLineItems !== "function") return null;
+          const before = new Set((await record.getLineItems(false)).map((li) => li.guid));
+          const ok = await record.insertFromMarkdown(`### ${title}`, null, afterItem || null);
+          if (ok === false) return null;
+          const after = await record.getLineItems(false);
+          return after.find((li) => li.type === "heading" && !before.has(li.guid)) || null;
+        }, "newHeading");
+        const summaryHead = hasSummary ? await newHeading("\u{1F4DD} Summary", null) : null;
+        const transcriptHead = hasTranscript ? await newHeading("\u{1F399}\uFE0F Transcript", summaryHead) : null;
+        if (hasSummary && !summaryHead) await record.insertFromMarkdown(`### \u{1F4DD} Summary
+
+${esc(summary.trim())}`, null, null);
+        else if (summaryHead) await record.insertFromMarkdown(esc(summary.trim()), summaryHead, null);
+        if (hasTranscript && !transcriptHead) await record.insertFromMarkdown(`### \u{1F399}\uFE0F Transcript
+
+${esc(transcriptText.trim())}`, null, null);
+        else if (transcriptHead) await record.insertFromMarkdown(esc(transcriptText.trim()), transcriptHead, null);
+        try {
+          if (botId) localStorage.setItem(guardKey, botId);
+        } catch {
+        }
+        this._log("notes written to body", { botId, collapsible: !!(summaryHead || transcriptHead) });
+      } catch (err) {
+        this._log("notes body write failed", { error: this._errorMessage(err) });
+        this._toast("Notes saved to properties", "Could not render them into the page body: " + this._errorMessage(err));
+      }
     }
     _ensurePolling(record, botId) {
       if (!this._pollers) this._pollers = /* @__PURE__ */ new Map();
