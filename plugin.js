@@ -2950,7 +2950,8 @@ class Plugin extends CollectionPlugin {
     try {
       new Function(text);
     } catch (e) {
-      return { ok: false, reason: `would not parse \u2014 ${e.message}` };
+      const message = e instanceof Error ? e.message : String(e);
+      return { ok: false, reason: `would not parse \u2014 ${message}` };
     }
     if (!/\bclass\s+Plugin\b|\bvar\s+Plugin\s*=|\bPlugin\s*=\s*class\b/.test(text)) {
       return { ok: false, reason: "declares no Plugin class \u2014 the collection would not load" };
@@ -2960,7 +2961,7 @@ class Plugin extends CollectionPlugin {
   __name(assertCodeSafe, "assertCodeSafe");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.7.0";
+  var PLUGIN_VERSION = "1.7.1";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3860,7 +3861,7 @@ ${carried.map((b) => b.text).join("\n\n")}
      * @param {{immediate?: boolean}} [opts] immediate: ignore Join At and send the bot in
      *   right now. Lets you override a scheduled meeting without clearing the field.
      */
-    async _startBot(record, { immediate: immediate2 = false } = {}) {
+    async _startBot(record, { immediate = false } = {}) {
       if (!record) return this._toast("Open a Meeting record first", "The Recall.ai button needs an active record in this collection.");
       if (!this._settings.recallApiKey) return this._toast("Recall API key required", "Open Plugin: Recall.ai Meetings and add a Recall API key.");
       const meetingUrl = this._meetingUrl(record);
@@ -3873,7 +3874,7 @@ ${carried.map((b) => b.text).join("\n\n")}
         this._setField(record, FIELDS.STATUS, "creating bot");
         this._updateNavButtonForRecord(record);
         this._setField(record, FIELDS.LAST_ERROR, "");
-        const json = await this._createRecallBot(record, meetingUrl);
+        const json = await this._createRecallBot(record, meetingUrl, { immediate });
         const botId = json.botId || json.id || json.bot_id;
         if (!botId) throw new Error("Recall did not return a bot id.");
         this._setField(record, FIELDS.BOT_ID, botId);
@@ -3889,7 +3890,13 @@ ${carried.map((b) => b.text).join("\n\n")}
         this._toast("Unable to send transcriber", this._errorMessage(err));
       }
     }
-    async _createRecallBot(record, meetingUrl) {
+    /**
+     * @param {{immediate?: boolean}} [opts] Threaded from `_startBot`. It MUST be a parameter: when
+     *   it was only referenced here, `immediate` was a free variable bound to nothing, so every send
+     *   threw `ReferenceError: immediate is not defined` — swallowed by `_startBot`'s catch into a
+     *   bare "Unable to send transcriber" toast. No bot could be sent at all (1.6.0–1.7.0).
+     */
+    async _createRecallBot(record, meetingUrl, { immediate = false } = {}) {
       const payload = this._createBotPayload(record, meetingUrl, { immediate });
       if (this._bridgeUrl()) {
         return await this._bridgeJson("/api/recall/bots", {
@@ -3910,7 +3917,7 @@ ${carried.map((b) => b.text).join("\n\n")}
       if (!response.ok) throw new Error(recallError(json, response.status));
       return json;
     }
-    _createBotPayload(record, meetingUrl, { immediate: immediate2 = false } = {}) {
+    _createBotPayload(record, meetingUrl, { immediate = false } = {}) {
       const payload = {
         meeting_url: meetingUrl,
         bot_name: this._settings.botName || DEFAULT_SETTINGS.botName,
@@ -3941,7 +3948,7 @@ ${carried.map((b) => b.text).join("\n\n")}
           events: ["transcript.data", "transcript.partial_data"]
         }];
       }
-      const joinAt = immediate2 ? null : this._joinAtIso(record);
+      const joinAt = immediate ? null : this._joinAtIso(record);
       if (joinAt) payload.join_at = joinAt;
       if (this._settings.sendJoinChatMessage && this._settings.joinChatMessage) {
         payload.chat = {
