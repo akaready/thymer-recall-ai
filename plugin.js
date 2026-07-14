@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.12.1";
+  var PLUGIN_VERSION = "1.12.2";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -4163,9 +4163,35 @@ ${esc(transcriptText.trim())}`, null, null);
         } catch {
         }
         this._log("notes written to body", { botId, collapsible: !!(summaryHead || transcriptHead) });
+        this._repaintRecordIfOpen(record, summaryHead || transcriptHead || null);
       } catch (err) {
         this._log("notes body write failed", { error: this._errorMessage(err) });
         this._toast("Notes saved to properties", "Could not render them into the page body: " + this._errorMessage(err));
+      }
+    }
+    /**
+     * Force the open editor to re-render a record after a background write.
+     *
+     * Thymer paints the editor on navigation/focus, not when a plugin mutates a record out of band —
+     * so poll-inserted body content sits invisible until the user navigates away and back. There is
+     * no repaint API; re-navigating the panel to the same record is the mechanism. Only touches the
+     * panel actually showing this record, and only when asked (once, as the notes land) — never on
+     * every poll, which would yank the cursor mid-read.
+     *
+     * @param {any} record
+     * @param {any} focusItem a line item to scroll to and highlight, or null
+     */
+    _repaintRecordIfOpen(record, focusItem) {
+      if (!record || !record.guid) return;
+      try {
+        const panel2 = this.ui && this.ui.getActivePanel ? this.ui.getActivePanel() : null;
+        if (!panel2 || typeof panel2.navigateTo !== "function") return;
+        const active = panel2.getActiveRecord ? panel2.getActiveRecord() : null;
+        if (!active || active.guid !== record.guid) return;
+        const nav = focusItem && focusItem.guid ? panel2.navigateTo({ type: "edit_panel", rootId: null, subId: null, workspaceGuid: null, itemGuid: focusItem.guid, highlight: true }) : panel2.navigateTo({ type: "edit_panel", rootId: record.guid, subId: null, workspaceGuid: null });
+        if (nav && typeof nav.catch === "function") nav.catch(() => {
+        });
+      } catch {
       }
     }
     _ensurePolling(record, botId) {
