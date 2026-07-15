@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.12.3";
+  var PLUGIN_VERSION = "1.12.4";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -4163,7 +4163,7 @@ ${esc(transcriptText.trim())}`, null, null);
         } catch {
         }
         this._log("notes written to body", { botId, collapsible: !!(summaryHead || transcriptHead) });
-        this._repaintRecordIfOpen(record, summaryHead || transcriptHead || null);
+        this._toast("Meeting notes added", "Summary and transcript are on this page \u2014 collapse either heading to tuck it away.");
       } catch (err) {
         this._log("notes body write failed", { error: this._errorMessage(err) });
         this._toast("Notes saved to properties", "Could not render them into the page body: " + this._errorMessage(err));
@@ -4181,38 +4181,6 @@ ${esc(transcriptText.trim())}`, null, null);
      * @param {any} record
      * @param {any} focusItem a line item to scroll to and highlight, or null
      */
-    /**
-     * True when the user is typing in the editor RIGHT NOW — focus is inside a contenteditable in the
-     * editor pane. Never steal a live cursor: a forced re-navigation would drop them out of their
-     * sentence. This is why the repaint below bails when they are editing.
-     */
-    _userIsEditingBody() {
-      try {
-        const el2 = document.activeElement;
-        if (!el2 || !(el2 instanceof HTMLElement)) return false;
-        if (!el2.closest(EDITOR_SCOPE)) return false;
-        return el2.isContentEditable || el2.closest('[contenteditable="true"]') != null;
-      } catch {
-        return false;
-      }
-    }
-    _repaintRecordIfOpen(record, focusItem) {
-      if (!record || !record.guid) return;
-      try {
-        const panel2 = this.ui && this.ui.getActivePanel ? this.ui.getActivePanel() : null;
-        if (!panel2 || typeof panel2.navigateTo !== "function") return;
-        const active = panel2.getActiveRecord ? panel2.getActiveRecord() : null;
-        if (!active || active.guid !== record.guid) return;
-        if (this._userIsEditingBody()) {
-          this._toast("Meeting notes added", "The summary and transcript are on this page, below your notes.");
-          return;
-        }
-        const nav = focusItem && focusItem.guid ? panel2.navigateTo({ type: "edit_panel", rootId: null, subId: null, workspaceGuid: null, itemGuid: focusItem.guid, highlight: true }) : panel2.navigateTo({ type: "edit_panel", rootId: record.guid, subId: null, workspaceGuid: null });
-        if (nav && typeof nav.catch === "function") nav.catch(() => {
-        });
-      } catch {
-      }
-    }
     _ensurePolling(record, botId) {
       if (!this._pollers) this._pollers = /* @__PURE__ */ new Map();
       if (!record || !botId || this._pollers.has(botId)) return;
