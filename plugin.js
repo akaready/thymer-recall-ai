@@ -3044,7 +3044,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.19.0";
+  var PLUGIN_VERSION = "1.20.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3117,9 +3117,10 @@ ${report}
     saveTranscript: true,
     transcriptLayout: "blocks",
     utteranceTimestamps: true,
-    timestampPosition: "front",
+    turnHeaderTemplate: "[{Time}] {Speaker}",
     transcriptSections: false,
-    sectionHeadingStyle: "pipe",
+    sectionHeadingTemplate: "{Topic} | {Range}",
+    sectionRangeStyle: "clock",
     summaryPrompt: [
       "Summarize this meeting transcript as clean Markdown for a Thymer outline note. Follow these formatting rules exactly:",
       "- Do NOT add a title or top-level heading \u2014 the note already has a Summary heading, so start directly with the first section.",
@@ -3139,11 +3140,12 @@ ${report}
     ["h3", "Heading 3"],
     ["none", "No heading (plain line)"]
   ];
-  var SECTION_HEADING_STYLES = [
-    ["pipe", "Topic | 2:47\u20132:52 PM"],
-    ["dot", "Topic \u2022 2:47\u20132:52 PM"],
-    ["bracket", "Topic [2:47\u20132:52 PM]"],
-    ["rangefirst", "2:47\u20132:52 PM | Topic"]
+  var SECTION_RANGE_STYLES = [
+    ["clock", "Clock, compact \u2014 2:47\u20132:52 PM"],
+    ["clock-long", "Clock, full \u2014 2:47 PM \u2013 2:52 PM"],
+    ["elapsed", "Elapsed \u2014 0:00\u20135:12"],
+    ["start-clock", "Start time only \u2014 2:47 PM"],
+    ["start-elapsed", "Start elapsed only \u2014 0:00"]
   ];
   var API_KEY_FIELDS = Object.freeze(["recallApiKey", "anthropicApiKey"]);
   var BOT_IMAGE_FIELDS = Object.freeze(["botImageData", "botImageName"]);
@@ -3175,9 +3177,10 @@ ${report}
       saveTranscript: bool("saveTranscript"),
       transcriptLayout: src.transcriptLayout === "inline" ? "inline" : "blocks",
       utteranceTimestamps: bool("utteranceTimestamps"),
-      timestampPosition: src.timestampPosition === "back" ? "back" : "front",
+      turnHeaderTemplate: str("turnHeaderTemplate"),
       transcriptSections: bool("transcriptSections"),
-      sectionHeadingStyle: ["pipe", "dot", "bracket", "rangefirst"].includes(src.sectionHeadingStyle) ? src.sectionHeadingStyle : "pipe",
+      sectionHeadingTemplate: str("sectionHeadingTemplate"),
+      sectionRangeStyle: ["clock", "clock-long", "elapsed", "start-clock", "start-elapsed"].includes(src.sectionRangeStyle) ? src.sectionRangeStyle : "clock",
       summaryPrompt: str("summaryPrompt"),
       transcriptHeadingText: str("transcriptHeadingText"),
       transcriptHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.transcriptHeadingLevel) ? src.transcriptHeadingLevel : "h3",
@@ -4564,7 +4567,25 @@ ${transcriptText}` }]
         items = await record.getLineItems(false);
         const head = items.find((li) => !before.has(li.guid)) || null;
         if (!head) return;
-        await record.insertFromMarkdown(this._escMd(summary.trim()), head, null);
+        const { preamble, groups } = summaryGroups(summary);
+        const afterOf = /* @__PURE__ */ __name((parentGuid) => {
+          const kids = items.filter((li) => li.parent_guid === parentGuid);
+          return kids.length ? kids[kids.length - 1] : null;
+        }, "afterOf");
+        if (preamble.length) {
+          await record.insertFromMarkdown(this._escMd(preamble.join("\n")), head, null);
+          items = await record.getLineItems(false);
+        }
+        for (const g of groups) {
+          const b = new Set(items.map((li) => li.guid));
+          if (await record.insertFromMarkdown(`**${this._escMd(g.heading)}**`, head, afterOf(head.guid)) === false) continue;
+          items = await record.getLineItems(false);
+          const sec = items.find((li) => li.parent_guid === head.guid && !b.has(li.guid)) || null;
+          if (sec && g.content.length) {
+            await record.insertFromMarkdown(this._escMd(g.content.join("\n")), sec, null);
+            items = await record.getLineItems(false);
+          }
+        }
         try {
           if (botId) localStorage.setItem(flagKey, botId);
         } catch {
@@ -5174,10 +5195,7 @@ ${transcriptText}` }]
               ["clock", "Clock time (2:47 PM)"],
               ["elapsed", "Elapsed time (0:37)"]
             ]),
-            this._selectInput("Timestamp position", "timestampPosition", [
-              ["front", "Before the speaker"],
-              ["back", "After the speaker"]
-            ]),
+            this._textInput("Turn header", "turnHeaderTemplate", "[{Time}] {Speaker}", false, "Each speaker turn\u2019s header. Use {Speaker} and {Time} \u2014 add any characters you like around them."),
             optionRow({
               type: "checkbox",
               name: "utteranceTimestamps",
@@ -5200,7 +5218,8 @@ ${transcriptText}` }]
               checked: !!draft.transcriptSections,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("transcriptSections", !!event.target.checked, { rerender: true }), "onChange")
             }),
-            this._selectInput("Section heading style", "sectionHeadingStyle", SECTION_HEADING_STYLES)
+            this._textInput("Heading template", "sectionHeadingTemplate", "{Topic} | {Range}", false, "Use {Topic} and {Range} \u2014 add any characters you like around them."),
+            this._selectInput("Range style", "sectionRangeStyle", SECTION_RANGE_STYLES)
           ]
         })
       ];
@@ -5833,26 +5852,46 @@ ${transcriptText}` }]
   }
   __name(entryStamp, "entryStamp");
   function formatEntryHeader(entry, settings) {
-    const stamp = settings.utteranceTimestamps ? entryStamp(entry, settings) : null;
-    if (!stamp) return entry.speaker;
-    return settings.timestampPosition === "back" ? `${entry.speaker} [${stamp}]` : `[${stamp}] ${entry.speaker}`;
+    const stamp = settings.utteranceTimestamps ? entryStamp(entry, settings) || "" : "";
+    const template = settings.turnHeaderTemplate || "[{Time}] {Speaker}";
+    const filled = template.replace(/\{Speaker\}/gi, entry.speaker || "").replace(/\{Time\}/gi, stamp);
+    const tidied = stamp ? filled : filled.replace(/[\s\[\]|•·—–-]+$/, "").replace(/^[\s\[\]|•·—–-]+/, "");
+    return tidied.replace(/\s{2,}/g, " ").trim() || (entry.speaker || "");
   }
   __name(formatEntryHeader, "formatEntryHeader");
-  function formatSectionHeading(title, firstEntry, lastEntry, settings) {
-    const a = entryStamp(firstEntry, settings);
-    const b = entryStamp(lastEntry, settings);
-    const range = a && b ? a === b ? a : `${a}\u2013${b}` : a || b || "";
-    if (!range) return title;
-    switch (settings.sectionHeadingStyle) {
-      case "dot":
-        return `${title} \u2022 ${range}`;
-      case "bracket":
-        return `${title} [${range}]`;
-      case "rangefirst":
-        return `${range} | ${title}`;
-      default:
-        return `${title} | ${range}`;
+  function sectionRange(first, last, settings) {
+    const clock = /* @__PURE__ */ __name((e) => e && e.absoluteIso ? formatClockTime(e.absoluteIso) : null, "clock");
+    const elapsed = /* @__PURE__ */ __name((e) => e && e.relativeSec != null ? formatRelativeTime(e.relativeSec) : null, "elapsed");
+    const dash = /* @__PURE__ */ __name((x, y) => x && y ? x === y ? x : `${x}\u2013${y}` : x || y || "", "dash");
+    switch (settings.sectionRangeStyle) {
+      case "elapsed":
+        return dash(elapsed(first), elapsed(last));
+      case "start-clock":
+        return clock(first) || "";
+      case "start-elapsed":
+        return elapsed(first) || "";
+      case "clock-long": {
+        const a = clock(first), b = clock(last);
+        return a && b && a !== b ? `${a} \u2013 ${b}` : a || b || "";
+      }
+      case "clock":
+      default: {
+        const a = clock(first), b = clock(last);
+        if (!a || !b) return a || b || "";
+        if (a === b) return a;
+        const am = a.match(/\s*(AM|PM)$/i), bm = b.match(/\s*(AM|PM)$/i);
+        if (am && bm && am[1].toUpperCase() === bm[1].toUpperCase()) return `${a.replace(/\s*(AM|PM)$/i, "")}\u2013${b}`;
+        return `${a}\u2013${b}`;
+      }
     }
+  }
+  __name(sectionRange, "sectionRange");
+  function formatSectionHeading(title, firstEntry, lastEntry, settings) {
+    const range = sectionRange(firstEntry, lastEntry, settings);
+    const template = settings.sectionHeadingTemplate || "{Topic} | {Range}";
+    const filled = template.replace(/\{Topic\}/gi, title || "").replace(/\{Range\}/gi, range || "");
+    const tidied = range ? filled : filled.replace(/[\s|•·—–\-\[\]]+$/, "").replace(/^[\s|•·—–\-\[\]]+/, "");
+    return tidied.replace(/\s{2,}/g, " ").trim() || (title || "");
   }
   __name(formatSectionHeading, "formatSectionHeading");
   function entriesToText(entries, settings) {
@@ -5901,6 +5940,29 @@ ${transcriptText}` }]
     return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   }
   __name(sanitizeSummaryMarkdown, "sanitizeSummaryMarkdown");
+  function summaryGroups(md) {
+    const stripEnds = /* @__PURE__ */ __name((arr) => {
+      while (arr.length && !arr[0].trim()) arr.shift();
+      while (arr.length && !arr[arr.length - 1].trim()) arr.pop();
+      return arr;
+    }, "stripEnds");
+    const preamble = [];
+    const groups = [];
+    let cur = null;
+    for (const line of String(md || "").split("\n")) {
+      const h2 = line.match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/);
+      if (h2) {
+        cur = { heading: h2[1].trim(), content: [] };
+        groups.push(cur);
+      } else if (cur) cur.content.push(line);
+      else preamble.push(line);
+    }
+    return {
+      preamble: stripEnds(preamble).filter((l) => l.trim()),
+      groups: groups.map((g) => ({ heading: g.heading, content: stripEnds(g.content).filter((l) => l.trim()) }))
+    };
+  }
+  __name(summaryGroups, "summaryGroups");
   function sectionJsonInstruction(count) {
     return [
       "Additionally, divide the transcript into a handful of topic sections in time order.",
