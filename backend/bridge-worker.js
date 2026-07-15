@@ -154,6 +154,11 @@ async function getRecallTranscript(request, env) {
 		}
 
 		if ((downloaded && !downloaded.ok) || (listed && !listed.ok)) {
+			// The FINAL transcript isn't ready (still recording), but the realtime KV buffer already has
+			// rows — return THOSE so the transcript streams live. Without this we threw the live rows away
+			// here and returned an empty "pending", so the transcript only ever showed once the meeting
+			// ended and the final download finally succeeded. (This is the real "prints only at the end".)
+			if (live.results.length) return json(live);
 			console.info('[recall-ai bridge] final transcript download pending', {
 				botId: body.botId,
 				downloadStatus: downloaded && downloaded.status,

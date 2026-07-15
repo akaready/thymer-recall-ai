@@ -3044,7 +3044,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.20.1";
+  var PLUGIN_VERSION = "1.20.2";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -4585,7 +4585,7 @@ ${transcriptText}` }]
         }
         for (const g of groups) {
           const b = new Set(items.map((li) => li.guid));
-          if (await record.insertFromMarkdown(`**${this._escMd(g.heading)}**`, head, afterOf(head.guid)) === false) continue;
+          if (await record.insertFromMarkdown(`### ${this._escMd(g.heading)}`, head, afterOf(head.guid)) === false) continue;
           items = await record.getLineItems(false);
           const sec = items.find((li) => li.parent_guid === head.guid && !b.has(li.guid)) || null;
           if (sec && g.content.length) {
