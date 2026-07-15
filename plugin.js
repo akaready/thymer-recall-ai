@@ -3026,8 +3026,74 @@ ${report}
   }
   __name(createSettingsStore, "createSettingsStore");
 
+  // summary-citations.js
+  function extractSummaryCitations(markdown, validSectionIds) {
+    const valid = new Set((Array.isArray(validSectionIds) ? validSectionIds : []).map((value) => Math.floor(Number(value))).filter(Number.isFinite));
+    const citations = [];
+    const lines = String(markdown || "").split("\n").map((line) => {
+      const ids = [];
+      const clean = line.replace(/[ \t]*\{\{\s*cite\s*:\s*([^{}]*)\}\}/gi, (_match, payload) => {
+        for (const token of String(payload || "").split(",")) {
+          const trimmed = token.trim();
+          if (!/^\d+$/.test(trimmed)) continue;
+          const id = Number(trimmed);
+          if (valid.has(id) && !ids.includes(id)) ids.push(id);
+        }
+        return "";
+      }).replace(/[ \t]+$/g, "");
+      citations.push(ids);
+      return clean;
+    });
+    return { markdown: lines.join("\n"), citations };
+  }
+  __name(extractSummaryCitations, "extractSummaryCitations");
+  function groupSummaryLines(markdown, citations) {
+    const preamble = [];
+    const groups = [];
+    let current = null;
+    const lines = String(markdown || "").split("\n");
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index];
+      const heading = line.match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/);
+      if (heading) {
+        current = { heading: heading[1].trim(), content: [] };
+        groups.push(current);
+        continue;
+      }
+      if (!line.trim()) continue;
+      const entry = {
+        markdown: line,
+        citations: Array.isArray(citations && citations[index]) ? citations[index] : []
+      };
+      if (current) current.content.push(entry);
+      else preamble.push(entry);
+    }
+    return { preamble, groups };
+  }
+  __name(groupSummaryLines, "groupSummaryLines");
+  function buildSummaryReferenceSegments(existingSegments, citationIds, anchorById) {
+    if (!Array.isArray(citationIds) || !citationIds.length || !(anchorById instanceof Map)) return null;
+    const base = Array.isArray(existingSegments) ? existingSegments : [];
+    const existingRefs = new Set(base.filter((segment) => segment && segment.type === "ref" && segment.text && typeof segment.text.guid === "string").map((segment) => segment.text.guid));
+    const anchors = [];
+    for (const id of citationIds) {
+      const anchor = anchorById.get(Number(id));
+      if (!anchor || !anchor.guid || existingRefs.has(anchor.guid) || anchors.some((item) => item.guid === anchor.guid)) continue;
+      anchors.push(anchor);
+    }
+    if (!anchors.length) return null;
+    const segments = base.slice();
+    if (segments.length) segments.push({ type: "text", text: " \xB7 " });
+    for (let index = 0; index < anchors.length; index++) {
+      if (index) segments.push({ type: "text", text: " " });
+      segments.push({ type: "ref", text: { guid: anchors[index].guid, title: anchors[index].title } });
+    }
+    return segments;
+  }
+  __name(buildSummaryReferenceSegments, "buildSummaryReferenceSegments");
+
   // plugin.js
-  var PLUGIN_VERSION = "1.20.5";
+  var PLUGIN_VERSION = "1.20.7";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3233,6 +3299,7 @@ ${report}
     error: "Error"
   });
   var COMPLETED_STATUSES = /* @__PURE__ */ new Set(["summarized", "summary_failed"]);
+  var LOCAL_PROCESSING_STATUSES = /* @__PURE__ */ new Set(["processing transcript", "summarizing"]);
   function statusLabel(raw) {
     const normalized = String(raw || "").toLowerCase().replace(/^bot\./, "").trim();
     if (!normalized) return "";
@@ -3367,6 +3434,7 @@ ${report}
       this._detachSettingsLifecycle = null;
       this._recordsByGuid = /* @__PURE__ */ new Map();
       this._pollers = /* @__PURE__ */ new Map();
+      this._syncInFlight = /* @__PURE__ */ new Map();
       this._autoScheduled = /* @__PURE__ */ new Set();
       this._activeRecordGuid = "";
       this._settingsStore = createSettingsStore(this, {
@@ -3628,6 +3696,7 @@ ${report}
       this._detachSettingsLifecycle = null;
       for (const poller of this._pollers && this._pollers.values ? this._pollers.values() : []) clearInterval(poller.timer);
       if (this._pollers && this._pollers.clear) this._pollers.clear();
+      if (this._syncInFlight && this._syncInFlight.clear) this._syncInFlight.clear();
       this._safe("strip inline buttons", () => this._stripInlineButtons());
     }
     async _openPanel() {
@@ -4104,7 +4173,24 @@ ${report}
       }
       return payload;
     }
-    async _syncRecord(record, { summarize = false, quiet = false, botId: knownBotId = "" } = {}) {
+    async _syncRecord(record, options = {}) {
+      const knownBotId = options.botId || "";
+      const botId = knownBotId || (record ? this._text(record, FIELDS.BOT_ID) : "");
+      const syncKey = `${record && record.guid || "record"}:${botId || "bot"}`;
+      const active = this._syncInFlight && this._syncInFlight.get(syncKey);
+      if (active) {
+        this._log("sync coalesced with in-flight poll", { botId });
+        return active;
+      }
+      const task = this._syncRecordOnce(record, options);
+      if (this._syncInFlight) this._syncInFlight.set(syncKey, task);
+      try {
+        return await task;
+      } finally {
+        if (this._syncInFlight && this._syncInFlight.get(syncKey) === task) this._syncInFlight.delete(syncKey);
+      }
+    }
+    async _syncRecordOnce(record, { summarize = false, quiet = false, botId: knownBotId = "" } = {}) {
       if (!record) {
         if (!quiet) this._toast("Open a Meeting record first", "Sync needs a meeting record with a Bot ID.");
         return false;
@@ -4124,10 +4210,17 @@ ${report}
           this._fetchRecallJson(`/api/v1/bot/${encodeURIComponent(botId)}/`).catch(() => null),
           this._fetchRecallJson(`/api/v1/bot/${encodeURIComponent(botId)}/transcript/`)
         ]);
-        const status = latestRecallStatus(bot) || this._text(record, FIELDS.STATUS) || "syncing";
-        this._setField(record, FIELDS.STATUS, status);
+        const previousStatus = String(this._text(record, FIELDS.STATUS) || "").toLowerCase();
+        const recallStatus = latestRecallStatus(bot) || previousStatus || "syncing";
+        const keepLocalStatus = COMPLETED_STATUSES.has(previousStatus) || LOCAL_PROCESSING_STATUSES.has(previousStatus);
+        const status = keepLocalStatus ? previousStatus : recallStatus;
+        if (status !== previousStatus) this._setField(record, FIELDS.STATUS, status);
         this._updateNavButtonForRecord(record);
-        const entries = transcriptEntries(transcript);
+        const liveTranscript = !!(transcript && transcript.live);
+        const ended = !!bot && isMeetingEndedStatus(recallStatus);
+        const terminal = !!bot && isTerminalStatus(recallStatus);
+        const rawEntries = transcriptEntries(transcript);
+        const entries = ended && !liveTranscript ? coalesceAdjacentTranscriptEntries(rawEntries) : rawEntries;
         const transcriptText = entriesToText(entries, this._settings);
         this._log("sync poll", {
           botId,
@@ -4137,15 +4230,16 @@ ${report}
           rows: transcriptRowCount(transcript),
           debug: transcript && transcript.debug || null
         });
-        const ended = !!bot && isMeetingEndedStatus(status);
-        const terminal = !!bot && isTerminalStatus(status);
+        const hasSummary = COMPLETED_STATUSES.has(status);
+        const finalTranscriptReady = !!transcriptText && !liveTranscript;
+        const loc = this._settings.notesLocation;
+        const deferFinalBodyForSections = ended && finalTranscriptReady && summarize && this._settings.autoSummarize && !hasSummary && !!this._settings.anthropicApiKey && !!this._settings.saveTranscript && !!this._settings.transcriptSections && loc !== "property";
         if (transcriptText) {
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._log("transcript written", { botId, characters: transcriptText.length });
           if (this._settings.saveTranscript) {
-            const loc = this._settings.notesLocation;
             if (loc !== "body") this._setMappedField(record, FIELDS.TRANSCRIPT, transcriptText);
-            if (loc !== "property") {
+            if (loc !== "property" && !deferFinalBodyForSections) {
               const newestLine = await this._streamTranscriptToBody(record, entries);
               this._scrollToLiveTranscript(record, newestLine);
             }
@@ -4156,21 +4250,20 @@ ${report}
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._log("transcript pending", { botId, state: describeTranscriptState(transcript, bot) });
         }
-        const hasSummary = COMPLETED_STATUSES.has(String(this._text(record, FIELDS.STATUS) || "").toLowerCase());
         if (ended && summarize && this._settings.autoSummarize && !hasSummary) {
-          if (!transcriptText) {
+          if (!finalTranscriptReady) {
             this._setField(record, FIELDS.STATUS, "processing transcript");
             this._updateNavButtonForRecord(record);
             return false;
           }
-          await this._summarize(record, transcriptText, entries);
+          await this._summarize(record, transcriptText, entries, { deferTranscriptBody: deferFinalBodyForSections });
         }
-        if (ended && (transcriptText || !this._settings.autoSummarize || hasSummary)) {
+        if (ended && (finalTranscriptReady || hasSummary)) {
           this._stopPolling(botId);
         }
         this._updateNavButtonForRecord(record);
         if (!quiet) this._toast("Meeting synced", status);
-        return ended && (transcriptText || !this._settings.autoSummarize || hasSummary);
+        return ended && (finalTranscriptReady || hasSummary);
       } catch (err) {
         const msg = this._errorMessage(err);
         this._setField(record, FIELDS.LAST_ERROR, msg);
@@ -4207,7 +4300,7 @@ ${report}
       if (!response.ok) throw new Error(recallError(json, response.status));
       return json;
     }
-    async _summarize(record, transcriptText, entries) {
+    async _summarize(record, transcriptText, entries, { deferTranscriptBody = false } = {}) {
       if (!this._settings.anthropicApiKey) {
         this._setField(record, FIELDS.LAST_ERROR, "Anthropic API key is missing; transcript fetched but summary was skipped.");
         return;
@@ -4216,18 +4309,29 @@ ${report}
         this._setField(record, FIELDS.STATUS, "summarizing");
         this._updateNavButtonForRecord(record);
         this._log("summary start", { characters: transcriptText.length });
-        const { summary, sections } = await this._createSummary(transcriptText, entries);
+        const { summary, sections, citations } = await this._createSummary(transcriptText, entries);
         if (!summary) throw new Error("Claude returned an empty summary.");
+        const loc = this._settings.notesLocation;
+        if (loc !== "body") this._setMappedField(record, FIELDS.SUMMARY, summary);
+        if (loc !== "property") {
+          let sectionResult = { ok: false, anchors: [] };
+          if (this._settings.saveTranscript && this._settings.transcriptSections && sections.length && Array.isArray(entries) && entries.length) {
+            sectionResult = await this._reorganizeTranscriptBySections(record, entries, sections);
+          }
+          const sectioned = !!sectionResult.ok;
+          if (deferTranscriptBody && !sectioned && this._settings.saveTranscript) {
+            await this._streamTranscriptToBody(record, entries);
+          }
+          const summaryWritten = await this._writeSummaryToBody(record, summary, citations, sectionResult.anchors);
+          if (!summaryWritten) throw new Error("Thymer could not write the summary to the meeting body.");
+        }
         this._setField(record, FIELDS.STATUS, "summarized");
         this._updateNavButtonForRecord(record);
         this._log("summary written", { characters: summary.length, sections: sections.length });
-        const loc = this._settings.notesLocation;
-        if (loc !== "body") this._setMappedField(record, FIELDS.SUMMARY, summary);
-        if (loc !== "property") await this._writeSummaryToBody(record, summary);
-        if (loc !== "property" && this._settings.transcriptSections && sections.length && Array.isArray(entries) && entries.length) {
-          await this._reorganizeTranscriptBySections(record, entries, sections);
-        }
       } catch (err) {
+        if (deferTranscriptBody && this._settings.saveTranscript && this._settings.notesLocation !== "property") {
+          await this._streamTranscriptToBody(record, entries);
+        }
         this._setField(record, FIELDS.LAST_ERROR, `Summary failed: ${this._errorMessage(err)}`);
         this._setField(record, FIELDS.STATUS, "summary_failed");
         this._updateNavButtonForRecord(record);
@@ -4249,7 +4353,7 @@ ${report}
       const wantSections = !!this._settings.transcriptSections && Array.isArray(entries) && entries.length > 0;
       if (!wantSections) {
         const raw2 = await this._callClaude(basePrompt, transcriptText, 1400);
-        return { summary: sanitizeSummaryMarkdown(raw2), sections: [] };
+        return { summary: sanitizeSummaryMarkdown(raw2), sections: [], citations: [] };
       }
       const prompt = `${basePrompt}
 
@@ -4257,7 +4361,9 @@ ${sectionJsonInstruction(entries.length)}`;
       const numbered = entries.map((e, i) => `[${i}] ${e.speaker}: ${e.text}`).join("\n");
       const raw = await this._callClaude(prompt, numbered, 2600);
       const parsed = parseSummaryAndSections(raw, entries.length);
-      return { summary: sanitizeSummaryMarkdown(parsed.summary), sections: parsed.sections };
+      const sanitized = sanitizeSummaryMarkdown(parsed.summary);
+      const cited = extractSummaryCitations(sanitized, parsed.sections.map((section2, index) => section2.sourceIndex ?? index));
+      return { summary: cited.markdown, sections: parsed.sections, citations: cited.citations };
     }
     /** POST the summary request to the bridge or to Anthropic directly; returns Claude's raw text. */
     async _callClaude(prompt, transcriptText, maxTokens) {
@@ -4332,7 +4438,7 @@ ${transcriptText}` }]
      * NEVER navigates or repaints — appending nodes elsewhere in the doc leaves your cursor alone.
      */
     async _streamTranscriptToBody(record, entries) {
-      if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.getLineItems !== "function") return;
+      if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.createLineItem !== "function" || typeof record.getLineItems !== "function") return;
       if (!Array.isArray(entries) || !entries.length) return;
       const headKey = this._bodyKey(record, "tx-head");
       const countKey = this._bodyKey(record, "tx-count");
@@ -4377,37 +4483,43 @@ ${transcriptText}` }]
           tracked = JSON.parse(localStorage.getItem(trackKey) || "[]") || [];
         } catch {
         }
-        if (settings.transcriptLayout === "inline") {
-          const before = new Set(items.map((li) => li.guid));
-          const md = fresh.map((e) => this._escMd(`${formatEntryHeader(e, settings)}: ${e.text}`)).join("\n");
-          if (await record.insertFromMarkdown(md, heading, lastChildOf(heading.guid)) === false) return;
-          items = await record.getLineItems(false);
-          for (const li of items) if (!before.has(li.guid)) tracked.push(li.guid);
-        } else {
-          for (const e of fresh) {
-            const before = new Set(items.map((li) => li.guid));
-            if (await record.insertFromMarkdown(this._escMd(formatEntryHeader(e, settings)), heading, lastChildOf(heading.guid)) === false) return;
-            items = await record.getLineItems(false);
-            const turn = items.find((li) => li.parent_guid === heading.guid && !before.has(li.guid)) || null;
-            if (turn) {
-              tracked.push(turn.guid);
-              const beforeText = new Set(items.map((li) => li.guid));
-              await record.insertFromMarkdown(this._escMd(e.text), turn, null);
-              items = await record.getLineItems(false);
-              for (const li of items) if (!beforeText.has(li.guid)) tracked.push(li.guid);
+        if (!Array.isArray(tracked)) tracked = [];
+        let afterTurn = lastChildOf(heading.guid);
+        let newestGuid = null;
+        let created = 0;
+        for (const e of fresh) {
+          const inline = settings.transcriptLayout === "inline";
+          const line = inline ? `${formatEntryHeader(e, settings)}: ${e.text}` : formatEntryHeader(e, settings);
+          const turn = await record.createLineItem(heading, afterTurn, "text", [{ type: "text", text: line }], null);
+          if (!turn) break;
+          if (!inline) {
+            const textNode = await record.createLineItem(turn, null, "text", [{ type: "text", text: e.text }], null);
+            if (!textNode) {
+              try {
+                await turn.delete();
+              } catch {
+              }
+              break;
             }
+            tracked.push(turn.guid, textNode.guid);
+            newestGuid = textNode.guid;
+          } else {
+            tracked.push(turn.guid);
+            newestGuid = turn.guid;
+          }
+          afterTurn = turn;
+          created += 1;
+          try {
+            localStorage.setItem(countKey, String(written + created));
+          } catch {
+          }
+          try {
+            localStorage.setItem(trackKey, JSON.stringify(tracked));
+          } catch {
           }
         }
-        try {
-          localStorage.setItem(countKey, String(entries.length));
-        } catch {
-        }
-        try {
-          localStorage.setItem(trackKey, JSON.stringify(tracked));
-        } catch {
-        }
-        this._log("transcript streamed to body", { newTurns: fresh.length, total: entries.length, layout: settings.transcriptLayout });
-        return tracked.length ? tracked[tracked.length - 1] : null;
+        this._log("transcript streamed to body", { newTurns: created, total: written + created, layout: settings.transcriptLayout });
+        return newestGuid;
       } catch (err) {
         this._log("transcript stream failed", { error: this._errorMessage(err) });
       }
@@ -4415,85 +4527,231 @@ ${transcriptText}` }]
     }
     /**
      * At meeting end, regroup the live (un-sectioned) transcript into collapsible topic sections:
-     * delete OUR streamed lines (tracked in `tx-guids`, so notes the user typed in the transcript area
-     * are never touched), then rebuild under the same 🎙️ Transcript heading as
-     * `section (bold) → turn header → text`. Guarded once via `tx-sectioned`. Skips silently if there
-     * are no sections/entries, leaving the live transcript exactly as it was.
+     * move existing streamed turns under section nodes when the final artifact matches, or build the
+     * sectioned shape directly when live rows never arrived. Only a mismatched final artifact falls back
+     * to deleting OUR tracked nodes and rebuilding; user notes are never removed. Returns the stable
+     * line-item GUID for every section so summary citations can target the headings. Guarded once per bot.
      */
     async _reorganizeTranscriptBySections(record, entries, sections) {
-      if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.getLineItems !== "function") return;
-      if (!Array.isArray(sections) || !sections.length || !Array.isArray(entries) || !entries.length) return;
+      if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.createLineItem !== "function" || typeof record.getLineItems !== "function") return { ok: false, anchors: [] };
+      if (!Array.isArray(sections) || !sections.length || !Array.isArray(entries) || !entries.length) return { ok: false, anchors: [] };
       const headKey = this._bodyKey(record, "tx-head");
       const trackKey = this._bodyKey(record, "tx-guids");
       const countKey = this._bodyKey(record, "tx-count");
-      const sectionedKey = this._bodyKey(record, "tx-sectioned");
+      const botId = this._text(record, FIELDS.BOT_ID) || "current";
+      const sectionedKey = this._bodyKey(record, `tx-sectioned:${botId}`);
+      const anchorsKey = this._bodyKey(record, `tx-section-anchors:${botId}`);
       try {
+        let state = "";
         try {
-          if (localStorage.getItem(sectionedKey) === "1") return;
+          state = localStorage.getItem(sectionedKey) || "";
         } catch {
         }
+        const startedAt = state.startsWith("writing:") ? Number(state.slice("writing:".length)) : 0;
+        if (state === "done" || startedAt && Date.now() - startedAt < 5 * 60 * 1e3) {
+          const anchors2 = await this._recoverTranscriptSectionAnchors(record, entries, sections, anchorsKey);
+          return { ok: true, anchors: anchors2 };
+        }
+        try {
+          localStorage.setItem(sectionedKey, `writing:${Date.now()}`);
+        } catch {
+        }
+        const abort = /* @__PURE__ */ __name(() => {
+          try {
+            localStorage.removeItem(sectionedKey);
+            localStorage.removeItem(anchorsKey);
+          } catch {
+          }
+          return { ok: false, anchors: [] };
+        }, "abort");
         let headGuid = "";
         try {
           headGuid = localStorage.getItem(headKey) || "";
         } catch {
         }
-        if (!headGuid) return;
         let items = await record.getLineItems(false);
-        const heading = items.find((li) => li.guid === headGuid) || null;
-        if (!heading) return;
+        let heading = items.find((li) => li.guid === headGuid) || null;
+        if (!heading) {
+          const before = new Set(items.map((li) => li.guid));
+          const anchorMd = this._headingAnchorMd(this._settings.transcriptHeadingText, this._settings.transcriptHeadingLevel);
+          if (!anchorMd || await record.insertFromMarkdown(anchorMd, null, null) === false) return abort();
+          items = await record.getLineItems(false);
+          heading = items.find((li) => !before.has(li.guid)) || null;
+          if (!heading) return abort();
+          try {
+            localStorage.setItem(headKey, heading.guid);
+          } catch {
+          }
+        }
         let tracked = [];
         try {
           tracked = JSON.parse(localStorage.getItem(trackKey) || "[]") || [];
         } catch {
         }
-        await this._deleteTrackedDepthFirst(record, tracked);
-        items = await record.getLineItems(false);
+        if (!Array.isArray(tracked)) tracked = [];
+        const trackedSet = new Set(tracked);
+        let turns = items.filter((li) => li.parent_guid === heading.guid && trackedSet.has(li.guid));
+        const sourceTurnCount = entries.reduce((sum, entry) => sum + Math.max(1, Number(entry && entry.sourceCount) || 1), 0);
+        const canMoveExisting = turns.length === sourceTurnCount && turns.every((li) => typeof li.move === "function");
+        if (turns.length && !canMoveExisting) {
+          await this._deleteTrackedDepthFirst(record, tracked);
+          items = await record.getLineItems(false);
+          tracked = [];
+          turns = [];
+        }
         const settings = this._settings;
-        const newTracked = [];
-        const lastChildOf = /* @__PURE__ */ __name((parentGuid) => {
-          const kids = items.filter((li) => li.parent_guid === parentGuid);
-          return kids.length ? kids[kids.length - 1] : null;
-        }, "lastChildOf");
-        for (const sec of sections) {
+        const newTracked = new Set(canMoveExisting ? tracked : []);
+        const sourceOffsets = [];
+        let sourceCursor = 0;
+        for (const entry of entries) {
+          sourceOffsets.push(sourceCursor);
+          sourceCursor += Math.max(1, Number(entry && entry.sourceCount) || 1);
+        }
+        let afterSection = items.filter((li) => li.parent_guid === heading.guid).at(-1) || null;
+        let written = 0;
+        const anchors = [];
+        for (let sectionOrder = 0; sectionOrder < sections.length; sectionOrder++) {
+          const sec = sections[sectionOrder];
           const secEntries = entries.slice(sec.start, sec.end + 1).filter(Boolean);
           if (!secEntries.length) continue;
           const label = formatSectionHeading(sec.title, secEntries[0], secEntries[secEntries.length - 1], settings);
-          const before = new Set(items.map((li) => li.guid));
-          if (await record.insertFromMarkdown(`**${this._escMd(label)}**`, heading, lastChildOf(heading.guid)) === false) continue;
-          items = await record.getLineItems(false);
-          const secNode = items.find((li) => li.parent_guid === heading.guid && !before.has(li.guid)) || null;
+          const secNode = await record.createLineItem(heading, afterSection, "text", [{ type: "bold", text: label }], null);
           if (!secNode) continue;
-          newTracked.push(secNode.guid);
-          for (const e of secEntries) {
-            const beforeTurn = new Set(items.map((li) => li.guid));
-            if (await record.insertFromMarkdown(this._escMd(formatEntryHeader(e, settings)), secNode, lastChildOf(secNode.guid)) === false) continue;
-            items = await record.getLineItems(false);
-            const turn = items.find((li) => li.parent_guid === secNode.guid && !beforeTurn.has(li.guid)) || null;
-            if (turn) {
-              newTracked.push(turn.guid);
-              const beforeText = new Set(items.map((li) => li.guid));
-              await record.insertFromMarkdown(this._escMd(e.text), turn, null);
-              items = await record.getLineItems(false);
-              for (const li of items) if (!beforeText.has(li.guid)) newTracked.push(li.guid);
+          anchors.push({ sectionId: sec.sourceIndex ?? sectionOrder, guid: secNode.guid, title: label });
+          newTracked.add(secNode.guid);
+          afterSection = secNode;
+          let afterTurn = null;
+          for (let index = sec.start; index <= sec.end; index++) {
+            const e = entries[index];
+            if (!e) continue;
+            if (canMoveExisting) {
+              const count = Math.max(1, Number(e.sourceCount) || 1);
+              const group = turns.slice(sourceOffsets[index], sourceOffsets[index] + count);
+              const primary = group[0];
+              if (!primary) continue;
+              const extras = group.slice(1);
+              const extraChildren = extras.flatMap((turn) => items.filter((li) => li.parent_guid === turn.guid));
+              const hasUserChildren = extraChildren.some((li) => !trackedSet.has(li.guid));
+              const inline = settings.transcriptLayout === "inline";
+              const primaryText = inline ? null : items.find((li) => li.parent_guid === primary.guid && trackedSet.has(li.guid));
+              const canCompact = !hasUserChildren && typeof primary.setSegments === "function" && (inline || !!(primaryText && typeof primaryText.setSegments === "function")) && extras.every((turn) => typeof turn.delete === "function") && extraChildren.every((li) => typeof li.delete === "function");
+              if (canCompact) {
+                const line = inline ? `${formatEntryHeader(e, settings)}: ${e.text}` : formatEntryHeader(e, settings);
+                await primary.setSegments([{ type: "text", text: line }]);
+                if (primaryText) await primaryText.setSegments([{ type: "text", text: e.text }]);
+                for (const turn of extras.slice().reverse()) {
+                  const children = items.filter((li) => li.parent_guid === turn.guid && trackedSet.has(li.guid));
+                  for (const child of children.slice().reverse()) {
+                    if (await child.delete()) newTracked.delete(child.guid);
+                  }
+                  if (await turn.delete()) newTracked.delete(turn.guid);
+                }
+                const moved = await primary.move(secNode, afterTurn);
+                if (!moved) continue;
+                afterTurn = moved;
+              } else {
+                let movedAny = false;
+                for (const turn of group) {
+                  const moved = await turn.move(secNode, afterTurn);
+                  if (!moved) continue;
+                  afterTurn = moved;
+                  movedAny = true;
+                }
+                if (!movedAny) continue;
+              }
+            } else {
+              const turn = await record.createLineItem(secNode, afterTurn, "text", [{ type: "text", text: formatEntryHeader(e, settings) }], null);
+              if (!turn) continue;
+              const textNode = await record.createLineItem(turn, null, "text", [{ type: "text", text: e.text }], null);
+              if (!textNode) {
+                try {
+                  await turn.delete();
+                } catch {
+                }
+                continue;
+              }
+              newTracked.add(turn.guid);
+              newTracked.add(textNode.guid);
+              afterTurn = turn;
             }
+            written += 1;
           }
         }
+        if (written !== entries.length) return abort();
         try {
-          localStorage.setItem(trackKey, JSON.stringify(newTracked));
+          localStorage.setItem(trackKey, JSON.stringify(Array.from(newTracked)));
         } catch {
         }
         try {
-          localStorage.setItem(countKey, String(entries.length));
+          localStorage.setItem(countKey, String(written));
         } catch {
         }
         try {
-          localStorage.setItem(sectionedKey, "1");
+          localStorage.setItem(anchorsKey, JSON.stringify(anchors));
         } catch {
         }
-        this._log("transcript reorganized by sections", { sections: sections.length });
+        try {
+          localStorage.setItem(sectionedKey, "done");
+        } catch {
+        }
+        this._log("transcript reorganized by sections", { sections: sections.length, turns: written, moved: canMoveExisting, anchors: anchors.length });
+        return { ok: written > 0, anchors };
       } catch (err) {
+        try {
+          localStorage.removeItem(sectionedKey);
+          localStorage.removeItem(anchorsKey);
+        } catch {
+        }
         this._log("transcript reorganize failed", { error: this._errorMessage(err) });
+        return { ok: false, anchors: [] };
       }
+    }
+    /** Recover persisted section GUIDs after a summary retry, or derive them from the transcript tree. */
+    async _recoverTranscriptSectionAnchors(record, entries, sections, anchorsKey) {
+      let items = [];
+      try {
+        items = await record.getLineItems(false);
+      } catch {
+        return [];
+      }
+      let stored = [];
+      try {
+        stored = JSON.parse(localStorage.getItem(anchorsKey) || "[]") || [];
+      } catch {
+      }
+      if (Array.isArray(stored) && stored.length) {
+        const guids = new Set(items.map((item) => item.guid));
+        const valid = stored.filter((anchor) => anchor && Number.isFinite(Number(anchor.sectionId)) && typeof anchor.guid === "string" && anchor.guid && typeof anchor.title === "string" && guids.has(anchor.guid));
+        if (valid.length === stored.length) return valid.map((anchor) => ({ sectionId: Number(anchor.sectionId), guid: anchor.guid, title: anchor.title }));
+      }
+      let headGuid = "";
+      let tracked = [];
+      try {
+        headGuid = localStorage.getItem(this._bodyKey(record, "tx-head")) || "";
+        tracked = JSON.parse(localStorage.getItem(this._bodyKey(record, "tx-guids")) || "[]") || [];
+      } catch {
+      }
+      const trackedSet = new Set(Array.isArray(tracked) ? tracked : []);
+      const sectionNodes = items.filter((item) => item.parent_guid === headGuid && trackedSet.has(item.guid));
+      if (sectionNodes.length < sections.length) return [];
+      const anchors = sections.map((section2, index) => {
+        const sectionEntries = entries.slice(section2.start, section2.end + 1).filter(Boolean);
+        const node = sectionNodes[index];
+        if (!node || !sectionEntries.length) return null;
+        return {
+          sectionId: section2.sourceIndex ?? index,
+          guid: node.guid,
+          title: formatSectionHeading(section2.title, sectionEntries[0], sectionEntries[sectionEntries.length - 1], this._settings)
+        };
+      }).filter(Boolean);
+      if (anchors.length === sections.length) {
+        try {
+          localStorage.setItem(anchorsKey, JSON.stringify(anchors));
+        } catch {
+        }
+        return anchors;
+      }
+      return [];
     }
     /**
      * Delete the given tracked line-item guids, leaves first (delete() rejects an item with children).
@@ -4528,18 +4786,49 @@ ${transcriptText}` }]
       }
     }
     /**
+     * Append resolved transcript-section references to an already-parsed summary line. `setSegments`
+     * changes only the line's inline content, so a Thymer task stays a task (and keeps its checkbox).
+     * Citation failures are deliberately non-fatal: the summary line is still useful without its link.
+     */
+    async _appendSummaryReferences(lineItem, citationIds, anchorById) {
+      if (!lineItem || typeof lineItem.setSegments !== "function" || !Array.isArray(citationIds) || !citationIds.length || !(anchorById instanceof Map)) return;
+      const segments = buildSummaryReferenceSegments(lineItem.segments, citationIds, anchorById);
+      if (!segments) return;
+      try {
+        const updated = await lineItem.setSegments(segments);
+        if (updated === false) this._log("summary citation skipped", { lineItemGuid: lineItem.guid });
+      } catch (err) {
+        this._log("summary citation skipped", { lineItemGuid: lineItem.guid, error: this._errorMessage(err) });
+      }
+    }
+    /**
      * The summary as a collapsible "📝 Summary" heading in the body, once per bot, placed just BEFORE
      * the transcript heading (summary on top, transcript below). Rich markdown — headings, bold,
-     * action-item checkboxes — because the body parses it, unlike the flat property.
+     * action-item checkboxes — because the body parses it, unlike the flat property. When transcript
+     * section anchors exist, every cited content line receives a native Thymer reference chip.
      */
-    async _writeSummaryToBody(record, summary) {
-      if (!record || typeof record.insertFromMarkdown !== "function" || !summary || !summary.trim()) return;
+    async _writeSummaryToBody(record, summary, citations = [], sectionAnchors = []) {
+      if (!record || typeof record.insertFromMarkdown !== "function" || !summary || !summary.trim()) return false;
       const flagKey = this._bodyKey(record, "summary-body");
       const botId = this._text(record, FIELDS.BOT_ID);
+      const writingValue = `writing:${botId}:${Date.now()}`;
       try {
-        if (botId && localStorage.getItem(flagKey) === botId) return;
+        const state = localStorage.getItem(flagKey) || "";
+        if (botId && state === botId) return true;
+        if (botId && state.startsWith(`writing:${botId}:`)) {
+          const startedAt = Number(state.slice(`writing:${botId}:`.length));
+          if (startedAt && Date.now() - startedAt < 5 * 60 * 1e3) return true;
+        }
+        if (botId) localStorage.setItem(flagKey, writingValue);
       } catch {
       }
+      const fail = /* @__PURE__ */ __name(() => {
+        try {
+          if (localStorage.getItem(flagKey) === writingValue) localStorage.removeItem(flagKey);
+        } catch {
+        }
+        return false;
+      }, "fail");
       try {
         let items = typeof record.getLineItems === "function" ? await record.getLineItems(false) : [];
         let txHeadGuid = "";
@@ -4552,19 +4841,28 @@ ${transcriptText}` }]
         const afterItem = txIdx > 0 ? topLevel[txIdx - 1] : null;
         const before = new Set(items.map((li) => li.guid));
         const anchorMd = this._headingAnchorMd(this._settings.summaryHeadingText, this._settings.summaryHeadingLevel);
-        if (!anchorMd) return;
-        if (await record.insertFromMarkdown(anchorMd, null, afterItem) === false) return;
+        if (!anchorMd) return fail();
+        if (await record.insertFromMarkdown(anchorMd, null, afterItem) === false) return fail();
         items = await record.getLineItems(false);
         const head = items.find((li) => !before.has(li.guid)) || null;
-        if (!head) return;
-        const { preamble, groups } = summaryGroups(summary);
+        if (!head) return fail();
+        const { preamble, groups } = groupSummaryLines(summary, citations);
+        const anchorById = new Map((Array.isArray(sectionAnchors) ? sectionAnchors : []).filter((anchor) => anchor && Number.isFinite(Number(anchor.sectionId)) && anchor.guid).map((anchor) => [Number(anchor.sectionId), anchor]));
         const afterOf = /* @__PURE__ */ __name((parentGuid) => {
           const kids = items.filter((li) => li.parent_guid === parentGuid);
           return kids.length ? kids[kids.length - 1] : null;
         }, "afterOf");
-        if (preamble.length) {
-          await record.insertFromMarkdown(this._escMd(preamble.join("\n")), head, null);
+        const insertSummaryLine = /* @__PURE__ */ __name(async (entry, parent, after) => {
+          const lineBefore = new Set(items.map((item) => item.guid));
+          if (await record.insertFromMarkdown(this._escMd(entry.markdown), parent, after) === false) return after;
           items = await record.getLineItems(false);
+          const created = items.find((item) => item.parent_guid === parent.guid && !lineBefore.has(item.guid)) || items.find((item) => !lineBefore.has(item.guid)) || null;
+          if (created) await this._appendSummaryReferences(created, entry.citations, anchorById);
+          return created || after;
+        }, "insertSummaryLine");
+        let afterPreamble = null;
+        for (const entry of preamble) {
+          afterPreamble = await insertSummaryLine(entry, head, afterPreamble);
         }
         for (const g of groups) {
           const b = new Set(items.map((li) => li.guid));
@@ -4572,8 +4870,8 @@ ${transcriptText}` }]
           items = await record.getLineItems(false);
           const sec = items.find((li) => li.parent_guid === head.guid && !b.has(li.guid)) || null;
           if (sec && g.content.length) {
-            await record.insertFromMarkdown(this._escMd(g.content.join("\n")), sec, null);
-            items = await record.getLineItems(false);
+            let afterContent = null;
+            for (const entry of g.content) afterContent = await insertSummaryLine(entry, sec, afterContent);
           }
         }
         try {
@@ -4581,8 +4879,11 @@ ${transcriptText}` }]
         } catch {
         }
         this._log("summary written to body", { botId });
+        return true;
       } catch (err) {
+        fail();
         this._log("summary body write failed", { error: this._errorMessage(err) });
+        return false;
       }
     }
     /**
@@ -4740,7 +5041,7 @@ ${transcriptText}` }]
       for (const record of records) {
         const botId = this._text(record, FIELDS.BOT_ID);
         const status = this._text(record, FIELDS.STATUS);
-        if (botId && !isTerminalStatus(status)) this._ensurePolling(record, botId);
+        if (botId && !isTerminalStatus(status) && !COMPLETED_STATUSES.has(String(status || "").toLowerCase())) this._ensurePolling(record, botId);
       }
     }
     _restartPollingIntervals() {
@@ -5843,7 +6144,10 @@ ${transcriptText}` }]
     const entries = [];
     for (const row of rows) {
       const nested = row && row.data && row.data.words ? row.data : row;
-      const speaker = row.speaker || row.speaker_name || row.participant && row.participant.name || nested && nested.participant && nested.participant.name || "Speaker";
+      const participant = row.participant || nested && nested.participant || {};
+      const speaker = row.speaker || row.speaker_name || participant.name || "Speaker";
+      const participantId = participant.id != null ? participant.id : row.speaker_id != null ? row.speaker_id : null;
+      const speakerKey = participantId != null ? `id:${participantId}` : `name:${String(speaker).trim().toLowerCase()}`;
       const words = Array.isArray(row.words) ? row.words : Array.isArray(nested && nested.words) ? nested.words : [];
       const text = String(row.text || row.transcript || row.sentence || row.phrase || words.map((w) => w.text || w.word || "").join(" ") || "").trim();
       if (!text) continue;
@@ -5861,11 +6165,27 @@ ${transcriptText}` }]
         firstWord.start_timestamp,
         firstWord.start_timestamp && firstWord.start_timestamp.relative
       );
-      entries.push({ speaker: String(speaker), text, absoluteIso: absoluteIso || null, relativeSec });
+      entries.push({ speaker: String(speaker), speakerKey, text, absoluteIso: absoluteIso || null, relativeSec });
     }
     return entries;
   }
   __name(transcriptEntries, "transcriptEntries");
+  function coalesceAdjacentTranscriptEntries(entries) {
+    const out = [];
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (!entry || !entry.text) continue;
+      const previous = out[out.length - 1];
+      const speakerKey = entry.speakerKey || `name:${String(entry.speaker || "").trim().toLowerCase()}`;
+      if (previous && previous.speakerKey === speakerKey) {
+        previous.text = `${previous.text} ${entry.text}`.replace(/\s{2,}/g, " ").trim();
+        previous.sourceCount += 1;
+        continue;
+      }
+      out.push({ ...entry, speakerKey, sourceCount: 1 });
+    }
+    return out;
+  }
+  __name(coalesceAdjacentTranscriptEntries, "coalesceAdjacentTranscriptEntries");
   function entryStamp(entry, settings) {
     const clock = entry.absoluteIso ? formatClockTime(entry.absoluteIso) : null;
     const elapsed = entry.relativeSec == null ? null : formatRelativeTime(entry.relativeSec);
@@ -5958,38 +6278,26 @@ ${transcriptText}` }]
       if (m && SUMMARY_WRAPPER_TITLES.has(m[1].trim().replace(/[:.]+$/, "").toLowerCase())) out.splice(start, 1);
     }
     for (let k = 0; k < out.length; k++) out[k] = out[k].replace(/^(\s{0,3})#{1,6}(?=\s)/, "$1###");
+    let inActionItems = false;
+    for (let k = 0; k < out.length; k++) {
+      const heading = out[k].match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/);
+      if (heading) {
+        inActionItems = /^action items?\b/i.test(heading[1].trim());
+        continue;
+      }
+      if (inActionItems) out[k] = out[k].replace(/^(\s*)[-*+]\s+(?!\[[ xX]\]\s)/, "$1- [ ] ");
+    }
     return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   }
   __name(sanitizeSummaryMarkdown, "sanitizeSummaryMarkdown");
-  function summaryGroups(md) {
-    const stripEnds = /* @__PURE__ */ __name((arr) => {
-      while (arr.length && !arr[0].trim()) arr.shift();
-      while (arr.length && !arr[arr.length - 1].trim()) arr.pop();
-      return arr;
-    }, "stripEnds");
-    const preamble = [];
-    const groups = [];
-    let cur = null;
-    for (const line of String(md || "").split("\n")) {
-      const h2 = line.match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/);
-      if (h2) {
-        cur = { heading: h2[1].trim(), content: [] };
-        groups.push(cur);
-      } else if (cur) cur.content.push(line);
-      else preamble.push(line);
-    }
-    return {
-      preamble: stripEnds(preamble).filter((l) => l.trim()),
-      groups: groups.map((g) => ({ heading: g.heading, content: stripEnds(g.content).filter((l) => l.trim()) }))
-    };
-  }
-  __name(summaryGroups, "summaryGroups");
   function sectionJsonInstruction(count) {
     return [
       "Additionally, divide the transcript into a handful of topic sections in time order.",
       `Each line below is numbered like [N], from 0 to ${count - 1}.`,
+      "At the end of every non-heading summary line, add one or two citations in the form {{cite:S}} or {{cite:S,T}}, where S and T are zero-based indexes into your sections array.",
+      "Choose only the section or two that most directly supports that summary line. Do not put citation markers on headings.",
       "Respond with ONLY a JSON object \u2014 no code fence, no text before or after \u2014 of the form:",
-      '{"summary": "<the markdown summary that follows the instructions above, as one JSON string>", "sections": [{"title": "<short topic label, no timestamps>", "start": <first line number>, "end": <last line number>}]}',
+      '{"summary": "<the markdown summary with {{cite:0}} markers, as one JSON string>", "sections": [{"title": "<short topic label, no timestamps>", "start": <first transcript line number>, "end": <last transcript line number>}]}',
       "Sections must be in order, must not overlap, and together must cover every line from 0 to " + (count - 1) + ". Aim for 3\u20138 sections."
     ].join("\n");
   }
@@ -6019,7 +6327,8 @@ ${transcriptText}` }]
   __name(parseSummaryAndSections, "parseSummaryAndSections");
   function normalizeSections(rawSections, count) {
     const out = [];
-    for (const s of rawSections) {
+    for (let sourceIndex = 0; sourceIndex < rawSections.length; sourceIndex++) {
+      const s = rawSections[sourceIndex];
       if (!s || typeof s !== "object") continue;
       const title = String(s.title || "").trim();
       let start = Math.floor(Number(s.start));
@@ -6027,7 +6336,7 @@ ${transcriptText}` }]
       if (!title || !Number.isFinite(start) || !Number.isFinite(end)) continue;
       start = Math.max(0, Math.min(start, count - 1));
       end = Math.max(start, Math.min(end, count - 1));
-      out.push({ title, start, end });
+      out.push({ title, start, end, sourceIndex });
     }
     out.sort((a, b) => a.start - b.start);
     const clean = [];
@@ -6037,6 +6346,11 @@ ${transcriptText}` }]
       if (s.start > s.end || s.start > count - 1) continue;
       clean.push(s);
       cursor = s.end;
+    }
+    if (clean.length) {
+      clean[0].start = 0;
+      for (let i = 1; i < clean.length; i++) clean[i - 1].end = clean[i].start - 1;
+      clean[clean.length - 1].end = count - 1;
     }
     return clean;
   }
@@ -6088,6 +6402,7 @@ ${transcriptText}` }]
       parts.push(`realtime_events=${debug.realtimeEndpointEvents.flat().join(",")}`);
     }
     if (debug.kv != null) parts.push(`kv=${debug.kv}`);
+    if (debug.realtimePosts != null) parts.push(`realtime_posts=${debug.realtimePosts}`);
     if (debug.liveRows != null) parts.push(`live_rows=${debug.liveRows}`);
     if (transcript && transcript.pending) return `Transcript not ready yet${parts.length ? ` (${parts.join("; ")})` : ""}.`;
     if (transcript && transcript.live) return `No live transcript rows received yet${parts.length ? ` (${parts.join("; ")})` : ""}.`;

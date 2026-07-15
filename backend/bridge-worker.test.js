@@ -58,7 +58,7 @@ test('create bot adds realtime endpoint and perfect diarization payload', async 
 	assert.deepEqual(forwarded.body.recording_config.realtime_endpoints, [{
 		type: 'webhook',
 		url: 'https://bridge.example.com/api/recall/realtime',
-		events: ['transcript.data', 'transcript.partial_data'],
+		events: ['transcript.data'],
 	}]);
 	assert.equal(forwarded.body.recording_config.transcript.provider.recallai_streaming.language_code, 'en');
 	assert.equal(forwarded.body.recording_config.transcript.diarization.use_separate_streams_when_available, true);
@@ -116,6 +116,42 @@ test('realtime webhook buffers transcript rows for transcript polling', async ()
 	assert.equal(json.results[0].speaker, 'Ada');
 	assert.equal(json.results[0].text, 'Hello there');
 	assert.equal(json.results[0].relativeTime, 3.2);
+	assert.equal(json.receivedPosts, 1);
+});
+
+test('transcript polling refreshes KV after this isolate cached an empty live session', async () => {
+	let stored = null;
+	const kv = {
+		async get(_key, type) { return stored && type === 'json' ? JSON.parse(stored) : stored; },
+		async put(_key, value) { stored = value; },
+	};
+	const request = () => new Request('https://bridge.test/api/recall/transcript', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ botId: 'bot_stale_cache', recallApiKey: 'key' }),
+	});
+	const env = {
+		RECALL_TRANSCRIPTS: kv,
+		__fetch: async (url) => url.endsWith('/api/v1/bot/bot_stale_cache/')
+			? Response.json({ status: { code: 'in_call_recording' }, recordings: [] })
+			: Response.json({ detail: 'not ready' }, { status: 404 }),
+	};
+
+	const first = await worker.fetch(request(), env);
+	assert.equal(first.status, 202);
+
+	stored = JSON.stringify({
+		botId: 'bot_stale_cache',
+		rows: [{ speaker: 'Grace', text: 'Now visible', relativeTime: 4.5 }],
+		receivedPosts: 1,
+		updatedAt: Date.now(),
+	});
+	const second = await worker.fetch(request(), env);
+	const json = await second.json();
+
+	assert.equal(second.status, 200);
+	assert.equal(json.results[0].text, 'Now visible');
+	assert.equal(json.receivedPosts, 1);
 });
 
 test('transcript polling fetches v1.11 download URL from bot recording', async () => {

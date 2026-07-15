@@ -199,6 +199,10 @@ async function receiveRealtimeTranscript(request, env) {
 	if (eventName && eventName !== 'transcript.data') {
 		return json({ ok: true, ignored: `non-final event ${eventName}` }, 202);
 	}
+	// Refresh from KV before appending. Webhook POSTs can hit different Worker isolates, so each
+	// isolate's in-memory session is only a cache and must never be treated as the source of truth.
+	const session = await getLiveSession(botId, env, true);
+	session.receivedPosts = (Number(session.receivedPosts) || 0) + 1;
 	const row = normalizeRealtimeTranscript(payload);
 	if (!row || !row.text) {
 		console.info('[recall-ai bridge] realtime ignored: empty transcript', {
@@ -206,13 +210,14 @@ async function receiveRealtimeTranscript(request, env) {
 			event: payload && payload.event || null,
 			hasWords: !!(payload && payload.data && payload.data.data && payload.data.data.words),
 		});
+		session.updatedAt = Date.now();
+		await saveLiveSession(session, env);
 		return json({ ok: true, ignored: 'empty transcript' }, 202);
 	}
 	// Stamp the wall-clock time we RECEIVED this finalized utterance — the realtime webhook carries
 	// no absolute time, and receipt is within a second or two of when it was spoken. The plugin
 	// renders this in the reader's local timezone as "[2:47 PM]".
 	if (!row.absoluteTime) row.absoluteTime = new Date().toISOString();
-	const session = await getLiveSession(botId, env);
 	const key = `${row.relativeTime || ''}:${row.speaker}:${row.text}`;
 	if (!session.keys.has(key)) {
 		session.keys.add(key);
@@ -226,6 +231,7 @@ async function receiveRealtimeTranscript(request, env) {
 		speaker: row.speaker,
 		textLength: row.text.length,
 		rows: session.rows.length,
+		receivedPosts: session.receivedPosts,
 	});
 	return json({ ok: true }, 202);
 }
@@ -357,15 +363,19 @@ function latestRecallStatus(bot) {
 function upsertSession(botId, patch = {}) {
 	let session = LIVE_SESSIONS.get(botId);
 	if (!session) {
-		session = { botId, rows: [], keys: new Set(), updatedAt: Date.now() };
+		session = { botId, rows: [], keys: new Set(), receivedPosts: 0, updatedAt: Date.now() };
 		LIVE_SESSIONS.set(botId, session);
 	}
 	Object.assign(session, patch);
 	return session;
 }
 
-async function getLiveSession(botId, env) {
+async function getLiveSession(botId, env, refresh = false) {
 	const existing = LIVE_SESSIONS.get(botId);
+	if (refresh) {
+		const stored = await loadLiveSession(botId, env);
+		if (stored) return stored;
+	}
 	if (existing) return existing;
 	const stored = await loadLiveSession(botId, env);
 	if (stored) return stored;
@@ -373,10 +383,14 @@ async function getLiveSession(botId, env) {
 }
 
 async function liveTranscriptPayload(botId, env) {
-	const session = await getLiveSession(botId, env);
+	// Always reconcile KV. A previous poll may have cached an empty session in this isolate while
+	// Recall delivered its webhooks to another isolate; returning that stale cache caused live_rows=0
+	// for the entire meeting even though the rows were safely sitting in KV.
+	const session = await getLiveSession(botId, env, true);
 	return {
 		results: session ? session.rows : [],
 		live: true,
+		receivedPosts: session ? Number(session.receivedPosts) || 0 : 0,
 		updatedAt: session ? session.updatedAt : null,
 	};
 }
@@ -387,11 +401,22 @@ async function loadLiveSession(botId, env) {
 	try {
 		const raw = await store.get(`bot:${botId}`, 'json');
 		if (!raw || !Array.isArray(raw.rows)) return null;
+		const existing = LIVE_SESSIONS.get(botId);
+		const rows = [];
+		const keys = new Set();
+		for (const row of [...raw.rows, ...(existing && Array.isArray(existing.rows) ? existing.rows : [])]) {
+			const key = `${row.relativeTime || ''}:${row.speaker}:${row.text}`;
+			if (keys.has(key)) continue;
+			keys.add(key);
+			rows.push(row);
+		}
+		rows.sort((a, b) => (Number(a && a.relativeTime) || 0) - (Number(b && b.relativeTime) || 0));
 		const session = {
 			botId,
-			rows: raw.rows,
-			keys: new Set(raw.rows.map(row => `${row.relativeTime || ''}:${row.speaker}:${row.text}`)),
-			updatedAt: raw.updatedAt || Date.now(),
+			rows,
+			keys,
+			receivedPosts: Math.max(Number(raw.receivedPosts) || 0, Number(existing && existing.receivedPosts) || 0),
+			updatedAt: Math.max(Number(raw.updatedAt) || 0, Number(existing && existing.updatedAt) || 0) || Date.now(),
 		};
 		LIVE_SESSIONS.set(botId, session);
 		return session;
@@ -413,6 +438,7 @@ async function saveLiveSession(session, env) {
 		await store.put(`bot:${session.botId}`, JSON.stringify({
 			botId: session.botId,
 			rows: session.rows,
+			receivedPosts: Number(session.receivedPosts) || 0,
 			updatedAt: session.updatedAt,
 		}), { expirationTtl: 60 * 60 * 24 * 7 });
 	} catch (err) {
@@ -497,6 +523,7 @@ async function transcriptDebug(env, region, apiKey, bot, live) {
 		// called us, or we had nowhere to put what it sent — and they are indistinguishable without it.
 		kv: transcriptStore(env) ? 'bound' : 'MISSING',
 		liveRows: live && Array.isArray(live.results) ? live.results.length : 0,
+		realtimePosts: live ? Number(live.receivedPosts) || 0 : 0,
 		liveUpdatedAt: live ? live.updatedAt : null,
 		...realtime,
 	};
