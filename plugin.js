@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.16.0";
+  var PLUGIN_VERSION = "1.16.1";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3092,7 +3092,14 @@ ${report}
     transcriptLayout: "blocks",
     utteranceTimestamps: true,
     timestampPosition: "front",
-    summaryPrompt: "Summarize this meeting transcript for a Thymer note. Include: 1) a concise overview, 2) decisions made, 3) action items with owners when mentioned, and 4) open questions. Keep the output skimmable and factual."
+    summaryPrompt: [
+      "Summarize this meeting transcript as clean Markdown for a Thymer outline note. Follow these formatting rules exactly:",
+      "- Do NOT add a title or top-level heading \u2014 the note already has a Summary heading, so start directly with the first section.",
+      '- Give each section its own "### " heading: Overview, Decisions, Action Items, Open Questions. Include a section only when it has content.',
+      '- Overview: one short paragraph. Decisions: one "- " bullet each. Action Items: one "- [ ] " checkbox each, written "<action> \u2014 <owner>" (drop the "\u2014 <owner>" when no owner is named). Open Questions: one "- " bullet each.',
+      "- Never use horizontal rules (--- or ***), never use Markdown tables, and do not leave blank lines inside a section.",
+      "Be concise and factual."
+    ].join("\n")
   });
   var API_KEY_FIELDS = Object.freeze(["recallApiKey", "anthropicApiKey"]);
   var BOT_IMAGE_FIELDS = Object.freeze(["botImageData", "botImageName"]);
@@ -4136,37 +4143,40 @@ ${report}
     }
     async _createSummary(transcriptText) {
       const prompt = this._settings.summaryPrompt || DEFAULT_SETTINGS.summaryPrompt;
+      let raw = "";
       if (this._bridgeUrl()) {
-        const json2 = await this._bridgeJson("/api/anthropic/summary", {
+        const json = await this._bridgeJson("/api/anthropic/summary", {
           anthropicApiKey: this._settings.anthropicApiKey,
           anthropicModel: this._settings.anthropicModel || DEFAULT_SETTINGS.anthropicModel,
           summaryPrompt: prompt,
           transcriptText
         });
-        return json2.summary || "";
-      }
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "x-api-key": this._settings.anthropicApiKey,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({
-          model: this._settings.anthropicModel || DEFAULT_SETTINGS.anthropicModel,
-          max_tokens: 1400,
-          messages: [{
-            role: "user",
-            content: `${prompt}
+        raw = json.summary || "";
+      } else {
+        const response = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "x-api-key": this._settings.anthropicApiKey,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            model: this._settings.anthropicModel || DEFAULT_SETTINGS.anthropicModel,
+            max_tokens: 1400,
+            messages: [{
+              role: "user",
+              content: `${prompt}
 
 Transcript:
 ${transcriptText}`
-          }]
-        })
-      });
-      const json = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(anthropicError(json, response.status));
-      return Array.isArray(json.content) ? json.content.map((part) => part && part.type === "text" ? part.text : "").join("\n").trim() : "";
+            }]
+          })
+        });
+        const json = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(anthropicError(json, response.status));
+        raw = Array.isArray(json.content) ? json.content.map((part) => part && part.type === "text" ? part.text : "").join("\n").trim() : "";
+      }
+      return sanitizeSummaryMarkdown(raw);
     }
     /**
      * Render summary + transcript into the record BODY as real Thymer blocks (headings, bold,
@@ -5468,6 +5478,44 @@ ${transcriptText}`
 	${e.text}`).join("\n\n");
   }
   __name(entriesToText, "entriesToText");
+  var SUMMARY_WRAPPER_TITLES = /* @__PURE__ */ new Set(["meeting notes", "summary", "meeting summary", "notes", "meeting recap", "recap"]);
+  function isTableSeparatorRow(line) {
+    return /\|/.test(line) && /-/.test(line) && /^[\s|:-]+$/.test(line);
+  }
+  __name(isTableSeparatorRow, "isTableSeparatorRow");
+  function tableRowCells(line) {
+    return line.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim()).filter(Boolean);
+  }
+  __name(tableRowCells, "tableRowCells");
+  function sanitizeSummaryMarkdown(md) {
+    const src = String(md || "").replace(/\r\n?/g, "\n").split("\n");
+    const out = [];
+    for (let i = 0; i < src.length; i++) {
+      const line = src[i];
+      if (/^\s*([-*_])\1{2,}\s*$/.test(line)) continue;
+      if (line.includes("|") && i + 1 < src.length && isTableSeparatorRow(src[i + 1])) {
+        let j = i + 2;
+        for (; j < src.length; j++) {
+          const row = src[j];
+          if (!row.trim() || !row.includes("|")) break;
+          const cells = tableRowCells(row);
+          if (cells.length) out.push(`- ${cells.join(" \u2014 ")}`);
+        }
+        i = j - 1;
+        continue;
+      }
+      out.push(line);
+    }
+    let start = 0;
+    while (start < out.length && !out[start].trim()) start++;
+    if (start < out.length) {
+      const m = out[start].match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/) || out[start].match(/^\s*\*\*(.+?)\*\*\s*$/);
+      if (m && SUMMARY_WRAPPER_TITLES.has(m[1].trim().replace(/[:.]+$/, "").toLowerCase())) out.splice(start, 1);
+    }
+    for (let k = 0; k < out.length; k++) out[k] = out[k].replace(/^(\s{0,3})#{1,6}(?=\s)/, "$1###");
+    return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+  __name(sanitizeSummaryMarkdown, "sanitizeSummaryMarkdown");
   function firstStringVal(...values) {
     for (const v of values) {
       if (typeof v === "string" && v.trim()) return v.trim();
