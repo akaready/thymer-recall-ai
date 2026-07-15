@@ -3027,17 +3027,31 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // summary-citations.js
-  function extractSummaryCitations(markdown, validSectionIds) {
-    const valid = new Set((Array.isArray(validSectionIds) ? validSectionIds : []).map((value) => Math.floor(Number(value))).filter(Number.isFinite));
+  function extractSummaryCitations(markdown, sections) {
+    const valid = new Map((Array.isArray(sections) ? sections : []).map((section2, index) => [
+      Number.isFinite(Number(section2 && section2.sourceIndex)) ? Number(section2.sourceIndex) : index,
+      section2
+    ]));
     const citations = [];
     const lines = String(markdown || "").split("\n").map((line) => {
       const ids = [];
       const clean = line.replace(/[ \t]*\{\{\s*cite\s*:\s*([^{}]*)\}\}/gi, (_match, payload) => {
         for (const token of String(payload || "").split(",")) {
           const trimmed = token.trim();
-          if (!/^\d+$/.test(trimmed)) continue;
-          const id = Number(trimmed);
-          if (valid.has(id) && !ids.includes(id)) ids.push(id);
+          const match = trimmed.match(/^(\d+)(?::(\d+))?$/);
+          if (!match) continue;
+          const sectionId = Number(match[1]);
+          const section2 = valid.get(sectionId);
+          if (!section2) continue;
+          const requestedEntry = match[2] == null ? null : Number(match[2]);
+          const entryIndex = requestedEntry != null && requestedEntry >= Number(section2.start) && requestedEntry <= Number(section2.end) ? requestedEntry : null;
+          if (entryIndex != null) {
+            const broad = ids.findIndex((item) => item.sectionId === sectionId && item.entryIndex == null);
+            if (broad >= 0) ids.splice(broad, 1);
+            if (!ids.some((item) => item.sectionId === sectionId && item.entryIndex === entryIndex)) ids.push({ sectionId, entryIndex });
+          } else if (!ids.some((item) => item.sectionId === sectionId)) {
+            ids.push({ sectionId, entryIndex: null });
+          }
         }
         return "";
       }).replace(/[ \t]+$/g, "");
@@ -3071,13 +3085,15 @@ ${report}
     return { preamble, groups };
   }
   __name(groupSummaryLines, "groupSummaryLines");
-  function buildSummaryReferenceSegments(existingSegments, citationIds, anchorById) {
-    if (!Array.isArray(citationIds) || !citationIds.length || !(anchorById instanceof Map)) return null;
+  function buildSummaryReferenceSegments(existingSegments, citations, sectionAnchorById, turnAnchorByIndex) {
+    if (!Array.isArray(citations) || !citations.length || !(sectionAnchorById instanceof Map) || !(turnAnchorByIndex instanceof Map)) return null;
     const base = Array.isArray(existingSegments) ? existingSegments : [];
     const existingRefs = new Set(base.filter((segment) => segment && segment.type === "ref" && segment.text && typeof segment.text.guid === "string").map((segment) => segment.text.guid));
     const anchors = [];
-    for (const id of citationIds) {
-      const anchor = anchorById.get(Number(id));
+    for (const citation of citations) {
+      if (!citation) continue;
+      const exact = citation.entryIndex == null ? null : turnAnchorByIndex.get(Number(citation.entryIndex));
+      const anchor = exact || sectionAnchorById.get(Number(citation.sectionId));
       if (!anchor || !anchor.guid || existingRefs.has(anchor.guid) || anchors.some((item) => item.guid === anchor.guid)) continue;
       anchors.push(anchor);
     }
@@ -3091,9 +3107,45 @@ ${report}
     return segments;
   }
   __name(buildSummaryReferenceSegments, "buildSummaryReferenceSegments");
+  function deriveTranscriptTurnAnchors(items, trackedGuids, entries, sections, sectionAnchors, labelForEntry) {
+    const allItems = Array.isArray(items) ? items : [];
+    const tracked = new Set(Array.isArray(trackedGuids) ? trackedGuids : []);
+    const sectionById = new Map((Array.isArray(sectionAnchors) ? sectionAnchors : []).map((anchor) => [Number(anchor.sectionId), anchor]));
+    const turnsBySection = /* @__PURE__ */ new Map();
+    let totalTurns = 0;
+    for (let order = 0; order < sections.length; order++) {
+      const section2 = sections[order];
+      const sectionId = Number(section2.sourceIndex ?? order);
+      const sectionAnchor = sectionById.get(sectionId);
+      const turns = sectionAnchor ? allItems.filter((item) => item.parent_guid === sectionAnchor.guid && tracked.has(item.guid)) : [];
+      turnsBySection.set(sectionId, turns);
+      totalTurns += turns.length;
+    }
+    const oneTurnPerEntry = totalTurns === entries.length;
+    const result = [];
+    for (let order = 0; order < sections.length; order++) {
+      const section2 = sections[order];
+      const sectionId = Number(section2.sourceIndex ?? order);
+      const turns = turnsBySection.get(sectionId) || [];
+      let cursor = 0;
+      for (let entryIndex = section2.start; entryIndex <= section2.end; entryIndex++) {
+        const entry = entries[entryIndex];
+        if (!entry) continue;
+        const sourceCount = oneTurnPerEntry ? 1 : Math.max(1, Number(entry.sourceCount) || 1);
+        const turn = turns[cursor] || null;
+        cursor += sourceCount;
+        if (!turn || !oneTurnPerEntry && sourceCount > 1) continue;
+        const textNode = allItems.find((item) => item.parent_guid === turn.guid && tracked.has(item.guid)) || null;
+        const target = textNode || turn;
+        result.push({ entryIndex, guid: target.guid, title: labelForEntry(entry) });
+      }
+    }
+    return result;
+  }
+  __name(deriveTranscriptTurnAnchors, "deriveTranscriptTurnAnchors");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.20.7";
+  var PLUGIN_VERSION = "1.20.8";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -4314,7 +4366,7 @@ ${report}
         const loc = this._settings.notesLocation;
         if (loc !== "body") this._setMappedField(record, FIELDS.SUMMARY, summary);
         if (loc !== "property") {
-          let sectionResult = { ok: false, anchors: [] };
+          let sectionResult = { ok: false, anchors: [], turnAnchors: [] };
           if (this._settings.saveTranscript && this._settings.transcriptSections && sections.length && Array.isArray(entries) && entries.length) {
             sectionResult = await this._reorganizeTranscriptBySections(record, entries, sections);
           }
@@ -4322,7 +4374,7 @@ ${report}
           if (deferTranscriptBody && !sectioned && this._settings.saveTranscript) {
             await this._streamTranscriptToBody(record, entries);
           }
-          const summaryWritten = await this._writeSummaryToBody(record, summary, citations, sectionResult.anchors);
+          const summaryWritten = await this._writeSummaryToBody(record, summary, citations, sectionResult.anchors, sectionResult.turnAnchors);
           if (!summaryWritten) throw new Error("Thymer could not write the summary to the meeting body.");
         }
         this._setField(record, FIELDS.STATUS, "summarized");
@@ -4343,7 +4395,7 @@ ${report}
      * call. With sections on we send a NUMBERED transcript (`[N] Speaker: text`) and ask for a JSON object
      * `{ summary, sections:[{title,start,end}] }` indexing those numbers. A tolerant parse recovers the
      * summary even if the JSON is malformed; bad/empty sections just fall back to the un-sectioned
-     * transcript (reorganize is skipped). Returns `{ summary, sections }`.
+     * transcript (reorganize is skipped). Returns `{ summary, sections, citations }`.
      *
      * @param {string} transcriptText
      * @param {Array<{speaker:string,text:string,absoluteIso:string|null,relativeSec:number|null}>} [entries]
@@ -4362,7 +4414,7 @@ ${sectionJsonInstruction(entries.length)}`;
       const raw = await this._callClaude(prompt, numbered, 2600);
       const parsed = parseSummaryAndSections(raw, entries.length);
       const sanitized = sanitizeSummaryMarkdown(parsed.summary);
-      const cited = extractSummaryCitations(sanitized, parsed.sections.map((section2, index) => section2.sourceIndex ?? index));
+      const cited = extractSummaryCitations(sanitized, parsed.sections);
       return { summary: cited.markdown, sections: parsed.sections, citations: cited.citations };
     }
     /** POST the summary request to the bridge or to Anthropic directly; returns Claude's raw text. */
@@ -4529,18 +4581,19 @@ ${transcriptText}` }]
      * At meeting end, regroup the live (un-sectioned) transcript into collapsible topic sections:
      * move existing streamed turns under section nodes when the final artifact matches, or build the
      * sectioned shape directly when live rows never arrived. Only a mismatched final artifact falls back
-     * to deleting OUR tracked nodes and rebuilding; user notes are never removed. Returns the stable
-     * line-item GUID for every section so summary citations can target the headings. Guarded once per bot.
+     * to deleting OUR tracked nodes and rebuilding; user notes are never removed. Returns stable line-item
+     * GUIDs for both topic headings and exact final transcript entries. Guarded once per bot.
      */
     async _reorganizeTranscriptBySections(record, entries, sections) {
-      if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.createLineItem !== "function" || typeof record.getLineItems !== "function") return { ok: false, anchors: [] };
-      if (!Array.isArray(sections) || !sections.length || !Array.isArray(entries) || !entries.length) return { ok: false, anchors: [] };
+      if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.createLineItem !== "function" || typeof record.getLineItems !== "function") return { ok: false, anchors: [], turnAnchors: [] };
+      if (!Array.isArray(sections) || !sections.length || !Array.isArray(entries) || !entries.length) return { ok: false, anchors: [], turnAnchors: [] };
       const headKey = this._bodyKey(record, "tx-head");
       const trackKey = this._bodyKey(record, "tx-guids");
       const countKey = this._bodyKey(record, "tx-count");
       const botId = this._text(record, FIELDS.BOT_ID) || "current";
       const sectionedKey = this._bodyKey(record, `tx-sectioned:${botId}`);
       const anchorsKey = this._bodyKey(record, `tx-section-anchors:${botId}`);
+      const turnAnchorsKey = this._bodyKey(record, `tx-turn-anchors:${botId}`);
       try {
         let state = "";
         try {
@@ -4550,7 +4603,8 @@ ${transcriptText}` }]
         const startedAt = state.startsWith("writing:") ? Number(state.slice("writing:".length)) : 0;
         if (state === "done" || startedAt && Date.now() - startedAt < 5 * 60 * 1e3) {
           const anchors2 = await this._recoverTranscriptSectionAnchors(record, entries, sections, anchorsKey);
-          return { ok: true, anchors: anchors2 };
+          const turnAnchors2 = await this._recoverTranscriptTurnAnchors(record, entries, sections, anchors2, turnAnchorsKey);
+          return { ok: true, anchors: anchors2, turnAnchors: turnAnchors2 };
         }
         try {
           localStorage.setItem(sectionedKey, `writing:${Date.now()}`);
@@ -4560,9 +4614,10 @@ ${transcriptText}` }]
           try {
             localStorage.removeItem(sectionedKey);
             localStorage.removeItem(anchorsKey);
+            localStorage.removeItem(turnAnchorsKey);
           } catch {
           }
-          return { ok: false, anchors: [] };
+          return { ok: false, anchors: [], turnAnchors: [] };
         }, "abort");
         let headGuid = "";
         try {
@@ -4610,6 +4665,7 @@ ${transcriptText}` }]
         let afterSection = items.filter((li) => li.parent_guid === heading.guid).at(-1) || null;
         let written = 0;
         const anchors = [];
+        const turnAnchors = [];
         for (let sectionOrder = 0; sectionOrder < sections.length; sectionOrder++) {
           const sec = sections[sectionOrder];
           const secEntries = entries.slice(sec.start, sec.end + 1).filter(Boolean);
@@ -4624,6 +4680,7 @@ ${transcriptText}` }]
           for (let index = sec.start; index <= sec.end; index++) {
             const e = entries[index];
             if (!e) continue;
+            let turnTarget = null;
             if (canMoveExisting) {
               const count = Math.max(1, Number(e.sourceCount) || 1);
               const group = turns.slice(sourceOffsets[index], sourceOffsets[index] + count);
@@ -4649,6 +4706,7 @@ ${transcriptText}` }]
                 const moved = await primary.move(secNode, afterTurn);
                 if (!moved) continue;
                 afterTurn = moved;
+                turnTarget = inline ? moved : primaryText;
               } else {
                 let movedAny = false;
                 for (const turn of group) {
@@ -4658,6 +4716,7 @@ ${transcriptText}` }]
                   movedAny = true;
                 }
                 if (!movedAny) continue;
+                if (count === 1) turnTarget = inline ? afterTurn : primaryText;
               }
             } else {
               const turn = await record.createLineItem(secNode, afterTurn, "text", [{ type: "text", text: formatEntryHeader(e, settings) }], null);
@@ -4673,7 +4732,9 @@ ${transcriptText}` }]
               newTracked.add(turn.guid);
               newTracked.add(textNode.guid);
               afterTurn = turn;
+              turnTarget = textNode;
             }
+            if (turnTarget && turnTarget.guid) turnAnchors.push({ entryIndex: index, guid: turnTarget.guid, title: formatTranscriptCitationLabel(e, settings) });
             written += 1;
           }
         }
@@ -4691,19 +4752,24 @@ ${transcriptText}` }]
         } catch {
         }
         try {
+          localStorage.setItem(turnAnchorsKey, JSON.stringify(turnAnchors));
+        } catch {
+        }
+        try {
           localStorage.setItem(sectionedKey, "done");
         } catch {
         }
-        this._log("transcript reorganized by sections", { sections: sections.length, turns: written, moved: canMoveExisting, anchors: anchors.length });
-        return { ok: written > 0, anchors };
+        this._log("transcript reorganized by sections", { sections: sections.length, turns: written, moved: canMoveExisting, anchors: anchors.length, turnAnchors: turnAnchors.length });
+        return { ok: written > 0, anchors, turnAnchors };
       } catch (err) {
         try {
           localStorage.removeItem(sectionedKey);
           localStorage.removeItem(anchorsKey);
+          localStorage.removeItem(turnAnchorsKey);
         } catch {
         }
         this._log("transcript reorganize failed", { error: this._errorMessage(err) });
-        return { ok: false, anchors: [] };
+        return { ok: false, anchors: [], turnAnchors: [] };
       }
     }
     /** Recover persisted section GUIDs after a summary retry, or derive them from the transcript tree. */
@@ -4753,6 +4819,45 @@ ${transcriptText}` }]
       }
       return [];
     }
+    /** Recover exact transcript-entry targets for a summary retry; unresolved entries use section refs. */
+    async _recoverTranscriptTurnAnchors(record, entries, sections, sectionAnchors, turnAnchorsKey) {
+      let items = [];
+      try {
+        items = await record.getLineItems(false);
+      } catch {
+        return [];
+      }
+      let stored = [];
+      try {
+        stored = JSON.parse(localStorage.getItem(turnAnchorsKey) || "[]") || [];
+      } catch {
+      }
+      if (Array.isArray(stored) && stored.length) {
+        const guids = new Set(items.map((item) => item.guid));
+        const valid = stored.filter((anchor) => anchor && Number.isFinite(Number(anchor.entryIndex)) && typeof anchor.guid === "string" && anchor.guid && typeof anchor.title === "string" && guids.has(anchor.guid));
+        if (valid.length) return valid.map((anchor) => ({ entryIndex: Number(anchor.entryIndex), guid: anchor.guid, title: anchor.title }));
+      }
+      let tracked = [];
+      try {
+        tracked = JSON.parse(localStorage.getItem(this._bodyKey(record, "tx-guids")) || "[]") || [];
+      } catch {
+      }
+      const turnAnchors = deriveTranscriptTurnAnchors(
+        items,
+        Array.isArray(tracked) ? tracked : [],
+        entries,
+        sections,
+        sectionAnchors,
+        (entry) => formatTranscriptCitationLabel(entry, this._settings)
+      );
+      if (turnAnchors.length) {
+        try {
+          localStorage.setItem(turnAnchorsKey, JSON.stringify(turnAnchors));
+        } catch {
+        }
+      }
+      return turnAnchors;
+    }
     /**
      * Delete the given tracked line-item guids, leaves first (delete() rejects an item with children).
      * Re-fetches each pass and stops the moment a pass makes NO progress — so a tracked turn that holds
@@ -4786,13 +4891,13 @@ ${transcriptText}` }]
       }
     }
     /**
-     * Append resolved transcript-section references to an already-parsed summary line. `setSegments`
+     * Append resolved transcript references to an already-parsed summary line. `setSegments`
      * changes only the line's inline content, so a Thymer task stays a task (and keeps its checkbox).
      * Citation failures are deliberately non-fatal: the summary line is still useful without its link.
      */
-    async _appendSummaryReferences(lineItem, citationIds, anchorById) {
-      if (!lineItem || typeof lineItem.setSegments !== "function" || !Array.isArray(citationIds) || !citationIds.length || !(anchorById instanceof Map)) return;
-      const segments = buildSummaryReferenceSegments(lineItem.segments, citationIds, anchorById);
+    async _appendSummaryReferences(lineItem, citations, sectionAnchorById, turnAnchorByIndex) {
+      if (!lineItem || typeof lineItem.setSegments !== "function" || !Array.isArray(citations) || !citations.length) return;
+      const segments = buildSummaryReferenceSegments(lineItem.segments, citations, sectionAnchorById, turnAnchorByIndex);
       if (!segments) return;
       try {
         const updated = await lineItem.setSegments(segments);
@@ -4807,7 +4912,7 @@ ${transcriptText}` }]
      * action-item checkboxes — because the body parses it, unlike the flat property. When transcript
      * section anchors exist, every cited content line receives a native Thymer reference chip.
      */
-    async _writeSummaryToBody(record, summary, citations = [], sectionAnchors = []) {
+    async _writeSummaryToBody(record, summary, citations = [], sectionAnchors = [], turnAnchors = []) {
       if (!record || typeof record.insertFromMarkdown !== "function" || !summary || !summary.trim()) return false;
       const flagKey = this._bodyKey(record, "summary-body");
       const botId = this._text(record, FIELDS.BOT_ID);
@@ -4847,7 +4952,8 @@ ${transcriptText}` }]
         const head = items.find((li) => !before.has(li.guid)) || null;
         if (!head) return fail();
         const { preamble, groups } = groupSummaryLines(summary, citations);
-        const anchorById = new Map((Array.isArray(sectionAnchors) ? sectionAnchors : []).filter((anchor) => anchor && Number.isFinite(Number(anchor.sectionId)) && anchor.guid).map((anchor) => [Number(anchor.sectionId), anchor]));
+        const sectionAnchorById = new Map((Array.isArray(sectionAnchors) ? sectionAnchors : []).filter((anchor) => anchor && Number.isFinite(Number(anchor.sectionId)) && anchor.guid).map((anchor) => [Number(anchor.sectionId), anchor]));
+        const turnAnchorByIndex = new Map((Array.isArray(turnAnchors) ? turnAnchors : []).filter((anchor) => anchor && Number.isFinite(Number(anchor.entryIndex)) && anchor.guid).map((anchor) => [Number(anchor.entryIndex), anchor]));
         const afterOf = /* @__PURE__ */ __name((parentGuid) => {
           const kids = items.filter((li) => li.parent_guid === parentGuid);
           return kids.length ? kids[kids.length - 1] : null;
@@ -4857,7 +4963,7 @@ ${transcriptText}` }]
           if (await record.insertFromMarkdown(this._escMd(entry.markdown), parent, after) === false) return after;
           items = await record.getLineItems(false);
           const created = items.find((item) => item.parent_guid === parent.guid && !lineBefore.has(item.guid)) || items.find((item) => !lineBefore.has(item.guid)) || null;
-          if (created) await this._appendSummaryReferences(created, entry.citations, anchorById);
+          if (created) await this._appendSummaryReferences(created, entry.citations, sectionAnchorById, turnAnchorByIndex);
           return created || after;
         }, "insertSummaryLine");
         let afterPreamble = null;
@@ -6192,6 +6298,12 @@ ${transcriptText}` }]
     return settings.transcriptTimestamps === "elapsed" ? elapsed || clock : clock || elapsed;
   }
   __name(entryStamp, "entryStamp");
+  function formatTranscriptCitationLabel(entry, settings) {
+    const speaker = String(entry && entry.speaker || "Speaker").trim() || "Speaker";
+    const stamp = entryStamp(entry, settings);
+    return stamp ? `${speaker} \xB7 ${stamp}` : speaker;
+  }
+  __name(formatTranscriptCitationLabel, "formatTranscriptCitationLabel");
   function formatEntryHeader(entry, settings) {
     const stamp = settings.utteranceTimestamps ? entryStamp(entry, settings) || "" : "";
     const template = settings.turnHeaderTemplate || "[{Time}] {Speaker}";
@@ -6294,10 +6406,10 @@ ${transcriptText}` }]
     return [
       "Additionally, divide the transcript into a handful of topic sections in time order.",
       `Each line below is numbered like [N], from 0 to ${count - 1}.`,
-      "At the end of every non-heading summary line, add one or two citations in the form {{cite:S}} or {{cite:S,T}}, where S and T are zero-based indexes into your sections array.",
-      "Choose only the section or two that most directly supports that summary line. Do not put citation markers on headings.",
+      "At the end of every non-heading summary line, add one or two citations. Use {{cite:S:E}} when transcript line E directly supports that wording, where S is the zero-based index into your sections array. Use the broader {{cite:S}} only when the line synthesizes several turns in that topic and no single transcript line is sufficient.",
+      "For multiple sources use one marker such as {{cite:1:8,2:14}}. Every E must fall inside section S. Choose only the most direct source or two, and do not put citation markers on headings.",
       "Respond with ONLY a JSON object \u2014 no code fence, no text before or after \u2014 of the form:",
-      '{"summary": "<the markdown summary with {{cite:0}} markers, as one JSON string>", "sections": [{"title": "<short topic label, no timestamps>", "start": <first transcript line number>, "end": <last transcript line number>}]}',
+      '{"summary": "<the markdown summary with {{cite:0:3}} or {{cite:0}} markers, as one JSON string>", "sections": [{"title": "<short topic label, no timestamps>", "start": <first transcript line number>, "end": <last transcript line number>}]}',
       "Sections must be in order, must not overlap, and together must cover every line from 0 to " + (count - 1) + ". Aim for 3\u20138 sections."
     ].join("\n");
   }
