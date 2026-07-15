@@ -1,6 +1,6 @@
 {
 	"ver": 1,
-	"name": "Recall.ai Meetings",
+	"name": "Meetings",
 	"icon": "microphone",
 	"description": "Send Recall.ai bots to meeting URLs and stream transcripts and summaries into Thymer.",
 	"instructions": "Open the Setup section below — it walks you through the three things Recall.ai needs (a Recall key, a Claude key, and a small free bridge) with links for each. After that, put a meeting link on a Meeting record and click Join Now.",
@@ -57,7 +57,7 @@
 		},
 		{
 			"id": "recall_bot_id",
-			"label": "Recall Bot ID",
+			"label": "Bot ID",
 			"type": "text",
 			"icon": "ti-robot",
 			"many": false,
@@ -66,7 +66,7 @@
 		},
 		{
 			"id": "recall_status",
-			"label": "Recall Status",
+			"label": "Bot Status",
 			"type": "text",
 			"icon": "ti-activity",
 			"many": false,
@@ -121,7 +121,7 @@
 		"views": false,
 		"sidebar": true
 	},
-	"version": "1.17.2",
+	"version": "1.18.0",
 	"__source_repo": "https://github.com/akaready/thymer-recall-ai",
 	"__source_files": {
 		"branch": "main",

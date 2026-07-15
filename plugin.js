@@ -3044,7 +3044,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.17.2";
+  var PLUGIN_VERSION = "1.18.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3060,8 +3060,8 @@ ${report}
     [FIELDS.JOIN_AT]: { id: FIELDS.JOIN_AT, label: "Join At", type: "datetime", icon: "ti-calendar", many: false, read_only: false, active: true },
     [FIELDS.TRANSCRIPT]: { id: FIELDS.TRANSCRIPT, label: "Transcript", type: "text", icon: "ti-file-text", many: false, read_only: false, active: true },
     [FIELDS.SUMMARY]: { id: FIELDS.SUMMARY, label: "Summary", type: "text", icon: "ti-sparkles", many: false, read_only: false, active: true },
-    [FIELDS.BOT_ID]: { id: FIELDS.BOT_ID, label: "Recall Bot ID", type: "text", icon: "ti-robot", many: false, read_only: false, active: true },
-    [FIELDS.STATUS]: { id: FIELDS.STATUS, label: "Recall Status", type: "text", icon: "ti-activity", many: false, read_only: false, active: true },
+    [FIELDS.BOT_ID]: { id: FIELDS.BOT_ID, label: "Bot ID", type: "text", icon: "ti-robot", many: false, read_only: false, active: true },
+    [FIELDS.STATUS]: { id: FIELDS.STATUS, label: "Bot Status", type: "text", icon: "ti-activity", many: false, read_only: false, active: true },
     [FIELDS.LAST_ERROR]: { id: FIELDS.LAST_ERROR, label: "Last Error", type: "text", icon: "ti-alert-triangle", many: false, read_only: false, active: true }
   });
   var CANONICAL_FIELD_FOR_SETTING = Object.freeze({
@@ -3410,7 +3410,7 @@ ${report}
           const kind = this._recordVisualState(record).kind;
           if (kind === "recording" || kind === "scheduled") return void this._stopBot(record);
           if (kind === "summarizing" || kind === "processing") {
-            return this._toast("Recall.ai is still working", "The meeting is over and the transcript is being processed. Nothing to do.");
+            return this._toast("Still working", "The meeting is over and the transcript is being processed. Nothing to do.");
           }
           if (kind === "done") return void this._syncRecord(record, { summarize: true });
           void this._startBot(record);
@@ -3559,13 +3559,13 @@ ${report}
     }
     _registerSettingsPanel() {
       this._commandItem = this.ui.addCommandPaletteCommand({
-        label: "Plugin: Recall.ai Meetings",
+        label: "Plugin: Meetings",
         icon: "microphone",
         onSelected: /* @__PURE__ */ __name(() => this._openPanel(), "onSelected")
       });
       this.ui.registerCustomPanelType(PANEL_TYPE, (pluginPanel) => {
         try {
-          pluginPanel.setTitle("Recall.ai Meetings Settings");
+          pluginPanel.setTitle("Meetings Settings");
         } catch {
         }
         const root = pluginPanel.getElement();
@@ -3943,7 +3943,7 @@ ${report}
               this._toast("Could not apply to all devices", "Thymer did not hand over a writable config handle for this collection.");
               return;
             }
-            this._toast("Recall.ai Meetings", "Settings applied to all devices");
+            this._toast("Meetings", "Settings applied to all devices");
             this._refreshScopePill();
           });
         }, "onPush"),
@@ -3952,7 +3952,7 @@ ${report}
           this._recomputeSettings();
           this._restartPollingIntervals();
           this._renderPanel();
-          this._toast("Recall.ai Meetings", "Reverted to synced settings");
+          this._toast("Meetings", "Reverted to synced settings");
         }, "onDiscard")
       };
     }
@@ -3967,8 +3967,8 @@ ${report}
      *   right now. Lets you override a scheduled meeting without clearing the field.
      */
     async _startBot(record, { immediate = false } = {}) {
-      if (!record) return this._toast("Open a Meeting record first", "The Recall.ai button needs an active record in this collection.");
-      if (!this._settings.recallApiKey) return this._toast("Recall API key required", "Open Plugin: Recall.ai Meetings and add a Recall API key.");
+      if (!record) return this._toast("Open a Meeting record first", "This button needs an active record in this collection.");
+      if (!this._settings.recallApiKey) return this._toast("Recall API key required", "Open Plugin: Meetings and add a Recall API key.");
       const activeBot = this._text(record, FIELDS.BOT_ID);
       const activeStatus = this._text(record, FIELDS.STATUS);
       if (activeBot && !isTerminalStatus(activeStatus) && activeStatus !== "error") {
@@ -3980,7 +3980,7 @@ ${report}
       const meetingUrl = this._meetingUrl(record);
       if (!meetingUrl) {
         this._setField(record, FIELDS.LAST_ERROR, "Missing meeting URL.");
-        return this._toast("Missing meeting URL", "Add a meeting link, or choose the correct URL field in Plugin: Recall.ai Meetings.");
+        return this._toast("Missing meeting URL", "Add a meeting link, or choose the correct URL field in Plugin: Meetings.");
       }
       try {
         this._activeRecordGuid = record.guid || this._activeRecordGuid;
@@ -3989,12 +3989,12 @@ ${report}
         this._setField(record, FIELDS.LAST_ERROR, "");
         const json = await this._createRecallBot(record, meetingUrl, { immediate });
         const botId = json.botId || json.id || json.bot_id;
-        if (!botId) throw new Error("Recall did not return a bot id.");
+        if (!botId) throw new Error("No bot id was returned.");
         this._setField(record, FIELDS.BOT_ID, botId);
         this._setField(record, FIELDS.STATUS, json.status || latestRecallStatus(json.recall || json) || "bot.created");
         this._log("bot created", { botId, status: json.status || latestRecallStatus(json.recall || json) || "bot.created" });
         this._updateNavButtonForRecord(record);
-        this._toast("Recall.ai bot created", botId);
+        this._toast("Bot created", botId);
         this._ensurePolling(record, botId);
       } catch (err) {
         this._setField(record, FIELDS.STATUS, "error");
@@ -4010,7 +4010,7 @@ ${report}
      */
     async _stopBot(record) {
       const botId = record ? this._text(record, FIELDS.BOT_ID) : "";
-      if (!botId) return this._toast("No notetaker to stop", "This meeting has no active Recall bot.");
+      if (!botId) return this._toast("No notetaker to stop", "This meeting has no active bot.");
       try {
         this._setField(record, FIELDS.STATUS, "leaving call");
         this._updateNavButtonForRecord(record);
@@ -4028,7 +4028,7 @@ ${report}
           });
           if (!response.ok) throw new Error(recallError(await response.json().catch(() => ({})), response.status));
         }
-        this._toast("Notetaker leaving", "Recall keeps what it already recorded \u2014 the transcript and summary will still arrive.");
+        this._toast("Notetaker leaving", "The notetaker keeps what it already recorded \u2014 the transcript and summary will still arrive.");
         void this._syncRecord(record, { summarize: true, quiet: true, botId });
       } catch (err) {
         this._setField(record, FIELDS.LAST_ERROR, this._errorMessage(err));
@@ -4108,17 +4108,17 @@ ${report}
     }
     async _syncRecord(record, { summarize = false, quiet = false, botId: knownBotId = "" } = {}) {
       if (!record) {
-        if (!quiet) this._toast("Open a Meeting record first", "Sync needs a meeting record with a Recall Bot ID.");
+        if (!quiet) this._toast("Open a Meeting record first", "Sync needs a meeting record with a Bot ID.");
         return false;
       }
       const botId = knownBotId || this._text(record, FIELDS.BOT_ID);
       if (!botId) {
         this._log("sync skipped: missing bot id", { recordGuid: record.guid || "" });
-        if (!quiet) this._toast("No Recall bot ID", "Send the transcriber first, or paste an existing Recall Bot ID.");
+        if (!quiet) this._toast("No bot ID", "Send the transcriber first, or paste an existing Bot ID.");
         return false;
       }
       if (!this._settings.recallApiKey) {
-        if (!quiet) this._toast("Recall API key required", "Open Plugin: Recall.ai Meetings and add a Recall API key.");
+        if (!quiet) this._toast("Recall API key required", "Open Plugin: Meetings and add a Recall API key.");
         return false;
       }
       try {
@@ -4507,7 +4507,7 @@ ${transcriptText}`
         kind: "processing",
         icon: "loader-2",
         label: "Processing",
-        tooltip: "Waiting for Recall.ai to finish the transcript"
+        tooltip: "Waiting for the transcript to finish"
       };
       if (botId && (isTerminalStatus(status) || COMPLETED_STATUSES.has(status))) return {
         kind: "done",
@@ -4525,7 +4525,7 @@ ${transcriptText}`
         kind: "recording",
         icon: "circle-dot",
         label: "Recording",
-        tooltip: "Recall.ai bot is in this meeting \u2014 click to stop it"
+        tooltip: "Bot is in this meeting \u2014 click to stop it"
       };
       if (this._isScheduledDispatch(record)) return {
         kind: "schedulable",
@@ -4827,8 +4827,8 @@ ${transcriptText}`
         btn.className = INLINE_BUTTON_CLASS;
         btn.contentEditable = "false";
         btn.setAttribute("data-guid", guid);
-        btn.title = `Send Recall.ai transcriber${record ? ` to ${this._recordTitle(record)}` : ""}`;
-        btn.setAttribute("aria-label", "Send Recall.ai transcriber");
+        btn.title = `Send transcriber${record ? ` to ${this._recordTitle(record)}` : ""}`;
+        btn.setAttribute("aria-label", "Send transcriber");
         btn.innerHTML = '<i class="ti ti-microphone" aria-hidden="true"></i>';
         btn.addEventListener("mousedown", (ev) => ev.preventDefault());
         btn.addEventListener("click", (ev) => {
@@ -5328,7 +5328,7 @@ ${transcriptText}`
     }
     _log(message, data = {}) {
       try {
-        console.info(`[Recall.ai Meetings] ${message}`, data);
+        console.info(`[Meetings] ${message}`, data);
       } catch {
       }
     }
@@ -5351,7 +5351,7 @@ ${transcriptText}`
     _errorMessage(err) {
       const message = err && err.message ? err.message : String(err);
       if (/failed to fetch/i.test(message) && !this._bridgeUrl()) {
-        return "Browser request was blocked before reaching Recall. Add the hosted Bridge URL in Plugin: Recall.ai Meetings.";
+        return "Browser request was blocked before reaching Recall. Add the hosted Bridge URL in Plugin: Meetings.";
       }
       return message;
     }
