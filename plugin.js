@@ -2527,6 +2527,32 @@ ${report}
     return h("label", { class: "tps-opt" }, input, labelEl, descEl);
   }
   __name(optionRow, "optionRow");
+  function tabs({ options, value, onChange, multiSelect = false }) {
+    const isActive = /* @__PURE__ */ __name((v) => multiSelect ? Array.isArray(value) && value.includes(v) : value === v, "isActive");
+    return h(
+      "div",
+      { class: "tps-tabs", role: "tablist" },
+      ...options.map((opt) => h("button", {
+        type: "button",
+        class: "tps-tab",
+        role: "tab",
+        "aria-pressed": String(isActive(opt.value)),
+        onClick: /* @__PURE__ */ __name(() => {
+          if (!onChange) return;
+          if (multiSelect) {
+            const cur = Array.isArray(value) ? value.slice() : [];
+            const i = cur.indexOf(opt.value);
+            if (i >= 0) cur.splice(i, 1);
+            else cur.push(opt.value);
+            onChange(cur);
+          } else {
+            onChange(opt.value);
+          }
+        }, "onClick")
+      }, opt.label))
+    );
+  }
+  __name(tabs, "tabs");
 
   // ../../shared/plugin-version.js
   function readPluginVersion(conf, fallback = "0.0.1") {
@@ -3018,7 +3044,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.16.1";
+  var PLUGIN_VERSION = "1.17.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3099,8 +3125,18 @@ ${report}
       '- Overview: one short paragraph. Decisions: one "- " bullet each. Action Items: one "- [ ] " checkbox each, written "<action> \u2014 <owner>" (drop the "\u2014 <owner>" when no owner is named). Open Questions: one "- " bullet each.',
       "- Never use horizontal rules (--- or ***), never use Markdown tables, and do not leave blank lines inside a section.",
       "Be concise and factual."
-    ].join("\n")
+    ].join("\n"),
+    transcriptHeadingText: "\u{1F399}\uFE0F Transcript",
+    transcriptHeadingLevel: "h3",
+    summaryHeadingText: "\u{1F4DD} Summary",
+    summaryHeadingLevel: "h3"
   });
+  var HEADING_LEVEL_OPTIONS = [
+    ["h1", "Heading 1 (largest)"],
+    ["h2", "Heading 2"],
+    ["h3", "Heading 3"],
+    ["none", "No heading (plain line)"]
+  ];
   var API_KEY_FIELDS = Object.freeze(["recallApiKey", "anthropicApiKey"]);
   var BOT_IMAGE_FIELDS = Object.freeze(["botImageData", "botImageName"]);
   var SECRET_KEYS = Object.freeze([...API_KEY_FIELDS]);
@@ -3132,7 +3168,11 @@ ${report}
       transcriptLayout: src.transcriptLayout === "inline" ? "inline" : "blocks",
       utteranceTimestamps: bool("utteranceTimestamps"),
       timestampPosition: src.timestampPosition === "back" ? "back" : "front",
-      summaryPrompt: str("summaryPrompt")
+      summaryPrompt: str("summaryPrompt"),
+      transcriptHeadingText: str("transcriptHeadingText"),
+      transcriptHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.transcriptHeadingLevel) ? src.transcriptHeadingLevel : "h3",
+      summaryHeadingText: str("summaryHeadingText"),
+      summaryHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.summaryHeadingLevel) ? src.summaryHeadingLevel : "h3"
     };
   }
   __name(normalizePrefs, "normalizePrefs");
@@ -4197,6 +4237,16 @@ ${transcriptText}`
       return String(text || "").replace(/#(?=\d)/g, "\\#");
     }
     /**
+     * The body-anchor markdown for a heading setting: an h1/h2/h3 markdown heading, or — for level
+     * 'none' — a plain text line (content just nests beneath it, no heading chrome). The `#` prefix is
+     * NOT escaped (it must stay a heading marker); only the user's text runs through `_escMd`.
+     */
+    _headingAnchorMd(text, level) {
+      const t = this._escMd(String(text || "").trim());
+      const n = level === "h1" ? 1 : level === "h2" ? 2 : level === "h3" ? 3 : 0;
+      return n ? `${"#".repeat(n)} ${t}` : t;
+    }
+    /**
      * Stream the transcript into the record body LIVE, under a collapsible "🎙️ Transcript" heading —
      * append-only, one utterance at a time, so it grows as the meeting runs. Takes STRUCTURED entries
      * so it can honor the layout setting:
@@ -4230,9 +4280,11 @@ ${transcriptText}`
         if (headGuid) heading = items.find((li) => li.guid === headGuid) || null;
         if (!heading) {
           const before = new Set(items.map((li) => li.guid));
-          if (await record.insertFromMarkdown("### \u{1F399}\uFE0F Transcript", null, null) === false) return;
+          const anchorMd = this._headingAnchorMd(this._settings.transcriptHeadingText, this._settings.transcriptHeadingLevel);
+          if (!anchorMd) return;
+          if (await record.insertFromMarkdown(anchorMd, null, null) === false) return;
           items = await record.getLineItems(false);
-          heading = items.find((li) => li.type === "heading" && !before.has(li.guid)) || null;
+          heading = items.find((li) => !before.has(li.guid)) || null;
           if (!heading) return;
           try {
             localStorage.setItem(headKey, heading.guid);
@@ -4291,9 +4343,11 @@ ${transcriptText}`
         const txIdx = topLevel.findIndex((li) => li.guid === txHeadGuid);
         const afterItem = txIdx > 0 ? topLevel[txIdx - 1] : null;
         const before = new Set(items.map((li) => li.guid));
-        if (await record.insertFromMarkdown("### \u{1F4DD} Summary", null, afterItem) === false) return;
+        const anchorMd = this._headingAnchorMd(this._settings.summaryHeadingText, this._settings.summaryHeadingLevel);
+        if (!anchorMd) return;
+        if (await record.insertFromMarkdown(anchorMd, null, afterItem) === false) return;
         items = await record.getLineItems(false);
-        const head = items.find((li) => li.type === "heading" && !before.has(li.guid)) || null;
+        const head = items.find((li) => !before.has(li.guid)) || null;
         if (!head) return;
         await record.insertFromMarkdown(this._escMd(summary.trim()), head, null);
         try {
@@ -4741,6 +4795,7 @@ ${transcriptText}`
     }
     _renderPanel() {
       if (!this._panelEl) return;
+      if (!this._activeTab) this._activeTab = "setup";
       const draft = this._draft;
       this._panelEl.replaceChildren(panel({ pluginClass: `${ROOT_CLASS}-panel` }, [
         pluginHeaderFromConfig(this.getConfiguration(), {
@@ -4754,14 +4809,43 @@ ${transcriptText}`
           },
           feedback: { data: this.data }
         }),
-        // Setup owns the collection note. It is an ANNOUNCEMENT, not a control: a plugin is bound
-        // to its collection for life. (It used to be a dropdown that "chose" the collection, which
-        // was a lie — it wrote a SECOND copy of the plugin elsewhere and left this one running.)
-        // It does not deserve a section of its own, so it lives here, under the toggle.
+        tabs({
+          options: [
+            { value: "setup", label: "Setup" },
+            { value: "connection", label: "Connection" },
+            { value: "fields", label: "Field Mapping" },
+            { value: "transcripts", label: "Transcripts" },
+            { value: "summary", label: "Summary" }
+          ],
+          value: this._activeTab,
+          onChange: /* @__PURE__ */ __name((value) => {
+            this._activeTab = value;
+            this._renderPanel();
+          }, "onChange")
+        }),
+        ...this._renderActiveTab(draft)
+      ]));
+    }
+    /** The section(s) for the active tab. Sections are non-collapsible — the TAB is the collapse now. */
+    _renderActiveTab(draft) {
+      switch (this._activeTab) {
+        case "connection":
+          return this._tabConnection(draft);
+        case "fields":
+          return this._tabFieldMapping(draft);
+        case "transcripts":
+          return this._tabTranscripts(draft);
+        case "summary":
+          return this._tabSummary(draft);
+        case "setup":
+        default:
+          return this._tabSetup(draft);
+      }
+    }
+    _tabSetup() {
+      return [
         section({
           label: "Setup",
-          collapsible: true,
-          defaultOpen: !this._isConfigured(),
           body: [
             h(
               "p",
@@ -4770,29 +4854,24 @@ ${transcriptText}`
             ),
             this._setupSteps()
           ]
-        }),
+        })
+      ];
+    }
+    _tabConnection(draft) {
+      return [
         section({
-          label: "Connection",
-          hint: "Your two keys and your bridge address. New here? Do Setup above first.",
+          label: "Keys & bridge",
+          hint: "Your two keys and your bridge address. New here? Do the Setup tab first.",
           body: [
-            this._textInput("Bridge URL", "bridgeUrl", "https://your-bridge.example.com", false, "The web address of your bridge, from step 3 above."),
+            this._textInput("Bridge URL", "bridgeUrl", "https://your-bridge.example.com", false, "The web address of your bridge, from step 3 of Setup."),
             this._bridgeLink(),
             this._textInput("Recall API key", "recallApiKey", "Token from Recall", true),
             this._textInput("Anthropic API key", "anthropicApiKey", "Claude API key for summaries", true)
           ]
         }),
         section({
-          label: "Field Mapping",
-          hint: "Which of this collection's properties Recall.ai should read and write. Moving to another collection (top) changes what can be listed here, so do that first.",
-          body: [
-            this._fieldSelectInput("Meeting URL field", "meetingUrlFieldId", ["url", "text"]),
-            this._fieldSelectInput("Join At field", "joinAtFieldId", ["datetime", "date"]),
-            this._fieldSelectInput("Transcript field", "transcriptFieldId", ["text"]),
-            this._fieldSelectInput("Summary field", "summaryFieldId", ["text"])
-          ]
-        }),
-        section({
           label: "Recall",
+          hint: "The notetaker itself \u2014 where it runs, how it looks, and how often the plugin checks in.",
           body: [
             this._selectInput("Region", "recallRegion", [
               ["us-west-2", "US West 2"],
@@ -4823,12 +4902,36 @@ ${transcriptText}`
             }),
             this._textareaInput("Join chat message", "joinChatMessage", 3)
           ]
+        })
+      ];
+    }
+    _tabFieldMapping() {
+      return [
+        section({
+          label: "Field Mapping",
+          hint: "Which of this collection's properties Recall.ai should read and write. Leave on auto-detect if unsure.",
+          body: [
+            this._fieldSelectInput("Meeting URL field", "meetingUrlFieldId", ["url", "text"]),
+            this._fieldSelectInput("Join At field", "joinAtFieldId", ["datetime", "date"]),
+            this._fieldSelectInput("Transcript field", "transcriptFieldId", ["text"]),
+            this._fieldSelectInput("Summary field", "summaryFieldId", ["text"])
+          ]
+        })
+      ];
+    }
+    _tabTranscripts(draft) {
+      return [
+        section({
+          label: "Heading",
+          hint: 'The title line the transcript is written under, in the record body. Pick "No heading" to drop the title (and its emoji) and just indent the transcript.',
+          body: [
+            this._textInput("Heading text", "transcriptHeadingText", "\u{1F399}\uFE0F Transcript"),
+            this._selectInput("Heading level", "transcriptHeadingLevel", HEADING_LEVEL_OPTIONS)
+          ]
         }),
         section({
-          label: "Transcript formatting",
+          label: "Formatting",
           hint: "How the transcript is captured and laid out.",
-          collapsible: true,
-          defaultOpen: false,
           body: [
             optionRow({
               type: "checkbox",
@@ -4864,9 +4967,21 @@ ${transcriptText}`
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("utteranceTimestamps", !!event.target.checked, { rerender: true }), "onChange")
             })
           ]
+        })
+      ];
+    }
+    _tabSummary(draft) {
+      return [
+        section({
+          label: "Heading",
+          hint: 'The title line the summary is written under, in the record body. Pick "No heading" to drop the title (and its emoji) and just indent the summary.',
+          body: [
+            this._textInput("Heading text", "summaryHeadingText", "\u{1F4DD} Summary"),
+            this._selectInput("Heading level", "summaryHeadingLevel", HEADING_LEVEL_OPTIONS)
+          ]
         }),
         section({
-          label: "Summary",
+          label: "Generation",
           body: [
             this._modelSelectInput("Claude model", "anthropicModel"),
             optionRow({
@@ -4880,7 +4995,7 @@ ${transcriptText}`
             this._textareaInput("Summary prompt", "summaryPrompt", 8)
           ]
         })
-      ]));
+      ];
     }
     _bridgeWorkerUrl() {
       const conf = this.getConfiguration ? this.getConfiguration() : {};
@@ -5188,6 +5303,19 @@ ${transcriptText}`
     }
     _css() {
       return `
+			/* Tab bar as top-level panel nav: a filled track (segmented-control look) that wraps rather
+			   than overflowing a narrow panel. Full-perimeter border \u2014 never a single-edge accent. */
+			.${ROOT_CLASS}-panel .tps-tabs {
+				display: flex;
+				flex-wrap: wrap;
+				width: 100%;
+				gap: 4px;
+				margin: 2px 0 14px;
+				padding: 4px;
+				background: var(--tps-bg-hover, var(--hover-subtle, rgba(127, 127, 127, 0.06)));
+				border: 1px solid var(--tps-divider, var(--divider-color, rgba(127, 127, 127, 0.12)));
+				border-radius: var(--tps-radius-md, 6px);
+			}
 			.${ROOT_CLASS}__inline-button {
 				display: inline-flex;
 				align-items: center;
