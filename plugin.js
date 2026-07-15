@@ -3044,7 +3044,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.17.0";
+  var PLUGIN_VERSION = "1.17.2";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3457,26 +3457,75 @@ ${report}
         chip.textContent = statusLabel(statusText);
         wrap.appendChild(chip);
       }
-      const state = this._recordVisualState(record);
-      const sendable = (state.kind === "idle" || state.kind === "schedulable") && !!this._meetingUrl(record);
-      if (sendable) {
-        const cellButton = /* @__PURE__ */ __name((icon, label, opts) => {
-          const btn = this.ui.createButton({
-            icon,
-            label,
-            onClick: /* @__PURE__ */ __name(() => void this._startBot(record, opts), "onClick")
-          });
-          btn.classList.add(`${ROOT_CLASS}__cell-button`);
-          btn.addEventListener("mousedown", (ev) => ev.stopPropagation());
-          btn.addEventListener("click", (ev) => ev.stopPropagation());
-          return btn;
-        }, "cellButton");
-        wrap.appendChild(cellButton(state.icon, state.label, {}));
-        if (state.kind === "schedulable") {
-          wrap.appendChild(cellButton("microphone", "Join now", { immediate: true }));
-        }
-      }
+      this._appendSendButtons(wrap, record);
       return wrap;
+    }
+    /**
+     * One send button wired to _startBot. Shared by the table cell and the record-page property-row
+     * injection so both affordances behave identically. mousedown/click are stopped so a click sends
+     * the bot instead of opening the row / entering the field.
+     */
+    _sendButton(record, icon, label, opts) {
+      const btn = this.ui.createButton({ icon, label, onClick: /* @__PURE__ */ __name(() => void this._startBot(record, opts), "onClick") });
+      btn.classList.add(`${ROOT_CLASS}__cell-button`);
+      btn.addEventListener("mousedown", (ev) => ev.stopPropagation());
+      btn.addEventListener("click", (ev) => ev.stopPropagation());
+      return btn;
+    }
+    /**
+     * Append the send button(s) to `container` when this record can take a bot — no bot in flight (so a
+     * click can't double-book) AND it is actually a meeting (has a URL, so a mixed collection grows no
+     * dead buttons). A schedulable meeting also gets an immediate "Join now" so a future Join At never
+     * traps you. Returns true if anything was appended.
+     */
+    _appendSendButtons(container, record, state = this._recordVisualState(record)) {
+      const sendable = (state.kind === "idle" || state.kind === "schedulable") && !!this._meetingUrl(record);
+      if (!sendable) return false;
+      container.appendChild(this._sendButton(record, state.icon, state.label, {}));
+      if (state.kind === "schedulable") container.appendChild(this._sendButton(record, "microphone", "Join now", { immediate: true }));
+      return true;
+    }
+    /**
+     * Inject the send button into the Recall Status property row ON THE RECORD PAGE — the one place
+     * properties.render can't reach (it is a view-cell hook). Thymer renders each property as
+     * `.page-props-row[data-field-id=<id>]` with a `.page-prop-val` value cell inside `.page-props-editor`
+     * (confirmed via DOM probe). We target the recall_status row's value cell for the panel's active
+     * record. Runs synchronously inside the panel MutationObserver; a state signature stops it churning
+     * the DOM on every unrelated keystroke, and it self-removes once a bot is in flight (not sendable).
+     * Note: an empty status row is hidden in the properties panel's "Filled in" mode, so the button
+     * shows for a fresh meeting only in "All" mode — acceptable, and it always shows once it has a value.
+     *
+     * @param {HTMLElement} [root] the active panel's element (passed by _attachEditorObserver)
+     */
+    _decorateStatusField(root) {
+      if (this._disabled) return;
+      try {
+        const panel2 = this.ui.getActivePanel && this.ui.getActivePanel();
+        const scope = root || (panel2 && panel2.getElement ? panel2.getElement() : null);
+        if (!scope || typeof scope.querySelector !== "function") return;
+        const valCell = scope.querySelector(`.page-props-editor .page-props-row[data-field-id="${FIELDS.STATUS}"] .page-prop-val`);
+        if (!valCell) return;
+        const record = panel2 && panel2.getActiveRecord ? panel2.getActiveRecord() : null;
+        if (!record) return;
+        const MARK = `${ROOT_CLASS}__pagebtns`;
+        let holder = valCell.querySelector(`.${MARK}`);
+        const state = this._recordVisualState(record);
+        const sendable = (state.kind === "idle" || state.kind === "schedulable") && !!this._meetingUrl(record);
+        if (!sendable) {
+          if (holder) holder.remove();
+          return;
+        }
+        const sig = `${state.kind}|${state.label}|${record.guid}`;
+        if (holder && holder.getAttribute("data-sig") === sig) return;
+        if (holder) holder.remove();
+        holder = document.createElement("span");
+        holder.className = MARK;
+        holder.setAttribute("data-sig", sig);
+        this._appendSendButtons(holder, record, state);
+        valCell.appendChild(holder);
+      } catch (err) {
+        this._log("status field decorate failed", { error: this._errorMessage(err) });
+      }
     }
     /**
      * @returns {{kind: 'ours'|'blank'|'conflict', occupant: string}}
@@ -4722,14 +4771,14 @@ ${transcriptText}`
         return;
       }
       if (this._observedRoot === root && this._editorObserver) {
-        this._decorateInlineRefs(root);
+        this._decorateRecordPage(root);
         return;
       }
       if (this._editorObserver) this._editorObserver.disconnect();
       this._observedRoot = root;
       this._editorObserver = new MutationObserver((mutations) => {
         if (mutations.some((m) => m.type === "childList" || m.attributeName === "data-guid" || m.attributeName === "class")) {
-          this._decorateInlineRefs(root);
+          this._decorateRecordPage(root);
         }
       });
       this._editorObserver.observe(root, {
@@ -4738,7 +4787,12 @@ ${transcriptText}`
         attributes: true,
         attributeFilter: ["data-guid", "class"]
       });
+      this._decorateRecordPage(root);
+    }
+    /** Both record-page decorations that ride the panel MutationObserver: inline refs + the status-field send button. */
+    _decorateRecordPage(root) {
       this._decorateInlineRefs(root);
+      this._decorateStatusField(root);
     }
     /**
      * Structural guids are not real inline references: journal date-group headers
@@ -5316,6 +5370,12 @@ ${transcriptText}`
 				border: 1px solid var(--tps-divider, var(--divider-color, rgba(127, 127, 127, 0.12)));
 				border-radius: var(--tps-radius-md, 6px);
 			}
+			/* Send button(s) injected into the Recall Status property row on the record page. */
+			.${ROOT_CLASS}__pagebtns {
+				display: inline-flex;
+				gap: 6px;
+				align-items: center;
+			}
 			.${ROOT_CLASS}__inline-button {
 				display: inline-flex;
 				align-items: center;
@@ -5355,14 +5415,13 @@ ${transcriptText}`
 			.${ROOT_CLASS}__cell-button {
 				flex: none;
 			}
-			.${ROOT_CLASS}__nav-label {
-				display: inline-flex;
-				align-items: center;
-				gap: 6px;
-			}
+			/* Icon is a direct child of the nav button now (no wrapper) \u2014 space it from the text the way
+			   Thymer's own view buttons do, with an inline margin rather than a flex gap. */
 			.${ROOT_CLASS}__nav-ico {
 				font-size: 13px;
 				line-height: 1;
+				margin-right: 5px;
+				vertical-align: middle;
 			}
 			/* Recording: the mic blinks red, on and off, like a record light. */
 			.${ROOT_CLASS}__nav-mic {
@@ -5799,16 +5858,16 @@ ${transcriptText}`
   }
   __name(propertyValueToText, "propertyValueToText");
   function navButtonLabel(kind) {
-    const wrap = /* @__PURE__ */ __name((iconHtml, text) => `<span class="${ROOT_CLASS}__nav-label">${iconHtml}<span>${text}</span></span>`, "wrap");
+    const label = /* @__PURE__ */ __name((iconHtml, text) => `${iconHtml}<span class="${ROOT_CLASS}__nav-text">${text}</span>`, "label");
     const icon = /* @__PURE__ */ __name((cls) => `<i class="ti ti-${cls} ${ROOT_CLASS}__nav-ico" aria-hidden="true"></i>`, "icon");
-    const spinner = `<span class="${ROOT_CLASS}__nav-spinner" aria-hidden="true"></span>`;
-    if (kind === "recording") return wrap(`<i class="ti ti-microphone ${ROOT_CLASS}__nav-ico ${ROOT_CLASS}__nav-mic" aria-hidden="true"></i>`, "Recording");
-    if (kind === "summarizing") return wrap(spinner, "Summarizing");
-    if (kind === "processing") return wrap(spinner, "Processing");
-    if (kind === "done") return wrap(icon("circle-check"), "Done");
-    if (kind === "scheduled") return wrap(icon("clock"), "Scheduled");
-    if (kind === "schedulable") return wrap(icon("calendar"), "Schedule Bot");
-    return wrap(icon("microphone"), "Join Now");
+    const spinner = `<span class="ti ${ROOT_CLASS}__nav-ico ${ROOT_CLASS}__nav-spinner" aria-hidden="true"></span>`;
+    if (kind === "recording") return label(`<i class="ti ti-microphone ${ROOT_CLASS}__nav-ico ${ROOT_CLASS}__nav-mic" aria-hidden="true"></i>`, "Recording");
+    if (kind === "summarizing") return label(spinner, "Summarizing");
+    if (kind === "processing") return label(spinner, "Processing");
+    if (kind === "done") return label(icon("circle-check"), "Done");
+    if (kind === "scheduled") return label(icon("clock"), "Scheduled");
+    if (kind === "schedulable") return label(icon("calendar"), "Schedule Bot");
+    return label(icon("microphone"), "Join Now");
   }
   __name(navButtonLabel, "navButtonLabel");
   return __toCommonJS(plugin_exports);
