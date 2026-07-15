@@ -218,6 +218,10 @@ async function receiveRealtimeTranscript(request, env) {
 		});
 		return json({ ok: true, ignored: 'empty transcript' }, 202);
 	}
+	// Stamp the wall-clock time we RECEIVED this finalized utterance — the realtime webhook carries
+	// no absolute time, and receipt is within a second or two of when it was spoken. The plugin
+	// renders this in the reader's local timezone as "[2:47 PM]".
+	if (!row.absoluteTime) row.absoluteTime = new Date().toISOString();
 	const session = await getLiveSession(botId, env);
 	const key = `${row.relativeTime || ''}:${row.speaker}:${row.text}`;
 	if (!session.keys.has(key)) {
@@ -579,6 +583,12 @@ function normalizeRealtimeTranscript(payload) {
 			firstWord.start_timestamp,
 			firstWord.start_timestamp && firstWord.start_timestamp.relative,
 		),
+		// The realtime webhook has no absolute time (only relative); it is stamped at receipt in
+		// receiveRealtimeTranscript. Capture the word's absolute here for the rare case it IS present.
+		absoluteTime: firstString(
+			firstWord.start_timestamp && firstWord.start_timestamp.absolute,
+			data && data.start_timestamp && data.start_timestamp.absolute,
+		) || null,
 	};
 }
 

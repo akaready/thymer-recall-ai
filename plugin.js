@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.14.0";
+  var PLUGIN_VERSION = "1.15.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3086,6 +3086,7 @@ ${report}
     pollSeconds: 30,
     autoSchedule: false,
     autoSummarize: true,
+    transcriptTimestamps: "clock",
     summaryPrompt: "Summarize this meeting transcript for a Thymer note. Include: 1) a concise overview, 2) decisions made, 3) action items with owners when mentioned, and 4) open questions. Keep the output skimmable and factual."
   });
   var API_KEY_FIELDS = Object.freeze(["recallApiKey", "anthropicApiKey"]);
@@ -3113,6 +3114,7 @@ ${report}
       pollSeconds: clampNumber(src.pollSeconds, 10, 300, DEFAULT_SETTINGS.pollSeconds),
       autoSchedule: bool("autoSchedule"),
       autoSummarize: bool("autoSummarize"),
+      transcriptTimestamps: src.transcriptTimestamps === "elapsed" ? "elapsed" : "clock",
       summaryPrompt: str("summaryPrompt")
     };
   }
@@ -4021,7 +4023,7 @@ ${report}
         const status = latestRecallStatus(bot) || this._text(record, FIELDS.STATUS) || "syncing";
         this._setField(record, FIELDS.STATUS, status);
         this._updateNavButtonForRecord(record);
-        const transcriptText = formatRecallTranscript(transcript);
+        const transcriptText = formatRecallTranscript(transcript, this._settings.transcriptTimestamps);
         this._log("sync poll", {
           botId,
           status,
@@ -4036,6 +4038,7 @@ ${report}
           this._setMappedField(record, FIELDS.TRANSCRIPT, transcriptText);
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._log("transcript written", { botId, characters: transcriptText.length });
+          await this._streamTranscriptToBody(record, transcriptText);
         } else if (terminal || transcript && transcript.debug && transcript.debug.kv === "MISSING") {
           this._setField(record, FIELDS.LAST_ERROR, describeTranscriptState(transcript, bot));
         } else {
@@ -4108,7 +4111,7 @@ ${report}
         this._setField(record, FIELDS.STATUS, "summarized");
         this._updateNavButtonForRecord(record);
         this._log("summary written", { characters: summary.length });
-        await this._writeNotesToBody(record, { summary, transcriptText });
+        await this._writeSummaryToBody(record, summary);
       } catch (err) {
         this._setField(record, FIELDS.LAST_ERROR, `Summary failed: ${this._errorMessage(err)}`);
         this._setField(record, FIELDS.STATUS, "summary_failed");
@@ -4161,46 +4164,105 @@ ${transcriptText}`
      * repeated calls a no-op after the first. A genuinely new recording (new bot id) writes a new
      * section, which is what you want.
      */
-    async _writeNotesToBody(record, { summary, transcriptText }) {
-      if (!record || typeof record.insertFromMarkdown !== "function") return;
-      const botId = this._text(record, FIELDS.BOT_ID);
-      const guardKey = `recall-ai/${this._selfGuid() || "collection"}/${record.guid || ""}/notes-body`;
+    _bodyKey(record, suffix) {
+      return `recall-ai/${this._selfGuid() || "collection"}/${record && record.guid || ""}/${suffix}`;
+    }
+    /** insertFromMarkdown treats `#` before a digit as a hashtag — escape so "#5" stays literal. */
+    _escMd(text) {
+      return String(text || "").replace(/#(?=\d)/g, "\\#");
+    }
+    /**
+     * Stream the transcript into the record body LIVE, under a collapsible "🎙️ Transcript" heading —
+     * append-only, so each poll adds just the rows that are new since last time. Proven against the
+     * live document tree: content nested under a heading (heading as PARENT) folds, and appending
+     * after the heading's last child keeps order. The row count and heading guid are remembered per
+     * record in localStorage so a poll never re-adds what is already there.
+     *
+     * NEVER navigates or repaints — appending nodes elsewhere in the doc leaves your cursor alone.
+     * The new lines appear on the next natural render, or immediately in a panel opened on the heading.
+     */
+    async _streamTranscriptToBody(record, transcriptText) {
+      if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.getLineItems !== "function") return;
+      const rows = String(transcriptText || "").split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim());
+      if (!rows.length) return;
+      const headKey = this._bodyKey(record, "tx-head");
+      const countKey = this._bodyKey(record, "tx-count");
+      let written = 0;
       try {
-        if (botId && localStorage.getItem(guardKey) === botId) return;
+        written = parseInt(localStorage.getItem(countKey) || "0", 10) || 0;
       } catch {
       }
-      const esc = /* @__PURE__ */ __name((md) => String(md || "").replace(/#(?=\d)/g, "\\#"), "esc");
-      const hasSummary = !!(summary && summary.trim());
-      const hasTranscript = !!(transcriptText && transcriptText.trim());
-      if (!hasSummary && !hasTranscript) return;
+      if (rows.length <= written) return;
       try {
-        const newHeading = /* @__PURE__ */ __name(async (title, afterItem) => {
-          if (typeof record.getLineItems !== "function") return null;
-          const before = new Set((await record.getLineItems(false)).map((li) => li.guid));
-          const ok = await record.insertFromMarkdown(`### ${title}`, null, afterItem || null);
-          if (ok === false) return null;
-          const after = await record.getLineItems(false);
-          return after.find((li) => li.type === "heading" && !before.has(li.guid)) || null;
-        }, "newHeading");
-        const summaryHead = hasSummary ? await newHeading("\u{1F4DD} Summary", null) : null;
-        const transcriptHead = hasTranscript ? await newHeading("\u{1F399}\uFE0F Transcript", summaryHead) : null;
-        if (hasSummary && !summaryHead) await record.insertFromMarkdown(`### \u{1F4DD} Summary
-
-${esc(summary.trim())}`, null, null);
-        else if (summaryHead) await record.insertFromMarkdown(esc(summary.trim()), summaryHead, null);
-        if (hasTranscript && !transcriptHead) await record.insertFromMarkdown(`### \u{1F399}\uFE0F Transcript
-
-${esc(transcriptText.trim())}`, null, null);
-        else if (transcriptHead) await record.insertFromMarkdown(esc(transcriptText.trim()), transcriptHead, null);
+        let items = await record.getLineItems(false);
+        let heading = null;
+        let headGuid = "";
         try {
-          if (botId) localStorage.setItem(guardKey, botId);
+          headGuid = localStorage.getItem(headKey) || "";
         } catch {
         }
-        this._log("notes written to body", { botId, collapsible: !!(summaryHead || transcriptHead) });
-        this._toast("Meeting notes added", "Summary and transcript are on this page \u2014 collapse either heading to tuck it away.");
+        if (headGuid) heading = items.find((li) => li.guid === headGuid) || null;
+        if (!heading) {
+          const before = new Set(items.map((li) => li.guid));
+          if (await record.insertFromMarkdown("### \u{1F399}\uFE0F Transcript", null, null) === false) return;
+          items = await record.getLineItems(false);
+          heading = items.find((li) => li.type === "heading" && !before.has(li.guid)) || null;
+          if (!heading) return;
+          try {
+            localStorage.setItem(headKey, heading.guid);
+          } catch {
+          }
+          written = 0;
+        }
+        const kids = items.filter((li) => li.parent_guid === heading.guid);
+        const lastChild = kids.length ? kids[kids.length - 1] : null;
+        const md = rows.slice(written).map((r) => this._escMd(r)).join("\n");
+        if (await record.insertFromMarkdown(md, heading, lastChild) === false) return;
+        try {
+          localStorage.setItem(countKey, String(rows.length));
+        } catch {
+        }
+        this._log("transcript streamed to body", { newRows: rows.length - written, total: rows.length });
       } catch (err) {
-        this._log("notes body write failed", { error: this._errorMessage(err) });
-        this._toast("Notes saved to properties", "Could not render them into the page body: " + this._errorMessage(err));
+        this._log("transcript stream failed", { error: this._errorMessage(err) });
+      }
+    }
+    /**
+     * The summary as a collapsible "📝 Summary" heading in the body, once per bot, placed just BEFORE
+     * the transcript heading (summary on top, transcript below). Rich markdown — headings, bold,
+     * action-item checkboxes — because the body parses it, unlike the flat property.
+     */
+    async _writeSummaryToBody(record, summary) {
+      if (!record || typeof record.insertFromMarkdown !== "function" || !summary || !summary.trim()) return;
+      const flagKey = this._bodyKey(record, "summary-body");
+      const botId = this._text(record, FIELDS.BOT_ID);
+      try {
+        if (botId && localStorage.getItem(flagKey) === botId) return;
+      } catch {
+      }
+      try {
+        let items = typeof record.getLineItems === "function" ? await record.getLineItems(false) : [];
+        let txHeadGuid = "";
+        try {
+          txHeadGuid = localStorage.getItem(this._bodyKey(record, "tx-head")) || "";
+        } catch {
+        }
+        const topLevel = items.filter((li) => li.parent_guid === record.guid);
+        const txIdx = topLevel.findIndex((li) => li.guid === txHeadGuid);
+        const afterItem = txIdx > 0 ? topLevel[txIdx - 1] : null;
+        const before = new Set(items.map((li) => li.guid));
+        if (await record.insertFromMarkdown("### \u{1F4DD} Summary", null, afterItem) === false) return;
+        items = await record.getLineItems(false);
+        const head = items.find((li) => li.type === "heading" && !before.has(li.guid)) || null;
+        if (!head) return;
+        await record.insertFromMarkdown(this._escMd(summary.trim()), head, null);
+        try {
+          if (botId) localStorage.setItem(flagKey, botId);
+        } catch {
+        }
+        this._log("summary written to body", { botId });
+      } catch (err) {
+        this._log("summary body write failed", { error: this._errorMessage(err) });
       }
     }
     /**
@@ -4703,6 +4765,10 @@ ${esc(transcriptText.trim())}`, null, null);
             this._fileInput("Bot image JPEG upload", "botImageData", "botImageName"),
             this._textInput("Bot image JPEG URL", "botImageUrl", "https://example.com/notetaker.jpg"),
             this._numberInput("Poll every seconds", "pollSeconds", 10, 300),
+            this._selectInput("Transcript timestamps", "transcriptTimestamps", [
+              ["clock", "Clock time (2:47 PM)"],
+              ["elapsed", "Elapsed time (0:37)"]
+            ]),
             optionRow({
               type: "checkbox",
               name: "autoSchedule",
@@ -5287,7 +5353,7 @@ ${esc(transcriptText.trim())}`, null, null);
     return lastResponse;
   }
   __name(fetchWithBackoff, "fetchWithBackoff");
-  function formatRecallTranscript(raw) {
+  function formatRecallTranscript(raw, mode = "clock") {
     const rows = Array.isArray(raw) ? raw : Array.isArray(raw && raw.results) ? raw.results : Array.isArray(raw && raw.transcript) ? raw.transcript : [];
     const lines = [];
     for (const row of rows) {
@@ -5297,7 +5363,12 @@ ${esc(transcriptText.trim())}`, null, null);
       const text = row.text || row.transcript || row.sentence || row.phrase || words.map((w) => w.text || w.word || "").join(" ") || "";
       if (!String(text).trim()) continue;
       const firstWord = words[0] || {};
-      const start = firstNumber(
+      const absolute = firstStringVal(
+        row.absoluteTime,
+        firstWord.start_timestamp && firstWord.start_timestamp.absolute,
+        row.start_timestamp && row.start_timestamp.absolute
+      );
+      const relative = firstNumber(
         row.start_time,
         row.start_timestamp,
         row.relativeTime,
@@ -5305,11 +5376,31 @@ ${esc(transcriptText.trim())}`, null, null);
         firstWord.start_timestamp,
         firstWord.start_timestamp && firstWord.start_timestamp.relative
       );
-      lines.push(`${start == null ? "" : `[${formatRelativeTime(start)}] `}${speaker}: ${String(text).trim()}`);
+      const elapsed = relative == null ? null : formatRelativeTime(relative);
+      const clock = absolute ? formatClockTime(absolute) : null;
+      const stamp = mode === "elapsed" ? elapsed || clock : clock || elapsed;
+      lines.push(`${stamp == null ? "" : `[${stamp}] `}${speaker}: ${String(text).trim()}`);
     }
     return lines.join("\n");
   }
   __name(formatRecallTranscript, "formatRecallTranscript");
+  function firstStringVal(...values) {
+    for (const v of values) {
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    return null;
+  }
+  __name(firstStringVal, "firstStringVal");
+  function formatClockTime(iso) {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    try {
+      return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    } catch {
+      return null;
+    }
+  }
+  __name(formatClockTime, "formatClockTime");
   function transcriptRowCount(raw) {
     if (Array.isArray(raw)) return raw.length;
     if (raw && Array.isArray(raw.results)) return raw.results.length;
