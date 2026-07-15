@@ -3044,7 +3044,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.20.0";
+  var PLUGIN_VERSION = "1.20.1";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3117,6 +3117,7 @@ ${report}
     saveTranscript: true,
     transcriptLayout: "blocks",
     utteranceTimestamps: true,
+    followLiveTranscript: true,
     turnHeaderTemplate: "[{Time}] {Speaker}",
     transcriptSections: false,
     sectionHeadingTemplate: "{Topic} | {Range}",
@@ -3177,6 +3178,7 @@ ${report}
       saveTranscript: bool("saveTranscript"),
       transcriptLayout: src.transcriptLayout === "inline" ? "inline" : "blocks",
       utteranceTimestamps: bool("utteranceTimestamps"),
+      followLiveTranscript: bool("followLiveTranscript"),
       turnHeaderTemplate: str("turnHeaderTemplate"),
       transcriptSections: bool("transcriptSections"),
       sectionHeadingTemplate: str("sectionHeadingTemplate"),
@@ -4160,7 +4162,10 @@ ${report}
           if (this._settings.saveTranscript) {
             const loc = this._settings.notesLocation;
             if (loc !== "body") this._setMappedField(record, FIELDS.TRANSCRIPT, transcriptText);
-            if (loc !== "property") await this._streamTranscriptToBody(record, entries);
+            if (loc !== "property") {
+              const newestLine = await this._streamTranscriptToBody(record, entries);
+              this._scrollToLiveTranscript(record, newestLine);
+            }
           }
         } else if (terminal || transcript && transcript.debug && transcript.debug.kv === "MISSING") {
           this._setField(record, FIELDS.LAST_ERROR, describeTranscriptState(transcript, bot));
@@ -4419,9 +4424,11 @@ ${transcriptText}` }]
         } catch {
         }
         this._log("transcript streamed to body", { newTurns: fresh.length, total: entries.length, layout: settings.transcriptLayout });
+        return tracked.length ? tracked[tracked.length - 1] : null;
       } catch (err) {
         this._log("transcript stream failed", { error: this._errorMessage(err) });
       }
+      return null;
     }
     /**
      * At meeting end, regroup the live (un-sectioned) transcript into collapsible topic sections:
@@ -4596,17 +4603,40 @@ ${transcriptText}` }]
       }
     }
     /**
-     * Force the open editor to re-render a record after a background write.
-     *
-     * Thymer paints the editor on navigation/focus, not when a plugin mutates a record out of band —
-     * so poll-inserted body content sits invisible until the user navigates away and back. There is
-     * no repaint API; re-navigating the panel to the same record is the mechanism. Only touches the
-     * panel actually showing this record, and only when asked (once, as the notes land) — never on
-     * every poll, which would yank the cursor mid-read.
+     * Make freshly-streamed transcript lines VISIBLE mid-meeting. Thymer only repaints the editor on
+     * navigation — a plugin's out-of-band body writes sit invisible until then, which is exactly why
+     * the transcript looked like it "only appeared at the end". Re-navigate the open panel to the newest
+     * line (which re-renders the editor and scrolls the live feed to it), but ONLY when this record is
+     * the one on screen AND the user is NOT typing in it — so it never yanks the cursor out of notes
+     * they're writing. When they are typing, the writes stay pending and show on their next navigation.
      *
      * @param {any} record
-     * @param {any} focusItem a line item to scroll to and highlight, or null
+     * @param {string|null} itemGuid the newest streamed line to scroll to
      */
+    _scrollToLiveTranscript(record, itemGuid) {
+      if (this._disabled || !itemGuid || !record || this._settings.followLiveTranscript === false) return;
+      try {
+        const panel2 = this.ui.getActivePanel && this.ui.getActivePanel();
+        if (!panel2 || typeof panel2.navigateTo !== "function") return;
+        const active = panel2.getActiveRecord ? panel2.getActiveRecord() : null;
+        if (!active || active.guid !== record.guid) return;
+        if (this._userTypingInPanel(panel2)) return;
+        void panel2.navigateTo({ type: "edit_panel", rootId: record.guid, subId: null, workspaceGuid: null, itemGuid, highlight: true });
+      } catch {
+      }
+    }
+    /** True when the caret/focus sits inside this panel's editor — i.e. the user is actively typing. */
+    _userTypingInPanel(panel2) {
+      try {
+        const el2 = document.activeElement;
+        if (!el2) return false;
+        const root = panel2 && panel2.getElement ? panel2.getElement() : null;
+        if (!root || !root.contains(el2)) return false;
+        return el2.isContentEditable === true || el2.tagName === "INPUT" || el2.tagName === "TEXTAREA";
+      } catch {
+        return false;
+      }
+    }
     _ensurePolling(record, botId) {
       if (!this._pollers) this._pollers = /* @__PURE__ */ new Map();
       if (!record || !botId || this._pollers.has(botId)) return;
@@ -5203,6 +5233,14 @@ ${transcriptText}` }]
               desc: "Show the time on each speaker turn. Off shows the speaker only (times still appear on section headings).",
               checked: draft.utteranceTimestamps !== false,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("utteranceTimestamps", !!event.target.checked, { rerender: true }), "onChange")
+            }),
+            optionRow({
+              type: "checkbox",
+              name: "followLiveTranscript",
+              label: "Follow the live transcript",
+              desc: "While the meeting runs, scroll the open record to each new line as it arrives so the transcript streams in view. Skipped whenever you are typing in that record. Off = lines still stream but only show when you next open/scroll the record.",
+              checked: draft.followLiveTranscript !== false,
+              onChange: /* @__PURE__ */ __name((event) => this._updateSetting("followLiveTranscript", !!event.target.checked, { rerender: true }), "onChange")
             })
           ]
         }),
