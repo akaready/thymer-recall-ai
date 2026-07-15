@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.15.1";
+  var PLUGIN_VERSION = "1.16.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3087,6 +3087,11 @@ ${report}
     autoSchedule: false,
     autoSummarize: true,
     transcriptTimestamps: "clock",
+    notesLocation: "body",
+    saveTranscript: true,
+    transcriptLayout: "blocks",
+    utteranceTimestamps: true,
+    timestampPosition: "front",
     summaryPrompt: "Summarize this meeting transcript for a Thymer note. Include: 1) a concise overview, 2) decisions made, 3) action items with owners when mentioned, and 4) open questions. Keep the output skimmable and factual."
   });
   var API_KEY_FIELDS = Object.freeze(["recallApiKey", "anthropicApiKey"]);
@@ -3115,6 +3120,11 @@ ${report}
       autoSchedule: bool("autoSchedule"),
       autoSummarize: bool("autoSummarize"),
       transcriptTimestamps: src.transcriptTimestamps === "elapsed" ? "elapsed" : "clock",
+      notesLocation: ["body", "property", "both"].includes(src.notesLocation) ? src.notesLocation : "body",
+      saveTranscript: bool("saveTranscript"),
+      transcriptLayout: src.transcriptLayout === "inline" ? "inline" : "blocks",
+      utteranceTimestamps: bool("utteranceTimestamps"),
+      timestampPosition: src.timestampPosition === "back" ? "back" : "front",
       summaryPrompt: str("summaryPrompt")
     };
   }
@@ -4023,7 +4033,8 @@ ${report}
         const status = latestRecallStatus(bot) || this._text(record, FIELDS.STATUS) || "syncing";
         this._setField(record, FIELDS.STATUS, status);
         this._updateNavButtonForRecord(record);
-        const transcriptText = formatRecallTranscript(transcript, this._settings.transcriptTimestamps);
+        const entries = transcriptEntries(transcript);
+        const transcriptText = entriesToText(entries, this._settings);
         this._log("sync poll", {
           botId,
           status,
@@ -4035,17 +4046,20 @@ ${report}
         const ended = !!bot && isMeetingEndedStatus(status);
         const terminal = !!bot && isTerminalStatus(status);
         if (transcriptText) {
-          this._setMappedField(record, FIELDS.TRANSCRIPT, transcriptText);
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._log("transcript written", { botId, characters: transcriptText.length });
-          await this._streamTranscriptToBody(record, transcriptText);
+          if (this._settings.saveTranscript) {
+            const loc = this._settings.notesLocation;
+            if (loc !== "body") this._setMappedField(record, FIELDS.TRANSCRIPT, transcriptText);
+            if (loc !== "property") await this._streamTranscriptToBody(record, entries);
+          }
         } else if (terminal || transcript && transcript.debug && transcript.debug.kv === "MISSING") {
           this._setField(record, FIELDS.LAST_ERROR, describeTranscriptState(transcript, bot));
         } else {
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._log("transcript pending", { botId, state: describeTranscriptState(transcript, bot) });
         }
-        const hasSummary = !!this._text(record, this._mappedFieldId(FIELDS.SUMMARY));
+        const hasSummary = COMPLETED_STATUSES.has(String(this._text(record, FIELDS.STATUS) || "").toLowerCase());
         if (ended && summarize && this._settings.autoSummarize && !hasSummary) {
           if (!transcriptText) {
             this._setField(record, FIELDS.STATUS, "processing transcript");
@@ -4107,11 +4121,12 @@ ${report}
         this._log("summary start", { characters: transcriptText.length });
         const summary = await this._createSummary(transcriptText);
         if (!summary) throw new Error("Claude returned an empty summary.");
-        this._setMappedField(record, FIELDS.SUMMARY, summary);
         this._setField(record, FIELDS.STATUS, "summarized");
         this._updateNavButtonForRecord(record);
         this._log("summary written", { characters: summary.length });
-        await this._writeSummaryToBody(record, summary);
+        const loc = this._settings.notesLocation;
+        if (loc !== "body") this._setMappedField(record, FIELDS.SUMMARY, summary);
+        if (loc !== "property") await this._writeSummaryToBody(record, summary);
       } catch (err) {
         this._setField(record, FIELDS.LAST_ERROR, `Summary failed: ${this._errorMessage(err)}`);
         this._setField(record, FIELDS.STATUS, "summary_failed");
@@ -4173,18 +4188,19 @@ ${transcriptText}`
     }
     /**
      * Stream the transcript into the record body LIVE, under a collapsible "🎙️ Transcript" heading —
-     * append-only, so each poll adds just the rows that are new since last time. Proven against the
-     * live document tree: content nested under a heading (heading as PARENT) folds, and appending
-     * after the heading's last child keeps order. The row count and heading guid are remembered per
-     * record in localStorage so a poll never re-adds what is already there.
+     * append-only, one utterance at a time, so it grows as the meeting runs. Takes STRUCTURED entries
+     * so it can honor the layout setting:
+     *   - inline: each turn a flat line "[time] Speaker: text" under the heading.
+     *   - blocks: each turn a header line ("[time] Speaker") with the words nested BENEATH it, so a
+     *     collapsed transcript is a scannable list of turns. Nesting proven against the live doc tree.
+     * Per-record `tx-head` (heading guid) and `tx-count` (utterances written) in localStorage keep a
+     * poll from re-adding what is already there.
      *
      * NEVER navigates or repaints — appending nodes elsewhere in the doc leaves your cursor alone.
-     * The new lines appear on the next natural render, or immediately in a panel opened on the heading.
      */
-    async _streamTranscriptToBody(record, transcriptText) {
+    async _streamTranscriptToBody(record, entries) {
       if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.getLineItems !== "function") return;
-      const rows = String(transcriptText || "").split("\n").map((l) => l.replace(/\s+$/, "")).filter((l) => l.trim());
-      if (!rows.length) return;
+      if (!Array.isArray(entries) || !entries.length) return;
       const headKey = this._bodyKey(record, "tx-head");
       const countKey = this._bodyKey(record, "tx-count");
       let written = 0;
@@ -4192,7 +4208,7 @@ ${transcriptText}`
         written = parseInt(localStorage.getItem(countKey) || "0", 10) || 0;
       } catch {
       }
-      if (rows.length <= written) return;
+      if (entries.length <= written) return;
       try {
         let items = await record.getLineItems(false);
         let heading = null;
@@ -4214,15 +4230,29 @@ ${transcriptText}`
           }
           written = 0;
         }
-        const kids = items.filter((li) => li.parent_guid === heading.guid);
-        const lastChild = kids.length ? kids[kids.length - 1] : null;
-        const md = rows.slice(written).map((r) => this._escMd(r)).join("\n");
-        if (await record.insertFromMarkdown(md, heading, lastChild) === false) return;
+        const lastChildOf = /* @__PURE__ */ __name((parentGuid) => {
+          const kids = items.filter((li) => li.parent_guid === parentGuid);
+          return kids.length ? kids[kids.length - 1] : null;
+        }, "lastChildOf");
+        const fresh = entries.slice(written);
+        const settings = this._settings;
+        if (settings.transcriptLayout === "inline") {
+          const md = fresh.map((e) => this._escMd(`${formatEntryHeader(e, settings)}: ${e.text}`)).join("\n");
+          if (await record.insertFromMarkdown(md, heading, lastChildOf(heading.guid)) === false) return;
+        } else {
+          for (const e of fresh) {
+            const before = new Set(items.map((li) => li.guid));
+            if (await record.insertFromMarkdown(this._escMd(formatEntryHeader(e, settings)), heading, lastChildOf(heading.guid)) === false) return;
+            items = await record.getLineItems(false);
+            const turn = items.find((li) => li.parent_guid === heading.guid && !before.has(li.guid)) || null;
+            if (turn) await record.insertFromMarkdown(this._escMd(e.text), turn, null);
+          }
+        }
         try {
-          localStorage.setItem(countKey, String(rows.length));
+          localStorage.setItem(countKey, String(entries.length));
         } catch {
         }
-        this._log("transcript streamed to body", { newRows: rows.length - written, total: rows.length });
+        this._log("transcript streamed to body", { newTurns: fresh.length, total: entries.length, layout: settings.transcriptLayout });
       } catch (err) {
         this._log("transcript stream failed", { error: this._errorMessage(err) });
       }
@@ -4765,10 +4795,6 @@ ${transcriptText}`
             this._fileInput("Bot image JPEG upload", "botImageData", "botImageName"),
             this._textInput("Bot image JPEG URL", "botImageUrl", "https://example.com/notetaker.jpg"),
             this._numberInput("Poll every seconds", "pollSeconds", 10, 300),
-            this._selectInput("Transcript timestamps", "transcriptTimestamps", [
-              ["clock", "Clock time (2:47 PM)"],
-              ["elapsed", "Elapsed time (0:37)"]
-            ]),
             optionRow({
               type: "checkbox",
               name: "autoSchedule",
@@ -4786,6 +4812,47 @@ ${transcriptText}`
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("sendJoinChatMessage", !!event.target.checked, { rerender: true }), "onChange")
             }),
             this._textareaInput("Join chat message", "joinChatMessage", 3)
+          ]
+        }),
+        section({
+          label: "Transcript formatting",
+          hint: "How the transcript is captured and laid out.",
+          collapsible: true,
+          defaultOpen: false,
+          body: [
+            optionRow({
+              type: "checkbox",
+              name: "saveTranscript",
+              label: "Save the transcript",
+              desc: "Keep the transcript on the record. Turn off to get only the summary \u2014 Recall is still transcribed so the summary can be written.",
+              checked: draft.saveTranscript !== false,
+              onChange: /* @__PURE__ */ __name((event) => this._updateSetting("saveTranscript", !!event.target.checked, { rerender: true }), "onChange")
+            }),
+            this._selectInput("Location", "notesLocation", [
+              ["body", "Page body"],
+              ["property", "Properties"],
+              ["both", "Both"]
+            ]),
+            this._selectInput("Layout", "transcriptLayout", [
+              ["blocks", "Speaker blocks (collapsible)"],
+              ["inline", "Inline lines"]
+            ]),
+            this._selectInput("Timestamps", "transcriptTimestamps", [
+              ["clock", "Clock time (2:47 PM)"],
+              ["elapsed", "Elapsed time (0:37)"]
+            ]),
+            this._selectInput("Timestamp position", "timestampPosition", [
+              ["front", "Before the speaker"],
+              ["back", "After the speaker"]
+            ]),
+            optionRow({
+              type: "checkbox",
+              name: "utteranceTimestamps",
+              label: "Timestamp every line",
+              desc: "Show the time on each speaker turn. Off shows the speaker only (times still appear on section headings).",
+              checked: draft.utteranceTimestamps !== false,
+              onChange: /* @__PURE__ */ __name((event) => this._updateSetting("utteranceTimestamps", !!event.target.checked, { rerender: true }), "onChange")
+            })
           ]
         }),
         section({
@@ -5353,22 +5420,22 @@ ${transcriptText}`
     return lastResponse;
   }
   __name(fetchWithBackoff, "fetchWithBackoff");
-  function formatRecallTranscript(raw, mode = "clock") {
+  function transcriptEntries(raw) {
     const rows = Array.isArray(raw) ? raw : Array.isArray(raw && raw.results) ? raw.results : Array.isArray(raw && raw.transcript) ? raw.transcript : [];
-    const lines = [];
+    const entries = [];
     for (const row of rows) {
       const nested = row && row.data && row.data.words ? row.data : row;
       const speaker = row.speaker || row.speaker_name || row.participant && row.participant.name || nested && nested.participant && nested.participant.name || "Speaker";
       const words = Array.isArray(row.words) ? row.words : Array.isArray(nested && nested.words) ? nested.words : [];
-      const text = row.text || row.transcript || row.sentence || row.phrase || words.map((w) => w.text || w.word || "").join(" ") || "";
-      if (!String(text).trim()) continue;
+      const text = String(row.text || row.transcript || row.sentence || row.phrase || words.map((w) => w.text || w.word || "").join(" ") || "").trim();
+      if (!text) continue;
       const firstWord = words[0] || {};
-      const absolute = firstStringVal(
+      const absoluteIso = firstStringVal(
         row.absoluteTime,
         firstWord.start_timestamp && firstWord.start_timestamp.absolute,
         row.start_timestamp && row.start_timestamp.absolute
       );
-      const relative = firstNumber(
+      const relativeSec = firstNumber(
         row.start_time,
         row.start_timestamp,
         row.relativeTime,
@@ -5376,14 +5443,31 @@ ${transcriptText}`
         firstWord.start_timestamp,
         firstWord.start_timestamp && firstWord.start_timestamp.relative
       );
-      const elapsed = relative == null ? null : formatRelativeTime(relative);
-      const clock = absolute ? formatClockTime(absolute) : null;
-      const stamp = mode === "elapsed" ? elapsed || clock : clock || elapsed;
-      lines.push(`${stamp == null ? "" : `[${stamp}] `}${speaker}: ${String(text).trim()}`);
+      entries.push({ speaker: String(speaker), text, absoluteIso: absoluteIso || null, relativeSec });
     }
-    return lines.join("\n");
+    return entries;
   }
-  __name(formatRecallTranscript, "formatRecallTranscript");
+  __name(transcriptEntries, "transcriptEntries");
+  function entryStamp(entry, settings) {
+    const clock = entry.absoluteIso ? formatClockTime(entry.absoluteIso) : null;
+    const elapsed = entry.relativeSec == null ? null : formatRelativeTime(entry.relativeSec);
+    return settings.transcriptTimestamps === "elapsed" ? elapsed || clock : clock || elapsed;
+  }
+  __name(entryStamp, "entryStamp");
+  function formatEntryHeader(entry, settings) {
+    const stamp = settings.utteranceTimestamps ? entryStamp(entry, settings) : null;
+    if (!stamp) return entry.speaker;
+    return settings.timestampPosition === "back" ? `${entry.speaker} [${stamp}]` : `[${stamp}] ${entry.speaker}`;
+  }
+  __name(formatEntryHeader, "formatEntryHeader");
+  function entriesToText(entries, settings) {
+    if (settings.transcriptLayout === "inline") {
+      return entries.map((e) => `${formatEntryHeader(e, settings)}: ${e.text}`).join("\n");
+    }
+    return entries.map((e) => `${formatEntryHeader(e, settings)}
+	${e.text}`).join("\n\n");
+  }
+  __name(entriesToText, "entriesToText");
   function firstStringVal(...values) {
     for (const v of values) {
       if (typeof v === "string" && v.trim()) return v.trim();
