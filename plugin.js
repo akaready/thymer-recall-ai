@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.12.4";
+  var PLUGIN_VERSION = "1.13.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3949,7 +3949,7 @@ ${report}
         payload.recording_config.realtime_endpoints = [{
           type: "webhook",
           url: `${this._bridgeUrl()}/api/recall/realtime`,
-          events: ["transcript.data", "transcript.partial_data"]
+          events: ["transcript.data"]
         }];
       }
       const joinAt = immediate ? null : this._joinAtIso(record);

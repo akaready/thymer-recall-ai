@@ -48,7 +48,7 @@ async function createRecallBot(request, env) {
 		payload.recording_config.realtime_endpoints = [{
 			type: 'webhook',
 			url: `${String(body.bridgeUrl).replace(/\/+$/, '')}/api/recall/realtime`,
-			events: ['transcript.data', 'transcript.partial_data'],
+			events: ['transcript.data'],
 		}];
 	}
 	if (body.botImageData || body.botImageUrl) {
@@ -199,6 +199,15 @@ async function receiveRealtimeTranscript(request, env) {
 			keys: payload && typeof payload === 'object' ? Object.keys(payload) : [],
 		});
 		return json({ ok: true, ignored: 'missing bot id' }, 202);
+	}
+	// Store FINALIZED utterances only. `transcript.partial_data` is the recognizer's live guess —
+	// "chap" -> "chapter" -> "chapter 16" -> ... — one event per word as it refines. Storing those
+	// filled the transcript with every intermediate state of the same sentence. `transcript.data` is
+	// the completed utterance: one clean line. New bots no longer subscribe to partials at all, but a
+	// bot created before this fix still sends them, so drop them here too.
+	const eventName = (payload && payload.event) || '';
+	if (eventName && eventName !== 'transcript.data') {
+		return json({ ok: true, ignored: `non-final event ${eventName}` }, 202);
 	}
 	const row = normalizeRealtimeTranscript(payload);
 	if (!row || !row.text) {
