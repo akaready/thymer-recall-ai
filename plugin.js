@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.15.0";
+  var PLUGIN_VERSION = "1.15.1";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3031,7 +3031,7 @@ ${report}
   });
   var FIELD_DEFS = Object.freeze({
     [FIELDS.MEETING_URL]: { id: FIELDS.MEETING_URL, label: "Meeting URL", type: "url", icon: "ti-link", many: false, read_only: false, active: true },
-    [FIELDS.JOIN_AT]: { id: FIELDS.JOIN_AT, label: "Join At", type: "datetime", icon: "ti-calendar-time", many: false, read_only: false, active: true },
+    [FIELDS.JOIN_AT]: { id: FIELDS.JOIN_AT, label: "Join At", type: "datetime", icon: "ti-calendar", many: false, read_only: false, active: true },
     [FIELDS.TRANSCRIPT]: { id: FIELDS.TRANSCRIPT, label: "Transcript", type: "text", icon: "ti-file-text", many: false, read_only: false, active: true },
     [FIELDS.SUMMARY]: { id: FIELDS.SUMMARY, label: "Summary", type: "text", icon: "ti-sparkles", many: false, read_only: false, active: true },
     [FIELDS.BOT_ID]: { id: FIELDS.BOT_ID, label: "Recall Bot ID", type: "text", icon: "ti-robot", many: false, read_only: false, active: true },
@@ -4386,7 +4386,7 @@ ${transcriptText}`
       };
       if (this._isScheduledDispatch(record)) return {
         kind: "schedulable",
-        icon: "calendar-time",
+        icon: "calendar",
         label: "Schedule Bot",
         tooltip: "Book the notetaker now; it joins when the meeting starts"
       };
@@ -5547,7 +5547,7 @@ ${transcriptText}`
     if (kind === "processing") return wrap(spinner, "Processing");
     if (kind === "done") return wrap(icon("circle-check"), "Done");
     if (kind === "scheduled") return wrap(icon("clock"), "Scheduled");
-    if (kind === "schedulable") return wrap(icon("calendar-time"), "Schedule Bot");
+    if (kind === "schedulable") return wrap(icon("calendar"), "Schedule Bot");
     return wrap(icon("microphone"), "Join Now");
   }
   __name(navButtonLabel, "navButtonLabel");
