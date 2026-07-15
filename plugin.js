@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.12.2";
+  var PLUGIN_VERSION = "1.12.3";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -4181,6 +4181,21 @@ ${esc(transcriptText.trim())}`, null, null);
      * @param {any} record
      * @param {any} focusItem a line item to scroll to and highlight, or null
      */
+    /**
+     * True when the user is typing in the editor RIGHT NOW — focus is inside a contenteditable in the
+     * editor pane. Never steal a live cursor: a forced re-navigation would drop them out of their
+     * sentence. This is why the repaint below bails when they are editing.
+     */
+    _userIsEditingBody() {
+      try {
+        const el2 = document.activeElement;
+        if (!el2 || !(el2 instanceof HTMLElement)) return false;
+        if (!el2.closest(EDITOR_SCOPE)) return false;
+        return el2.isContentEditable || el2.closest('[contenteditable="true"]') != null;
+      } catch {
+        return false;
+      }
+    }
     _repaintRecordIfOpen(record, focusItem) {
       if (!record || !record.guid) return;
       try {
@@ -4188,6 +4203,10 @@ ${esc(transcriptText.trim())}`, null, null);
         if (!panel2 || typeof panel2.navigateTo !== "function") return;
         const active = panel2.getActiveRecord ? panel2.getActiveRecord() : null;
         if (!active || active.guid !== record.guid) return;
+        if (this._userIsEditingBody()) {
+          this._toast("Meeting notes added", "The summary and transcript are on this page, below your notes.");
+          return;
+        }
         const nav = focusItem && focusItem.guid ? panel2.navigateTo({ type: "edit_panel", rootId: null, subId: null, workspaceGuid: null, itemGuid: focusItem.guid, highlight: true }) : panel2.navigateTo({ type: "edit_panel", rootId: record.guid, subId: null, workspaceGuid: null });
         if (nav && typeof nav.catch === "function") nav.catch(() => {
         });
