@@ -3018,7 +3018,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.13.0";
+  var PLUGIN_VERSION = "1.14.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3151,6 +3151,38 @@ ${report}
   var SCHEDULED_LEAD_MS = 10 * 60 * 1e3;
   var DONE_STATUSES = /* @__PURE__ */ new Set(["done", "bot.done", "recording_done"]);
   var FATAL_STATUSES = /* @__PURE__ */ new Set(["fatal", "bot.fatal", "call_ended_by_host", "bot_rejected"]);
+  var STATUS_LABELS = Object.freeze({
+    // Recall lifecycle
+    joining_call: "Joining",
+    in_waiting_room: "Waiting room",
+    in_call_not_recording: "In call",
+    recording_permission_allowed: "Recording",
+    recording_permission_denied: "Permission denied",
+    in_call_recording: "Recording",
+    call_ended: "Call ended",
+    recording_done: "Recording done",
+    done: "Done",
+    fatal: "Error",
+    // Plugin post-processing
+    created: "Starting",
+    "creating bot": "Starting",
+    "leaving call": "Leaving",
+    syncing: "Syncing",
+    "processing transcript": "Processing",
+    summarizing: "Summarizing",
+    summarized: "Summarized",
+    summary_failed: "Summary failed",
+    scheduled: "Scheduled",
+    error: "Error"
+  });
+  var COMPLETED_STATUSES = /* @__PURE__ */ new Set(["summarized", "summary_failed"]);
+  function statusLabel(raw) {
+    const normalized = String(raw || "").toLowerCase().replace(/^bot\./, "").trim();
+    if (!normalized) return "";
+    if (STATUS_LABELS[normalized]) return STATUS_LABELS[normalized];
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  }
+  __name(statusLabel, "statusLabel");
   var TELEMETRY_ENDPOINT = "https://thymer-plugins.goatcounter.com/count";
   var TELEMETRY_SCRIPT_SRC = "https://gc.zgo.at/count.js";
   var _telemetryScriptPromise = null;
@@ -3304,8 +3336,9 @@ ${report}
     _registerNavigationButtons() {
       this._navButton = this.addCollectionNavigationButton({
         label: "Join Now",
+        // No separate `icon` — the htmlLabel carries it, so we never render a second static glyph
+        // beside the animated one (the double half-circle).
         htmlLabel: navButtonLabel("idle"),
-        icon: "microphone",
         tooltip: "Send the notetaker into this meeting now",
         // ONLY when a record is open. With `false` this button rendered in the COLLECTION nav
         // strip, sitting beside the view tabs as though "Join Now" were a view — and there is no
@@ -3320,6 +3353,7 @@ ${report}
           if (kind === "summarizing" || kind === "processing") {
             return this._toast("Recall.ai is still working", "The meeting is over and the transcript is being processed. Nothing to do.");
           }
+          if (kind === "done") return void this._syncRecord(record, { summarize: true });
           void this._startBot(record);
         }, "onClick")
       });
@@ -3361,7 +3395,7 @@ ${report}
       if (statusText) {
         const chip = document.createElement("span");
         chip.className = `${ROOT_CLASS}__cell-status`;
-        chip.textContent = statusText;
+        chip.textContent = statusLabel(statusText);
         wrap.appendChild(chip);
       }
       const state = this._recordVisualState(record);
@@ -4220,7 +4254,7 @@ ${esc(transcriptText.trim())}`, null, null);
       const target = record || this._activeRecordGuid && this._recordsByGuid.get(this._activeRecordGuid) || null;
       const state = this._recordVisualState(target);
       try {
-        this._navButton.setIcon(state.icon);
+        this._navButton.setIcon(null);
       } catch {
       }
       try {
@@ -4269,6 +4303,12 @@ ${esc(transcriptText.trim())}`, null, null);
         icon: "loader-2",
         label: "Processing",
         tooltip: "Waiting for Recall.ai to finish the transcript"
+      };
+      if (botId && (isTerminalStatus(status) || COMPLETED_STATUSES.has(status))) return {
+        kind: "done",
+        icon: "circle-check",
+        label: "Done",
+        tooltip: "Meeting transcribed and summarized"
       };
       if (botId && this._joinAtMs(record) > Date.now() && !isTerminalStatus(status) && status !== "error") return {
         kind: "scheduled",
@@ -5049,13 +5089,14 @@ ${esc(transcriptText.trim())}`, null, null);
 				align-items: center;
 				gap: 6px;
 			}
-			.${ROOT_CLASS}__nav-dot {
-				width: 7px;
-				height: 7px;
-				border-radius: 999px;
-				background: var(--tps-danger);
-				box-shadow: 0 0 0 0 color-mix(in srgb, var(--tps-danger) 62%, transparent);
-				animation: ${ROOT_CLASS}-recording-pulse 1.15s ease-in-out infinite;
+			.${ROOT_CLASS}__nav-ico {
+				font-size: 13px;
+				line-height: 1;
+			}
+			/* Recording: the mic blinks red, on and off, like a record light. */
+			.${ROOT_CLASS}__nav-mic {
+				color: var(--tps-danger);
+				animation: ${ROOT_CLASS}-mic-flash 1.3s steps(1, end) infinite;
 			}
 			.${ROOT_CLASS}__nav-spinner {
 				width: 12px;
@@ -5065,10 +5106,9 @@ ${esc(transcriptText.trim())}`, null, null);
 				border-radius: 999px;
 				animation: ${ROOT_CLASS}-spin 0.85s linear infinite;
 			}
-			@keyframes ${ROOT_CLASS}-recording-pulse {
-				0% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--tps-danger) 52%, transparent); }
-				70% { opacity: 0.42; box-shadow: 0 0 0 6px color-mix(in srgb, var(--tps-danger) 0%, transparent); }
-				100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--tps-danger) 0%, transparent); }
+			@keyframes ${ROOT_CLASS}-mic-flash {
+				0%, 49% { opacity: 1; }
+				50%, 100% { opacity: 0.2; }
 			}
 			@keyframes ${ROOT_CLASS}-spin {
 				to { transform: rotate(360deg); }
@@ -5408,22 +5448,16 @@ ${esc(transcriptText.trim())}`, null, null);
   }
   __name(propertyValueToText, "propertyValueToText");
   function navButtonLabel(kind) {
-    if (kind === "recording") {
-      return `<span class="${ROOT_CLASS}__nav-label"><span class="${ROOT_CLASS}__nav-dot" aria-hidden="true"></span><span>Recording</span></span>`;
-    }
-    if (kind === "summarizing") {
-      return `<span class="${ROOT_CLASS}__nav-label"><span class="${ROOT_CLASS}__nav-spinner" aria-hidden="true"></span><span>Summarizing</span></span>`;
-    }
-    if (kind === "processing") {
-      return `<span class="${ROOT_CLASS}__nav-label"><span class="${ROOT_CLASS}__nav-spinner" aria-hidden="true"></span><span>Processing</span></span>`;
-    }
-    if (kind === "scheduled") {
-      return `<span class="${ROOT_CLASS}__nav-label"><span>Scheduled</span></span>`;
-    }
-    if (kind === "schedulable") {
-      return "Schedule Bot";
-    }
-    return "Join Now";
+    const wrap = /* @__PURE__ */ __name((iconHtml, text) => `<span class="${ROOT_CLASS}__nav-label">${iconHtml}<span>${text}</span></span>`, "wrap");
+    const icon = /* @__PURE__ */ __name((cls) => `<i class="ti ti-${cls} ${ROOT_CLASS}__nav-ico" aria-hidden="true"></i>`, "icon");
+    const spinner = `<span class="${ROOT_CLASS}__nav-spinner" aria-hidden="true"></span>`;
+    if (kind === "recording") return wrap(`<i class="ti ti-microphone ${ROOT_CLASS}__nav-ico ${ROOT_CLASS}__nav-mic" aria-hidden="true"></i>`, "Recording");
+    if (kind === "summarizing") return wrap(spinner, "Summarizing");
+    if (kind === "processing") return wrap(spinner, "Processing");
+    if (kind === "done") return wrap(icon("circle-check"), "Done");
+    if (kind === "scheduled") return wrap(icon("clock"), "Scheduled");
+    if (kind === "schedulable") return wrap(icon("calendar-time"), "Schedule Bot");
+    return wrap(icon("microphone"), "Join Now");
   }
   __name(navButtonLabel, "navButtonLabel");
   return __toCommonJS(plugin_exports);
