@@ -3044,7 +3044,7 @@ ${report}
   __name(createSettingsStore, "createSettingsStore");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.18.0";
+  var PLUGIN_VERSION = "1.19.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3118,6 +3118,8 @@ ${report}
     transcriptLayout: "blocks",
     utteranceTimestamps: true,
     timestampPosition: "front",
+    transcriptSections: false,
+    sectionHeadingStyle: "pipe",
     summaryPrompt: [
       "Summarize this meeting transcript as clean Markdown for a Thymer outline note. Follow these formatting rules exactly:",
       "- Do NOT add a title or top-level heading \u2014 the note already has a Summary heading, so start directly with the first section.",
@@ -3136,6 +3138,12 @@ ${report}
     ["h2", "Heading 2"],
     ["h3", "Heading 3"],
     ["none", "No heading (plain line)"]
+  ];
+  var SECTION_HEADING_STYLES = [
+    ["pipe", "Topic | 2:47\u20132:52 PM"],
+    ["dot", "Topic \u2022 2:47\u20132:52 PM"],
+    ["bracket", "Topic [2:47\u20132:52 PM]"],
+    ["rangefirst", "2:47\u20132:52 PM | Topic"]
   ];
   var API_KEY_FIELDS = Object.freeze(["recallApiKey", "anthropicApiKey"]);
   var BOT_IMAGE_FIELDS = Object.freeze(["botImageData", "botImageName"]);
@@ -3168,6 +3176,8 @@ ${report}
       transcriptLayout: src.transcriptLayout === "inline" ? "inline" : "blocks",
       utteranceTimestamps: bool("utteranceTimestamps"),
       timestampPosition: src.timestampPosition === "back" ? "back" : "front",
+      transcriptSections: bool("transcriptSections"),
+      sectionHeadingStyle: ["pipe", "dot", "bracket", "rangefirst"].includes(src.sectionHeadingStyle) ? src.sectionHeadingStyle : "pipe",
       summaryPrompt: str("summaryPrompt"),
       transcriptHeadingText: str("transcriptHeadingText"),
       transcriptHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.transcriptHeadingLevel) ? src.transcriptHeadingLevel : "h3",
@@ -4162,7 +4172,7 @@ ${report}
             this._updateNavButtonForRecord(record);
             return false;
           }
-          await this._summarize(record, transcriptText);
+          await this._summarize(record, transcriptText, entries);
         }
         if (ended && (transcriptText || !this._settings.autoSummarize || hasSummary)) {
           this._stopPolling(botId);
@@ -4206,7 +4216,7 @@ ${report}
       if (!response.ok) throw new Error(recallError(json, response.status));
       return json;
     }
-    async _summarize(record, transcriptText) {
+    async _summarize(record, transcriptText, entries) {
       if (!this._settings.anthropicApiKey) {
         this._setField(record, FIELDS.LAST_ERROR, "Anthropic API key is missing; transcript fetched but summary was skipped.");
         return;
@@ -4215,14 +4225,17 @@ ${report}
         this._setField(record, FIELDS.STATUS, "summarizing");
         this._updateNavButtonForRecord(record);
         this._log("summary start", { characters: transcriptText.length });
-        const summary = await this._createSummary(transcriptText);
+        const { summary, sections } = await this._createSummary(transcriptText, entries);
         if (!summary) throw new Error("Claude returned an empty summary.");
         this._setField(record, FIELDS.STATUS, "summarized");
         this._updateNavButtonForRecord(record);
-        this._log("summary written", { characters: summary.length });
+        this._log("summary written", { characters: summary.length, sections: sections.length });
         const loc = this._settings.notesLocation;
         if (loc !== "body") this._setMappedField(record, FIELDS.SUMMARY, summary);
         if (loc !== "property") await this._writeSummaryToBody(record, summary);
+        if (loc !== "property" && this._settings.transcriptSections && sections.length && Array.isArray(entries) && entries.length) {
+          await this._reorganizeTranscriptBySections(record, entries, sections);
+        }
       } catch (err) {
         this._setField(record, FIELDS.LAST_ERROR, `Summary failed: ${this._errorMessage(err)}`);
         this._setField(record, FIELDS.STATUS, "summary_failed");
@@ -4230,42 +4243,62 @@ ${report}
         this._log("summary failed", { error: this._errorMessage(err) });
       }
     }
-    async _createSummary(transcriptText) {
-      const prompt = this._settings.summaryPrompt || DEFAULT_SETTINGS.summaryPrompt;
-      let raw = "";
+    /**
+     * Summarize, and — when topic-sections are on — also return the section outline from the SAME Claude
+     * call. With sections on we send a NUMBERED transcript (`[N] Speaker: text`) and ask for a JSON object
+     * `{ summary, sections:[{title,start,end}] }` indexing those numbers. A tolerant parse recovers the
+     * summary even if the JSON is malformed; bad/empty sections just fall back to the un-sectioned
+     * transcript (reorganize is skipped). Returns `{ summary, sections }`.
+     *
+     * @param {string} transcriptText
+     * @param {Array<{speaker:string,text:string,absoluteIso:string|null,relativeSec:number|null}>} [entries]
+     */
+    async _createSummary(transcriptText, entries) {
+      const basePrompt = this._settings.summaryPrompt || DEFAULT_SETTINGS.summaryPrompt;
+      const wantSections = !!this._settings.transcriptSections && Array.isArray(entries) && entries.length > 0;
+      if (!wantSections) {
+        const raw2 = await this._callClaude(basePrompt, transcriptText, 1400);
+        return { summary: sanitizeSummaryMarkdown(raw2), sections: [] };
+      }
+      const prompt = `${basePrompt}
+
+${sectionJsonInstruction(entries.length)}`;
+      const numbered = entries.map((e, i) => `[${i}] ${e.speaker}: ${e.text}`).join("\n");
+      const raw = await this._callClaude(prompt, numbered, 2600);
+      const parsed = parseSummaryAndSections(raw, entries.length);
+      return { summary: sanitizeSummaryMarkdown(parsed.summary), sections: parsed.sections };
+    }
+    /** POST the summary request to the bridge or to Anthropic directly; returns Claude's raw text. */
+    async _callClaude(prompt, transcriptText, maxTokens) {
       if (this._bridgeUrl()) {
-        const json = await this._bridgeJson("/api/anthropic/summary", {
+        const json2 = await this._bridgeJson("/api/anthropic/summary", {
           anthropicApiKey: this._settings.anthropicApiKey,
           anthropicModel: this._settings.anthropicModel || DEFAULT_SETTINGS.anthropicModel,
           summaryPrompt: prompt,
-          transcriptText
+          transcriptText,
+          maxTokens
         });
-        raw = json.summary || "";
-      } else {
-        const response = await fetch("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          headers: {
-            "x-api-key": this._settings.anthropicApiKey,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
-          },
-          body: JSON.stringify({
-            model: this._settings.anthropicModel || DEFAULT_SETTINGS.anthropicModel,
-            max_tokens: 1400,
-            messages: [{
-              role: "user",
-              content: `${prompt}
+        return json2.summary || "";
+      }
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": this._settings.anthropicApiKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          model: this._settings.anthropicModel || DEFAULT_SETTINGS.anthropicModel,
+          max_tokens: maxTokens,
+          messages: [{ role: "user", content: `${prompt}
 
 Transcript:
-${transcriptText}`
-            }]
-          })
-        });
-        const json = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(anthropicError(json, response.status));
-        raw = Array.isArray(json.content) ? json.content.map((part) => part && part.type === "text" ? part.text : "").join("\n").trim() : "";
-      }
-      return sanitizeSummaryMarkdown(raw);
+${transcriptText}` }]
+        })
+      });
+      const json = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(anthropicError(json, response.status));
+      return Array.isArray(json.content) ? json.content.map((part) => part && part.type === "text" ? part.text : "").join("\n").trim() : "";
     }
     /**
      * Render summary + transcript into the record BODY as real Thymer blocks (headings, bold,
@@ -4312,6 +4345,7 @@ ${transcriptText}`
       if (!Array.isArray(entries) || !entries.length) return;
       const headKey = this._bodyKey(record, "tx-head");
       const countKey = this._bodyKey(record, "tx-count");
+      const trackKey = this._bodyKey(record, "tx-guids");
       let written = 0;
       try {
         written = parseInt(localStorage.getItem(countKey) || "0", 10) || 0;
@@ -4347,25 +4381,157 @@ ${transcriptText}`
         }, "lastChildOf");
         const fresh = entries.slice(written);
         const settings = this._settings;
+        let tracked = [];
+        try {
+          tracked = JSON.parse(localStorage.getItem(trackKey) || "[]") || [];
+        } catch {
+        }
         if (settings.transcriptLayout === "inline") {
+          const before = new Set(items.map((li) => li.guid));
           const md = fresh.map((e) => this._escMd(`${formatEntryHeader(e, settings)}: ${e.text}`)).join("\n");
           if (await record.insertFromMarkdown(md, heading, lastChildOf(heading.guid)) === false) return;
+          items = await record.getLineItems(false);
+          for (const li of items) if (!before.has(li.guid)) tracked.push(li.guid);
         } else {
           for (const e of fresh) {
             const before = new Set(items.map((li) => li.guid));
             if (await record.insertFromMarkdown(this._escMd(formatEntryHeader(e, settings)), heading, lastChildOf(heading.guid)) === false) return;
             items = await record.getLineItems(false);
             const turn = items.find((li) => li.parent_guid === heading.guid && !before.has(li.guid)) || null;
-            if (turn) await record.insertFromMarkdown(this._escMd(e.text), turn, null);
+            if (turn) {
+              tracked.push(turn.guid);
+              const beforeText = new Set(items.map((li) => li.guid));
+              await record.insertFromMarkdown(this._escMd(e.text), turn, null);
+              items = await record.getLineItems(false);
+              for (const li of items) if (!beforeText.has(li.guid)) tracked.push(li.guid);
+            }
           }
         }
         try {
           localStorage.setItem(countKey, String(entries.length));
         } catch {
         }
+        try {
+          localStorage.setItem(trackKey, JSON.stringify(tracked));
+        } catch {
+        }
         this._log("transcript streamed to body", { newTurns: fresh.length, total: entries.length, layout: settings.transcriptLayout });
       } catch (err) {
         this._log("transcript stream failed", { error: this._errorMessage(err) });
+      }
+    }
+    /**
+     * At meeting end, regroup the live (un-sectioned) transcript into collapsible topic sections:
+     * delete OUR streamed lines (tracked in `tx-guids`, so notes the user typed in the transcript area
+     * are never touched), then rebuild under the same 🎙️ Transcript heading as
+     * `section (bold) → turn header → text`. Guarded once via `tx-sectioned`. Skips silently if there
+     * are no sections/entries, leaving the live transcript exactly as it was.
+     */
+    async _reorganizeTranscriptBySections(record, entries, sections) {
+      if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.getLineItems !== "function") return;
+      if (!Array.isArray(sections) || !sections.length || !Array.isArray(entries) || !entries.length) return;
+      const headKey = this._bodyKey(record, "tx-head");
+      const trackKey = this._bodyKey(record, "tx-guids");
+      const countKey = this._bodyKey(record, "tx-count");
+      const sectionedKey = this._bodyKey(record, "tx-sectioned");
+      try {
+        try {
+          if (localStorage.getItem(sectionedKey) === "1") return;
+        } catch {
+        }
+        let headGuid = "";
+        try {
+          headGuid = localStorage.getItem(headKey) || "";
+        } catch {
+        }
+        if (!headGuid) return;
+        let items = await record.getLineItems(false);
+        const heading = items.find((li) => li.guid === headGuid) || null;
+        if (!heading) return;
+        let tracked = [];
+        try {
+          tracked = JSON.parse(localStorage.getItem(trackKey) || "[]") || [];
+        } catch {
+        }
+        await this._deleteTrackedDepthFirst(record, tracked);
+        items = await record.getLineItems(false);
+        const settings = this._settings;
+        const newTracked = [];
+        const lastChildOf = /* @__PURE__ */ __name((parentGuid) => {
+          const kids = items.filter((li) => li.parent_guid === parentGuid);
+          return kids.length ? kids[kids.length - 1] : null;
+        }, "lastChildOf");
+        for (const sec of sections) {
+          const secEntries = entries.slice(sec.start, sec.end + 1).filter(Boolean);
+          if (!secEntries.length) continue;
+          const label = formatSectionHeading(sec.title, secEntries[0], secEntries[secEntries.length - 1], settings);
+          const before = new Set(items.map((li) => li.guid));
+          if (await record.insertFromMarkdown(`**${this._escMd(label)}**`, heading, lastChildOf(heading.guid)) === false) continue;
+          items = await record.getLineItems(false);
+          const secNode = items.find((li) => li.parent_guid === heading.guid && !before.has(li.guid)) || null;
+          if (!secNode) continue;
+          newTracked.push(secNode.guid);
+          for (const e of secEntries) {
+            const beforeTurn = new Set(items.map((li) => li.guid));
+            if (await record.insertFromMarkdown(this._escMd(formatEntryHeader(e, settings)), secNode, lastChildOf(secNode.guid)) === false) continue;
+            items = await record.getLineItems(false);
+            const turn = items.find((li) => li.parent_guid === secNode.guid && !beforeTurn.has(li.guid)) || null;
+            if (turn) {
+              newTracked.push(turn.guid);
+              const beforeText = new Set(items.map((li) => li.guid));
+              await record.insertFromMarkdown(this._escMd(e.text), turn, null);
+              items = await record.getLineItems(false);
+              for (const li of items) if (!beforeText.has(li.guid)) newTracked.push(li.guid);
+            }
+          }
+        }
+        try {
+          localStorage.setItem(trackKey, JSON.stringify(newTracked));
+        } catch {
+        }
+        try {
+          localStorage.setItem(countKey, String(entries.length));
+        } catch {
+        }
+        try {
+          localStorage.setItem(sectionedKey, "1");
+        } catch {
+        }
+        this._log("transcript reorganized by sections", { sections: sections.length });
+      } catch (err) {
+        this._log("transcript reorganize failed", { error: this._errorMessage(err) });
+      }
+    }
+    /**
+     * Delete the given tracked line-item guids, leaves first (delete() rejects an item with children).
+     * Re-fetches each pass and stops the moment a pass makes NO progress — so a tracked turn that holds
+     * an UNtracked child (a note the user typed under it) is left intact rather than force-removed.
+     */
+    async _deleteTrackedDepthFirst(record, trackedGuids) {
+      const remaining = new Set(trackedGuids);
+      for (let pass = 0; pass < 60 && remaining.size; pass++) {
+        const items = await record.getLineItems(false);
+        const byGuid = new Map(items.map((li) => [li.guid, li]));
+        let progressed = false;
+        for (const guid of Array.from(remaining)) {
+          const li = byGuid.get(guid);
+          if (!li) {
+            remaining.delete(guid);
+            progressed = true;
+            continue;
+          }
+          let ok = false;
+          try {
+            ok = typeof li.delete === "function" ? await li.delete() : false;
+          } catch {
+            ok = false;
+          }
+          if (ok) {
+            remaining.delete(guid);
+            progressed = true;
+          }
+        }
+        if (!progressed) break;
       }
     }
     /**
@@ -5021,6 +5187,21 @@ ${transcriptText}`
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("utteranceTimestamps", !!event.target.checked, { rerender: true }), "onChange")
             })
           ]
+        }),
+        section({
+          label: "AI topic sections",
+          hint: "Group the finished transcript into named, time-ranged topic sections that track the summary. Uses your Claude key; sections appear when the meeting ends.",
+          body: [
+            optionRow({
+              type: "checkbox",
+              name: "transcriptSections",
+              label: "Group into topic sections",
+              desc: "When the meeting ends, reorganize the live transcript into collapsible topic sections. The live feed during the meeting is unchanged.",
+              checked: !!draft.transcriptSections,
+              onChange: /* @__PURE__ */ __name((event) => this._updateSetting("transcriptSections", !!event.target.checked, { rerender: true }), "onChange")
+            }),
+            this._selectInput("Section heading style", "sectionHeadingStyle", SECTION_HEADING_STYLES)
+          ]
         })
       ];
     }
@@ -5657,6 +5838,23 @@ ${transcriptText}`
     return settings.timestampPosition === "back" ? `${entry.speaker} [${stamp}]` : `[${stamp}] ${entry.speaker}`;
   }
   __name(formatEntryHeader, "formatEntryHeader");
+  function formatSectionHeading(title, firstEntry, lastEntry, settings) {
+    const a = entryStamp(firstEntry, settings);
+    const b = entryStamp(lastEntry, settings);
+    const range = a && b ? a === b ? a : `${a}\u2013${b}` : a || b || "";
+    if (!range) return title;
+    switch (settings.sectionHeadingStyle) {
+      case "dot":
+        return `${title} \u2022 ${range}`;
+      case "bracket":
+        return `${title} [${range}]`;
+      case "rangefirst":
+        return `${range} | ${title}`;
+      default:
+        return `${title} | ${range}`;
+    }
+  }
+  __name(formatSectionHeading, "formatSectionHeading");
   function entriesToText(entries, settings) {
     if (settings.transcriptLayout === "inline") {
       return entries.map((e) => `${formatEntryHeader(e, settings)}: ${e.text}`).join("\n");
@@ -5703,6 +5901,63 @@ ${transcriptText}`
     return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   }
   __name(sanitizeSummaryMarkdown, "sanitizeSummaryMarkdown");
+  function sectionJsonInstruction(count) {
+    return [
+      "Additionally, divide the transcript into a handful of topic sections in time order.",
+      `Each line below is numbered like [N], from 0 to ${count - 1}.`,
+      "Respond with ONLY a JSON object \u2014 no code fence, no text before or after \u2014 of the form:",
+      '{"summary": "<the markdown summary that follows the instructions above, as one JSON string>", "sections": [{"title": "<short topic label, no timestamps>", "start": <first line number>, "end": <last line number>}]}',
+      "Sections must be in order, must not overlap, and together must cover every line from 0 to " + (count - 1) + ". Aim for 3\u20138 sections."
+    ].join("\n");
+  }
+  __name(sectionJsonInstruction, "sectionJsonInstruction");
+  function parseSummaryAndSections(raw, count) {
+    const text = String(raw || "").trim();
+    const unfenced = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    let obj = null;
+    try {
+      obj = JSON.parse(unfenced);
+    } catch {
+    }
+    if (!obj) {
+      const start = unfenced.indexOf("{");
+      const end = unfenced.lastIndexOf("}");
+      if (start >= 0 && end > start) {
+        try {
+          obj = JSON.parse(unfenced.slice(start, end + 1));
+        } catch {
+        }
+      }
+    }
+    if (!obj || typeof obj !== "object") return { summary: text, sections: [] };
+    const summary = typeof obj.summary === "string" && obj.summary.trim() ? obj.summary : text;
+    return { summary, sections: normalizeSections(Array.isArray(obj.sections) ? obj.sections : [], count) };
+  }
+  __name(parseSummaryAndSections, "parseSummaryAndSections");
+  function normalizeSections(rawSections, count) {
+    const out = [];
+    for (const s of rawSections) {
+      if (!s || typeof s !== "object") continue;
+      const title = String(s.title || "").trim();
+      let start = Math.floor(Number(s.start));
+      let end = Math.floor(Number(s.end));
+      if (!title || !Number.isFinite(start) || !Number.isFinite(end)) continue;
+      start = Math.max(0, Math.min(start, count - 1));
+      end = Math.max(start, Math.min(end, count - 1));
+      out.push({ title, start, end });
+    }
+    out.sort((a, b) => a.start - b.start);
+    const clean = [];
+    let cursor = -1;
+    for (const s of out) {
+      if (s.start <= cursor) s.start = cursor + 1;
+      if (s.start > s.end || s.start > count - 1) continue;
+      clean.push(s);
+      cursor = s.end;
+    }
+    return clean;
+  }
+  __name(normalizeSections, "normalizeSections");
   function firstStringVal(...values) {
     for (const v of values) {
       if (typeof v === "string" && v.trim()) return v.trim();

@@ -246,6 +246,11 @@ async function createSummary(request, env) {
 	if (!apiKey) return json({ error: 'Anthropic API key is required' }, 400);
 	if (!body.transcriptText) return json({ error: 'transcriptText is required' }, 400);
 	const prompt = body.summaryPrompt || 'Summarize this meeting transcript.';
+	// Caller-supplied token cap (topic-sectioning needs more headroom than a plain summary), clamped so a
+	// bad value can't run up a huge bill. Falls back to the old default, so older plugins are unaffected.
+	const maxTokens = Number(body.maxTokens) > 0
+		? Math.min(Math.floor(Number(body.maxTokens)), 8000)
+		: (Number(env.MAX_TOKENS) || 1400);
 	const response = await fetchImpl(env)('https://api.anthropic.com/v1/messages', {
 		method: 'POST',
 		headers: {
@@ -255,7 +260,7 @@ async function createSummary(request, env) {
 		},
 		body: JSON.stringify({
 			model: body.anthropicModel || env.ANTHROPIC_MODEL || 'claude-sonnet-4-5',
-			max_tokens: 1400,
+			max_tokens: maxTokens,
 			messages: [{
 				role: 'user',
 				content: `${prompt}\n\nTranscript:\n${body.transcriptText}`,
