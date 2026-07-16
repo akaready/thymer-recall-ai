@@ -3647,11 +3647,13 @@ ${report}
   var timestampStyles = new Set(TRANSCRIPT_TIMESTAMP_GROUPS.flatMap((group) => group.options.map(([value]) => value)));
   var rangeStyles = new Set(SECTION_RANGE_STYLE_GROUPS.flatMap((group) => group.options.map(([value]) => value)));
   function normalizeTranscriptTimestampStyle(value) {
-    return timestampStyles.has(value) ? value : "clock";
+    const style = String(value || "");
+    return timestampStyles.has(style) ? style : "clock";
   }
   __name(normalizeTranscriptTimestampStyle, "normalizeTranscriptTimestampStyle");
   function normalizeSectionRangeStyle(value) {
-    return rangeStyles.has(value) ? value : "clock";
+    const style = String(value || "");
+    return rangeStyles.has(style) ? style : "clock";
   }
   __name(normalizeSectionRangeStyle, "normalizeSectionRangeStyle");
   function formatClockTime(iso, style = "clock") {
@@ -3705,7 +3707,7 @@ ${report}
   __name(formatRelativeTime, "formatRelativeTime");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.10";
+  var PLUGIN_VERSION = "1.22.11";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -6638,42 +6640,48 @@ ${transcriptText}` }]
     }
     _tabCosts() {
       const recall = estimateRecallCost(60);
-      const selectedModel = String(this._draft.anthropicModel || DEFAULT_SETTINGS.anthropicModel).trim();
-      const row = /* @__PURE__ */ __name((label, ...details) => h(
+      const row = /* @__PURE__ */ __name((label, estimate, ...details) => h(
         "div",
         { class: `${ROOT_CLASS}-cost-row` },
         h("span", { class: `${ROOT_CLASS}-field-label` }, label),
-        h("span", { class: `${ROOT_CLASS}-field-hint` }, ...details)
+        h("span", { class: `${ROOT_CLASS}-field-hint ${ROOT_CLASS}-cost-estimate` }, estimate),
+        h("span", { class: `${ROOT_CLASS}-field-hint ${ROOT_CLASS}-cost-detail` }, ...details)
       ), "row");
       const storage = recallStorageCostNote(this._draft.recordingRetention).replace(/^(?:Ongoing )?Storage:\s*/i, "").replace(/^Storage\s+/i, "");
       return [section({
         label: "API cost estimates",
         hint: "One active meeting hour at public list prices. Estimates\u2014not billing.",
         body: [
-          row(
-            "Recall.ai pay-as-you-go",
-            `~${formatEstimatedUsd(recall.totalUsd)} per active bot-hour (${formatEstimatedUsd(recall.recordingUsd)} recording + ${formatEstimatedUsd(recall.transcriptionUsd)} transcription; waiting-room time counts).`
-          ),
-          ...CLAUDE_MODELS.map(([model, label]) => {
-            const estimate = estimateClaudeSummaryCost(model);
-            const rate = `$${estimate.inputPerMillionUsd}/$${estimate.outputPerMillionUsd} per million input/output tokens`;
-            return row(
-              `${label.split(" \u2014 ")[0]}${model === selectedModel ? " \u2014 selected" : ""}`,
-              `~${formatEstimatedUsd(estimate.totalUsd)} per meeting hour (${rate}).`
-            );
-          }),
-          row("Storage", storage),
-          row(
-            "Estimate basis",
-            `About ${Math.round(CLAUDE_ESTIMATE_INPUT_TOKENS / 1e3)}k input and ${CLAUDE_ESTIMATE_OUTPUT_TOKENS.toLocaleString()} output tokens; Sonnet 5 and Opus 4.8 use a 1.3\xD7 tokenizer adjustment.`
-          ),
-          row(
-            "Rates checked",
-            `${PRICING_VERIFIED_DATE} \xB7 `,
-            h("a", { href: "https://www.recall.ai/pricing", target: "_blank", rel: "noopener noreferrer" }, "Recall pricing"),
-            " \xB7 ",
-            h("a", { href: "https://platform.claude.com/docs/en/about-claude/pricing", target: "_blank", rel: "noopener noreferrer" }, "Claude pricing"),
-            ". Actual charges vary by plan and usage."
+          h(
+            "div",
+            { class: `${ROOT_CLASS}-cost-grid` },
+            row(
+              "Recall.ai pay-as-you-go",
+              `~${formatEstimatedUsd(recall.totalUsd)} / active bot-hour`,
+              `${formatEstimatedUsd(recall.recordingUsd)} recording + ${formatEstimatedUsd(recall.transcriptionUsd)} transcription \xB7 Waiting-room time counts.`
+            ),
+            ...CLAUDE_MODELS.map(([model, label]) => {
+              const estimate = estimateClaudeSummaryCost(model);
+              return row(
+                label.split(" \u2014 ")[0],
+                `~${formatEstimatedUsd(estimate.totalUsd)} / meeting hour`,
+                `$${estimate.inputPerMillionUsd} input / $${estimate.outputPerMillionUsd} output per million tokens`
+              );
+            }),
+            row("Storage", storage.startsWith("$0 ") ? "$0" : "", storage.replace(/^\$0\s+/, "")),
+            row(
+              "Estimate basis",
+              `${Math.round(CLAUDE_ESTIMATE_INPUT_TOKENS / 1e3)}k input \xB7 ${CLAUDE_ESTIMATE_OUTPUT_TOKENS.toLocaleString()} output tokens`,
+              "Sonnet 5 and Opus 4.8 use a 1.3\xD7 tokenizer adjustment."
+            ),
+            row(
+              "Rates checked",
+              PRICING_VERIFIED_DATE,
+              h("a", { href: "https://www.recall.ai/pricing", target: "_blank", rel: "noopener noreferrer" }, "Recall pricing"),
+              " \xB7 ",
+              h("a", { href: "https://platform.claude.com/docs/en/about-claude/pricing", target: "_blank", rel: "noopener noreferrer" }, "Claude pricing"),
+              " \xB7 Actual charges vary by plan and usage."
+            )
           )
         ]
       })];
@@ -7423,12 +7431,18 @@ ${transcriptText}` }]
 				text-decoration: underline;
 				text-underline-offset: 2px;
 			}
-			.${ROOT_CLASS}-panel .${ROOT_CLASS}-cost-row {
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-cost-grid {
 				display: grid;
-				grid-template-columns: max-content minmax(0, 1fr);
+				grid-template-columns: max-content max-content minmax(0, 1fr);
 				align-items: baseline;
-				column-gap: var(--tps-space-3);
-				row-gap: var(--tps-space-1);
+				column-gap: var(--tps-space-4);
+				row-gap: var(--tps-space-3);
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-cost-row {
+				display: contents;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-cost-estimate {
+				white-space: nowrap;
 			}
 			/* The native file input is hidden, not removed \u2014 it still does the picking. */
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-file-native {
