@@ -27,6 +27,7 @@ export default {
 			if (url.pathname === '/api/recall/bots') return await createRecallBot(request, env);
 			if (url.pathname === '/api/recall/bot') return await getRecallBot(request, env);
 			if (url.pathname === '/api/recall/transcript') return await getRecallTranscript(request, env);
+			if (url.pathname === '/api/recall/participants') return await getRecallParticipants(request, env);
 			if (url.pathname === '/api/recall/leave') return await leaveRecallCall(request, env);
 			if (url.pathname === '/api/recall/realtime') return await receiveRealtimeTranscript(request, env);
 			if (url.pathname === '/api/anthropic/summary') return await createSummary(request, env);
@@ -178,6 +179,29 @@ async function getRecallTranscript(request, env) {
 		bot: botResponse.ok ? bot : null,
 		debug,
 	}, 202);
+}
+
+/** Download the finalized participant roster, including attendees who never spoke. */
+async function getRecallParticipants(request, env) {
+	const body = await readJson(request);
+	const apiKey = recallApiKey(body, env);
+	if (!apiKey) return json({ error: 'Recall API key is required' }, 400);
+	if (!body.botId) return json({ error: 'botId is required' }, 400);
+	const botResponse = await recallFetch(env, body.recallRegion, `/api/v1/bot/${encodeURIComponent(body.botId)}/`, {
+		method: 'GET',
+		headers: recallHeaders(apiKey, false),
+	});
+	const bot = await safeJson(botResponse);
+	if (!botResponse.ok) return json({ error: recallError(bot, botResponse.status), detail: bot }, botResponse.status);
+
+	const direct = await fetchParticipantDownloads(env, participantDownloadUrls(bot));
+	if (direct.length) return json({ participants: direct, source: 'bot.media_shortcuts' });
+
+	const listedUrls = await participantDownloadUrlsByRecording(env, body.recallRegion, apiKey, bot);
+	const listed = await fetchParticipantDownloads(env, listedUrls);
+	if (listed.length) return json({ participants: listed, source: 'participant_events.list' });
+
+	return json({ participants: [], pending: true }, 202);
 }
 
 async function receiveRealtimeTranscript(request, env) {
@@ -471,6 +495,52 @@ function transcriptDownloadUrl(bot) {
 		if (typeof url === 'string' && /^https:\/\//i.test(url)) return url;
 	}
 	return '';
+}
+
+function participantDownloadUrls(bot) {
+	const urls = [];
+	const recordings = Array.isArray(bot && bot.recordings) ? bot.recordings : [];
+	for (const recording of recordings) {
+		const artifact = recording && recording.media_shortcuts && recording.media_shortcuts.participant_events;
+		const url = artifact && artifact.data && artifact.data.participants_download_url;
+		if (typeof url === 'string' && /^https:\/\//i.test(url) && !urls.includes(url)) urls.push(url);
+	}
+	return urls;
+}
+
+async function participantDownloadUrlsByRecording(env, region, apiKey, bot) {
+	const urls = [];
+	const recordings = Array.isArray(bot && bot.recordings) ? bot.recordings : [];
+	for (const recording of recordings) {
+		if (!recording || !recording.id) continue;
+		const response = await recallFetch(env, region, `/api/v1/participant_events/?recording_id=${encodeURIComponent(recording.id)}`, {
+			method: 'GET',
+			headers: recallHeaders(apiKey, false),
+		});
+		const data = await safeJson(response);
+		if (!response.ok) continue;
+		const rows = Array.isArray(data && data.results) ? data.results : Array.isArray(data) ? data : [];
+		for (const row of rows) {
+			const url = row && row.data && row.data.participants_download_url;
+			if (typeof url === 'string' && /^https:\/\//i.test(url) && !urls.includes(url)) urls.push(url);
+		}
+	}
+	return urls;
+}
+
+async function fetchParticipantDownloads(env, urls) {
+	const participants = [];
+	for (const url of Array.isArray(urls) ? urls : []) {
+		try {
+			const response = await fetchImpl(env)(url, { method: 'GET', headers: { accept: 'application/json' } });
+			const data = await safeJson(response);
+			if (!response.ok || !Array.isArray(data)) continue;
+			participants.push(...data.filter(participant => participant && typeof participant === 'object'));
+		} catch {
+			// Try the next recording/artifact; the plugin has a transcript-speaker fallback.
+		}
+	}
+	return participants;
 }
 
 async function fetchTranscriptDownload(env, downloadUrl) {

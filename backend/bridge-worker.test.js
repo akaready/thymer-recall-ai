@@ -253,6 +253,65 @@ test('transcript polling returns pending when final transcript is not ready', as
 	assert.deepEqual(json.results, []);
 });
 
+test('participant polling downloads the finalized roster from media shortcuts', async () => {
+	const calls = [];
+	const response = await worker.fetch(new Request('https://bridge.test/api/recall/participants', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ botId: 'bot_people', recallApiKey: 'key', recallRegion: 'us-west-2' }),
+	}), {
+		__fetch: async (url) => {
+			calls.push(url);
+			if (url === 'https://us-west-2.recall.ai/api/v1/bot/bot_people/') {
+				return Response.json({ recordings: [{ media_shortcuts: { participant_events: {
+					data: { participants_download_url: 'https://download.recall.test/participants.json' },
+				} } }] });
+			}
+			if (url === 'https://download.recall.test/participants.json') {
+				return Response.json([{ id: 1, name: 'Ada' }, { id: 2, name: 'Silent attendee' }]);
+			}
+			return Response.json({ detail: 'unexpected' }, { status: 500 });
+		},
+	});
+	const json = await response.json();
+
+	assert.equal(response.status, 200);
+	assert.equal(json.source, 'bot.media_shortcuts');
+	assert.deepEqual(json.participants.map(p => p.name), ['Ada', 'Silent attendee']);
+	assert.deepEqual(calls, [
+		'https://us-west-2.recall.ai/api/v1/bot/bot_people/',
+		'https://download.recall.test/participants.json',
+	]);
+});
+
+test('participant polling falls back to listing participant events by recording', async () => {
+	const response = await worker.fetch(new Request('https://bridge.test/api/recall/participants', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ botId: 'bot_people_list', recallApiKey: 'key', recallRegion: 'eu-central-1' }),
+	}), {
+		__fetch: async (url) => {
+			if (url === 'https://eu-central-1.recall.ai/api/v1/bot/bot_people_list/') {
+				return Response.json({ recordings: [{ id: 'recording_people', media_shortcuts: {} }] });
+			}
+			if (url === 'https://eu-central-1.recall.ai/api/v1/participant_events/?recording_id=recording_people') {
+				return Response.json({ results: [{ data: {
+					participants_download_url: 'https://download.recall.test/listed-participants.json',
+				} }] });
+			}
+			if (url === 'https://download.recall.test/listed-participants.json') {
+				return Response.json([{ id: 7, name: 'Grace', email: 'grace@example.com' }]);
+			}
+			return Response.json({ detail: 'unexpected' }, { status: 500 });
+		},
+	});
+	const json = await response.json();
+
+	assert.equal(response.status, 200);
+	assert.equal(json.source, 'participant_events.list');
+	assert.equal(json.participants[0].email, 'grace@example.com');
+});
+
 test('create bot can attach jpeg output image from URL', async () => {
 	let forwarded = null;
 	const response = await worker.fetch(new Request('https://bridge.test/api/recall/bots', {

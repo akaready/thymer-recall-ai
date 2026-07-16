@@ -154,7 +154,7 @@ If you'd rather use the CLI: rename `wrangler.toml.example` to `wrangler.toml`, 
 
 ## For the curious — what the bridge exposes
 
-`POST /api/recall/bots`, `POST /api/recall/bot`, `POST /api/recall/transcript`,
+`POST /api/recall/bots`, `POST /api/recall/bot`, `POST /api/recall/transcript`, `POST /api/recall/participants`,
 `POST /api/recall/realtime`, `POST /api/anthropic/summary`, and `GET /health`.
 
 The plugin sends its own Recall/Claude keys with each request and the bridge forwards them.

@@ -2526,6 +2526,17 @@ ${report}
     );
   }
   __name(tabs, "tabs");
+  function button({ label, variant = "ghost", size = "sm", onClick, disabled }) {
+    const cls = ["tps-button", `tps-button--${variant}`];
+    if (size === "md") cls.push("tps-button--md");
+    return h("button", {
+      type: "button",
+      class: cls.join(" "),
+      disabled: !!disabled,
+      onClick
+    }, label);
+  }
+  __name(button, "button");
 
   // ../../shared/plugin-version.js
   function readPluginVersion(conf, fallback = "0.0.1") {
@@ -3144,14 +3155,151 @@ ${report}
   }
   __name(deriveTranscriptTurnAnchors, "deriveTranscriptTurnAnchors");
 
+  // participant-linking.js
+  function normalizeIdentity(value) {
+    return String(value == null ? "" : value).normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  }
+  __name(normalizeIdentity, "normalizeIdentity");
+  function dedupeParticipants(items) {
+    const out = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const raw of Array.isArray(items) ? items : []) {
+      const participant = raw && typeof raw === "object" ? raw : {};
+      const name = String(participant.name || "").trim().replace(/\s+/g, " ");
+      const email = String(participant.email || "").trim().toLocaleLowerCase();
+      if (!name && !email) continue;
+      const key = email ? `email:${email}` : `name:${normalizeIdentity(name)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ ...participant, name, email });
+    }
+    return out;
+  }
+  __name(dedupeParticipants, "dedupeParticipants");
+  function participantsFromTranscriptEntries(entries) {
+    return dedupeParticipants((Array.isArray(entries) ? entries : []).map((entry) => ({
+      ...entry && entry.participant && typeof entry.participant === "object" ? entry.participant : {},
+      name: entry && (entry.participant && entry.participant.name || entry.speaker) || ""
+    })));
+  }
+  __name(participantsFromTranscriptEntries, "participantsFromTranscriptEntries");
+  function participantNames(participants, botName = "") {
+    const excluded = normalizeIdentity(botName);
+    const seen = /* @__PURE__ */ new Set();
+    const names = [];
+    for (const participant of dedupeParticipants(participants)) {
+      const name = String(participant.name || "").trim();
+      const key = normalizeIdentity(name);
+      if (!key || key === excluded || seen.has(key)) continue;
+      seen.add(key);
+      names.push(name);
+    }
+    return names;
+  }
+  __name(participantNames, "participantNames");
+  function isCompatibleAttendeesField(field, personCollectionGuid) {
+    return !!field && String(field.type || "").toLowerCase() === "record" && field.many === true && String(field.filter_colguid || "") === String(personCollectionGuid || "");
+  }
+  __name(isCompatibleAttendeesField, "isCompatibleAttendeesField");
+  function findCompatibleAttendeesField(fields, personCollectionGuid, currentFieldId = "") {
+    const compatible = (Array.isArray(fields) ? fields : []).filter((field) => field && field.active !== false && isCompatibleAttendeesField(field, personCollectionGuid));
+    const current = compatible.find((field) => String(field.id) === String(currentFieldId || ""));
+    if (current) return current;
+    const labelled = compatible.find((field) => normalizeIdentity(field.label) === "attendees");
+    return labelled || (compatible.length === 1 ? compatible[0] : null);
+  }
+  __name(findCompatibleAttendeesField, "findCompatibleAttendeesField");
+  function attendeesFieldIdFor(fields, personCollectionGuid) {
+    const list = Array.isArray(fields) ? fields : [];
+    const canonical = list.find((field) => String(field && field.id || "") === "attendees");
+    if (!canonical || isCompatibleAttendeesField(canonical, personCollectionGuid)) return "attendees";
+    let hash = 2166136261;
+    for (const char of String(personCollectionGuid || "")) {
+      hash ^= char.charCodeAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `attendees_${(hash >>> 0).toString(36)}`;
+  }
+  __name(attendeesFieldIdFor, "attendeesFieldIdFor");
+  function mergeAttendeeGuids(existing, matched) {
+    const out = [];
+    for (const value of [...Array.isArray(existing) ? existing : [], ...Array.isArray(matched) ? matched : []]) {
+      const guid = String(value || "").trim();
+      if (guid && !out.includes(guid)) out.push(guid);
+    }
+    return out;
+  }
+  __name(mergeAttendeeGuids, "mergeAttendeeGuids");
+  function propertyTexts(prop) {
+    const values = [];
+    try {
+      const texts = prop && prop.texts ? prop.texts() : [];
+      if (Array.isArray(texts)) values.push(...texts);
+    } catch {
+    }
+    try {
+      const text = prop && prop.text ? prop.text() : null;
+      if (text != null) values.push(text);
+    } catch {
+    }
+    return values.map((value) => String(value || "").trim()).filter(Boolean);
+  }
+  __name(propertyTexts, "propertyTexts");
+  function matchParticipantsToPeople(participants, records) {
+    const byName = /* @__PURE__ */ new Map();
+    const byEmail = /* @__PURE__ */ new Map();
+    const push = /* @__PURE__ */ __name((map, key, record) => {
+      if (!key) return;
+      const matches = map.get(key) || [];
+      if (!matches.some((item) => item && item.guid === record.guid)) matches.push(record);
+      map.set(key, matches);
+    }, "push");
+    for (const record of Array.isArray(records) ? records : []) {
+      if (!record || !record.guid) continue;
+      let name = "";
+      try {
+        name = record.getName ? record.getName() : "";
+      } catch {
+      }
+      push(byName, normalizeIdentity(name), record);
+      let props = [];
+      try {
+        props = record.getAllProperties ? record.getAllProperties() : [];
+      } catch {
+      }
+      for (const prop of Array.isArray(props) ? props : []) {
+        for (const value of propertyTexts(prop)) {
+          if (value.includes("@")) push(byEmail, value.toLocaleLowerCase(), record);
+        }
+      }
+    }
+    const guids = [];
+    const matchedNames = [];
+    const unmatchedNames = [];
+    for (const participant of dedupeParticipants(participants)) {
+      const emailMatches = participant.email ? byEmail.get(participant.email) || [] : [];
+      const nameMatches = participant.name ? byName.get(normalizeIdentity(participant.name)) || [] : [];
+      const match = emailMatches.length === 1 ? emailMatches[0] : !emailMatches.length && nameMatches.length === 1 ? nameMatches[0] : null;
+      if (match && !guids.includes(match.guid)) {
+        guids.push(match.guid);
+        if (participant.name) matchedNames.push(participant.name);
+      } else if (participant.name) {
+        unmatchedNames.push(participant.name);
+      }
+    }
+    return { guids, matchedNames, unmatchedNames };
+  }
+  __name(matchParticipantsToPeople, "matchParticipantsToPeople");
+
   // plugin.js
-  var PLUGIN_VERSION = "1.20.8";
+  var PLUGIN_VERSION = "1.21.0";
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
     JOIN_AT: "join_at",
     TRANSCRIPT: "transcript",
     SUMMARY: "summary",
+    PARTICIPANT_NAMES: "participant_names",
     BOT_ID: "recall_bot_id",
     STATUS: "recall_status",
     LAST_ERROR: "last_error"
@@ -3161,6 +3309,7 @@ ${report}
     [FIELDS.JOIN_AT]: { id: FIELDS.JOIN_AT, label: "Join At", type: "datetime", icon: "ti-calendar", many: false, read_only: false, active: true },
     [FIELDS.TRANSCRIPT]: { id: FIELDS.TRANSCRIPT, label: "Transcript", type: "text", icon: "ti-file-text", many: false, read_only: false, active: true },
     [FIELDS.SUMMARY]: { id: FIELDS.SUMMARY, label: "Summary", type: "text", icon: "ti-sparkles", many: false, read_only: false, active: true },
+    [FIELDS.PARTICIPANT_NAMES]: { id: FIELDS.PARTICIPANT_NAMES, label: "Participant Names", type: "text", icon: "ti-users", many: false, read_only: false, active: true },
     [FIELDS.BOT_ID]: { id: FIELDS.BOT_ID, label: "Bot ID", type: "text", icon: "ti-robot", many: false, read_only: false, active: true },
     [FIELDS.STATUS]: { id: FIELDS.STATUS, label: "Bot Status", type: "text", icon: "ti-activity", many: false, read_only: false, active: true },
     [FIELDS.LAST_ERROR]: { id: FIELDS.LAST_ERROR, label: "Last Error", type: "text", icon: "ti-alert-triangle", many: false, read_only: false, active: true }
@@ -3169,7 +3318,8 @@ ${report}
     meetingUrlFieldId: FIELDS.MEETING_URL,
     joinAtFieldId: FIELDS.JOIN_AT,
     transcriptFieldId: FIELDS.TRANSCRIPT,
-    summaryFieldId: FIELDS.SUMMARY
+    summaryFieldId: FIELDS.SUMMARY,
+    participantNamesFieldId: FIELDS.PARTICIPANT_NAMES
   });
   var CREATE_FIELD_OPTION = "__create__";
   var ROOT_CLASS = "plg-recall-ai";
@@ -3204,6 +3354,9 @@ ${report}
     joinAtFieldId: "",
     transcriptFieldId: "",
     summaryFieldId: "",
+    participantNamesFieldId: "",
+    personCollectionGuid: "",
+    attendeesFieldId: "",
     botImageUrl: "",
     botImageData: "",
     botImageName: "",
@@ -3265,6 +3418,9 @@ ${report}
       joinAtFieldId: str("joinAtFieldId"),
       transcriptFieldId: str("transcriptFieldId"),
       summaryFieldId: str("summaryFieldId"),
+      participantNamesFieldId: str("participantNamesFieldId"),
+      personCollectionGuid: str("personCollectionGuid"),
+      attendeesFieldId: str("attendeesFieldId"),
       botImageUrl: str("botImageUrl"),
       botImageData: str("botImageData"),
       botImageName: str("botImageName"),
@@ -3449,6 +3605,7 @@ ${report}
       });
       this._safe("register settings panel", () => this._registerSettingsPanel());
       this._safe("attach settings lifecycle", () => this._registerSettingsLifecycle());
+      this._safe("load workspace collections", () => void this._loadWorkspaceCollections());
       this._safe("heal mounted panel", () => {
         const staleRoot = document.querySelector(".plg-recall-ai-panel");
         if (staleRoot && staleRoot.parentElement) {
@@ -3487,6 +3644,10 @@ ${report}
       this._recordsByGuid = /* @__PURE__ */ new Map();
       this._pollers = /* @__PURE__ */ new Map();
       this._syncInFlight = /* @__PURE__ */ new Map();
+      this._workspaceCollections = [];
+      this._workspaceCollectionsLoaded = false;
+      this._workspaceCollectionsPromise = null;
+      this._attendeesFieldCreateInFlight = null;
       this._autoScheduled = /* @__PURE__ */ new Set();
       this._activeRecordGuid = "";
       this._settingsStore = createSettingsStore(this, {
@@ -3675,6 +3836,37 @@ ${report}
         return "this collection";
       }
     }
+    /** Cache collection API handles for the optional People relation setup. */
+    async _loadWorkspaceCollections(force = false) {
+      if (this._workspaceCollectionsPromise && !force) return this._workspaceCollectionsPromise;
+      const task = (async () => {
+        try {
+          const list = await this.data.getAllCollections();
+          this._workspaceCollections = (Array.isArray(list) ? list : []).filter((collection) => collection && collection.getGuid && collection.getGuid() !== this._selfGuid()).sort((a, b) => String(a.getName ? a.getName() : "").localeCompare(String(b.getName ? b.getName() : "")));
+          this._workspaceCollectionsLoaded = true;
+        } catch (err) {
+          this._workspaceCollectionsLoaded = true;
+          this._log("workspace collections unavailable", { error: this._errorMessage(err) });
+        }
+        if (this._panelEl && document.contains(this._panelEl)) this._renderPanel();
+        return this._workspaceCollections;
+      })();
+      this._workspaceCollectionsPromise = task;
+      try {
+        return await task;
+      } finally {
+        if (this._workspaceCollectionsPromise === task) this._workspaceCollectionsPromise = null;
+      }
+    }
+    _collectionByGuid(guid) {
+      return (this._workspaceCollections || []).find((collection) => {
+        try {
+          return String(collection.getGuid()) === String(guid || "");
+        } catch {
+          return false;
+        }
+      }) || null;
+    }
     _registerSettingsPanel() {
       this._commandItem = this.ui.addCommandPaletteCommand({
         label: "Plugin: Meetings",
@@ -3749,6 +3941,8 @@ ${report}
       for (const poller of this._pollers && this._pollers.values ? this._pollers.values() : []) clearInterval(poller.timer);
       if (this._pollers && this._pollers.clear) this._pollers.clear();
       if (this._syncInFlight && this._syncInFlight.clear) this._syncInFlight.clear();
+      this._workspaceCollectionsPromise = null;
+      this._attendeesFieldCreateInFlight = null;
       this._safe("strip inline buttons", () => this._stripInlineButtons());
     }
     async _openPanel() {
@@ -4302,6 +4496,9 @@ ${report}
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._log("transcript pending", { botId, state: describeTranscriptState(transcript, bot) });
         }
+        if (ended && finalTranscriptReady) {
+          await this._syncMeetingAttendees(record, botId, entries);
+        }
         if (ended && summarize && this._settings.autoSummarize && !hasSummary) {
           if (!finalTranscriptReady) {
             this._setField(record, FIELDS.STATUS, "processing transcript");
@@ -4351,6 +4548,89 @@ ${report}
       const json = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(recallError(json, response.status));
       return json;
+    }
+    async _fetchFinalParticipants(botId, entries) {
+      let participants = [];
+      let source = "transcript";
+      if (this._bridgeUrl()) {
+        try {
+          const result = await this._bridgeJson("/api/recall/participants", {
+            recallApiKey: this._settings.recallApiKey,
+            recallRegion: this._settings.recallRegion,
+            botId
+          });
+          if (result && Array.isArray(result.participants) && result.participants.length) {
+            participants = result.participants;
+            source = result.source || "participant artifact";
+          }
+        } catch (err) {
+          this._log("participant artifact unavailable; using transcript speakers", { error: this._errorMessage(err) });
+        }
+      }
+      if (!participants.length) participants = participantsFromTranscriptEntries(entries);
+      return { participants: dedupeParticipants(participants), source };
+    }
+    /** Save raw names and attach only confident matches to the explicitly bound People relation. */
+    async _syncMeetingAttendees(record, botId, entries) {
+      try {
+        const { participants, source } = await this._fetchFinalParticipants(botId, entries);
+        const names = participantNames(participants, this._settings.botName || DEFAULT_SETTINGS.botName);
+        if (names.length) this._setMappedField(record, FIELDS.PARTICIPANT_NAMES, names.join("\n"));
+        const botIdentity = normalizeIdentity(this._settings.botName || DEFAULT_SETTINGS.botName);
+        const matchable = participants.filter((participant) => {
+          const name = normalizeIdentity(participant && participant.name);
+          return name !== botIdentity && (!!name || !!String(participant && participant.email || "").trim());
+        });
+        const personCollectionGuid = String(this._settings.personCollectionGuid || "").trim();
+        const attendeesFieldId = String(this._settings.attendeesFieldId || "").trim();
+        if (!personCollectionGuid || !attendeesFieldId || !matchable.length) {
+          this._log("participant names saved", { source, names: names.length, peopleLinking: false });
+          return;
+        }
+        const field = this._fieldById(attendeesFieldId);
+        if (!isCompatibleAttendeesField(field, personCollectionGuid)) {
+          this._log("people linking skipped: relation binding is missing or incompatible", { attendeesFieldId, personCollectionGuid });
+          return;
+        }
+        let peopleCollection = this._collectionByGuid(personCollectionGuid);
+        if (!peopleCollection) {
+          await this._loadWorkspaceCollections(true);
+          peopleCollection = this._collectionByGuid(personCollectionGuid);
+        }
+        if (!peopleCollection || typeof peopleCollection.getAllRecords !== "function") {
+          this._log("people linking skipped: People collection is unavailable", { personCollectionGuid });
+          return;
+        }
+        const people = await peopleCollection.getAllRecords();
+        const matched = matchParticipantsToPeople(matchable, people);
+        const prop = this._prop(record, attendeesFieldId);
+        if (!prop || typeof prop.set !== "function") return;
+        const existing = [];
+        try {
+          for (const linked of prop.linkedRecords ? prop.linkedRecords() : []) {
+            if (linked && linked.guid && !existing.includes(linked.guid)) existing.push(linked.guid);
+          }
+        } catch {
+        }
+        try {
+          for (const value of prop.texts ? prop.texts() : []) {
+            const guid = String(value || "").trim();
+            if (guid && !existing.includes(guid)) existing.push(guid);
+          }
+        } catch {
+        }
+        const next = mergeAttendeeGuids(existing, matched.guids);
+        if (next.length) prop.set(next);
+        this._log("participants linked", {
+          source,
+          names: names.length,
+          matched: matched.guids.length,
+          unmatched: matched.unmatchedNames.length,
+          preserved: existing.length
+        });
+      } catch (err) {
+        this._log("participant linking failed without blocking meeting finalization", { error: this._errorMessage(err) });
+      }
     }
     async _summarize(record, transcriptText, entries, { deferTranscriptBody = false } = {}) {
       if (!this._settings.anthropicApiKey) {
@@ -5192,6 +5472,7 @@ ${transcriptText}` }]
       if (field === FIELDS.JOIN_AT) return "joinAtFieldId";
       if (field === FIELDS.TRANSCRIPT) return "transcriptFieldId";
       if (field === FIELDS.SUMMARY) return "summaryFieldId";
+      if (field === FIELDS.PARTICIPANT_NAMES) return "participantNamesFieldId";
       return "";
     }
     _mappedFieldId(field) {
@@ -5515,8 +5796,77 @@ ${transcriptText}` }]
             ),
             this._setupSteps()
           ]
-        })
+        }),
+        this._peopleLinkingSection()
       ];
+    }
+    _peopleLinkingSection() {
+      const targetGuid = String(this._draft.personCollectionGuid || "");
+      const collectionOptions = [["", this._workspaceCollectionsLoaded ? "Do not link People" : "Loading collections\u2026"]];
+      for (const collection of this._workspaceCollections || []) {
+        let guid = "";
+        let name = "";
+        try {
+          guid = collection.getGuid();
+        } catch {
+        }
+        try {
+          name = collection.getName();
+        } catch {
+        }
+        if (guid) collectionOptions.push([guid, name || guid]);
+      }
+      if (targetGuid && !collectionOptions.some(([value]) => value === targetGuid)) {
+        collectionOptions.push([targetGuid, `${targetGuid} (unavailable)`]);
+      }
+      const compatible = targetGuid ? this._collectionFields().filter((field) => isCompatibleAttendeesField(field, targetGuid)) : [];
+      const fieldOptions = [["", targetGuid ? "Choose a relation property" : "Choose a People collection first"]];
+      for (const field of compatible) fieldOptions.push([field.id, `${field.label || field.id} (${field.id})`]);
+      const currentFieldId = String(this._draft.attendeesFieldId || "");
+      if (currentFieldId && !fieldOptions.some(([value]) => value === currentFieldId)) {
+        fieldOptions.push([currentFieldId, `${currentFieldId} (incompatible)`]);
+      }
+      const targetCollection = this._collectionByGuid(targetGuid);
+      const canCreate = !!targetGuid && !!targetCollection && !compatible.length && !this._attendeesFieldCreateInFlight;
+      const actionHint = !targetGuid ? "Choose the collection that contains your Person records." : !targetCollection ? "That collection is unavailable. Refresh the list or choose another collection." : compatible.length ? "A compatible relation already exists. Bind it above; Recall will not create a duplicate." : "Creates one multi-record Attendees relation restricted to this People collection. The schema is checked again before creation.";
+      return section({
+        label: "People linking (optional)",
+        hint: "Keep every participant name as text, and attach confident matches to existing Person records. Recall never creates Person records.",
+        body: [
+          this._selectInput("People collection", "personCollectionGuid", collectionOptions, {
+            onChange: /* @__PURE__ */ __name((value) => {
+              this._updateSetting("personCollectionGuid", value);
+              this._updateSetting("attendeesFieldId", "", { rerender: true });
+            }, "onChange"),
+            hint: "Select an existing People/Contacts collection. The Meetings collection itself is excluded."
+          }),
+          this._selectInput("Attendees relation", "attendeesFieldId", fieldOptions, {
+            onChange: /* @__PURE__ */ __name((value) => this._updateSetting("attendeesFieldId", value, { rerender: true }), "onChange"),
+            hint: "Only multi-record relations restricted to the selected collection are offered."
+          }),
+          h(
+            "div",
+            { class: `${ROOT_CLASS}-field` },
+            button({
+              label: this._attendeesFieldCreateInFlight ? "Creating\u2026" : "Create Attendees relation",
+              variant: "ghost",
+              disabled: !canCreate,
+              onClick: /* @__PURE__ */ __name(() => void this._createAttendeesRelationField(), "onClick")
+            }),
+            h("span", { class: `${ROOT_CLASS}-field-hint` }, actionHint)
+          ),
+          h(
+            "div",
+            { class: `${ROOT_CLASS}-field` },
+            button({
+              label: "Refresh collections",
+              variant: "ghost",
+              disabled: !!this._workspaceCollectionsPromise,
+              onClick: /* @__PURE__ */ __name(() => void this._loadWorkspaceCollections(true), "onClick")
+            })
+          )
+        ]
+      });
     }
     _tabConnection(draft) {
       return [
@@ -5575,7 +5925,8 @@ ${transcriptText}` }]
             this._fieldSelectInput("Meeting URL field", "meetingUrlFieldId", ["url", "text"]),
             this._fieldSelectInput("Join At field", "joinAtFieldId", ["datetime", "date"]),
             this._fieldSelectInput("Transcript field", "transcriptFieldId", ["text"]),
-            this._fieldSelectInput("Summary field", "summaryFieldId", ["text"])
+            this._fieldSelectInput("Summary field", "summaryFieldId", ["text"]),
+            this._fieldSelectInput("Participant Names field", "participantNamesFieldId", ["text"])
           ]
         })
       ];
@@ -5742,6 +6093,11 @@ ${transcriptText}` }]
           "li",
           {},
           "Add a meeting link to a Meeting record and click Join Now \u2014 the notetaker walks in straight away. If you also set a Join At time 10+ minutes out, the button becomes Schedule Bot instead and Recall sends the notetaker in on its own when the meeting starts. Either way the transcript arrives as people talk, and the summary is written once the meeting ends."
+        ),
+        h(
+          "li",
+          {},
+          "Optional: below, choose your People collection and create or bind an Attendees relation. Participant names are always kept as text; existing People are linked only on a confident match."
         )
       );
     }
@@ -5909,6 +6265,94 @@ ${transcriptText}` }]
         this._toast(`Added "${def.label}"`, "Auto-detect will use it from now on.");
       } catch (err) {
         this._toast(`Could not add "${def.label}"`, this._errorMessage(err));
+      }
+    }
+    /**
+     * Explicit, idempotent setup action for the dynamic People relation. The target collection GUID
+     * lives in the field schema, so this cannot be one of the static plugin.json fields.
+     */
+    async _createAttendeesRelationField() {
+      if (this._attendeesFieldCreateInFlight) return this._attendeesFieldCreateInFlight;
+      const task = (async () => {
+        const personCollectionGuid = String(this._draft.personCollectionGuid || "").trim();
+        if (!personCollectionGuid) {
+          this._toast("Choose a People collection", "The Attendees relation needs a collection to target.");
+          return;
+        }
+        let stagedPreviousFieldId = null;
+        try {
+          let target = this._collectionByGuid(personCollectionGuid);
+          if (!target) {
+            await this._loadWorkspaceCollections(true);
+            target = this._collectionByGuid(personCollectionGuid);
+          }
+          if (!target) throw new Error("The selected People collection is no longer available.");
+          const api = await resolveConfigApi(this);
+          if (!api || typeof api.saveConfiguration !== "function") {
+            throw new Error("Thymer did not hand over a writable config handle.");
+          }
+          const live = api.getConfiguration?.() || this.getConfiguration?.() || {};
+          const conf = JSON.parse(JSON.stringify(live));
+          conf.fields = Array.isArray(conf.fields) ? conf.fields : [];
+          const existing = findCompatibleAttendeesField(conf.fields, personCollectionGuid, this._draft.attendeesFieldId);
+          if (existing) {
+            this._updateSetting("attendeesFieldId", existing.id, { rerender: true });
+            this._toast(`Bound "${existing.label || existing.id}"`, "Recall will use the existing relation; no property was created.");
+            return;
+          }
+          if (conf.fields.some((field) => isCompatibleAttendeesField(field, personCollectionGuid))) {
+            throw new Error("More than one compatible relation exists. Choose the intended property in Attendees relation.");
+          }
+          const fieldId = attendeesFieldIdFor(conf.fields, personCollectionGuid);
+          const occupied = conf.fields.find((field) => String(field && field.id || "") === fieldId);
+          if (occupied && !isCompatibleAttendeesField(occupied, personCollectionGuid)) {
+            throw new Error(`The stable property id "${fieldId}" is already used by an incompatible property.`);
+          }
+          if (occupied) {
+            this._updateSetting("attendeesFieldId", occupied.id, { rerender: true });
+            return;
+          }
+          let targetName = "";
+          try {
+            targetName = target && target.getName ? target.getName() : "";
+          } catch {
+          }
+          const canonicalOccupied = conf.fields.some((field) => String(field && field.id || "") === "attendees");
+          const label = canonicalOccupied && targetName ? `Attendees \u2014 ${targetName}` : "Attendees";
+          conf.fields.push({
+            id: fieldId,
+            label,
+            type: "record",
+            icon: "ti-users",
+            many: true,
+            read_only: false,
+            active: true,
+            filter_colguid: personCollectionGuid
+          });
+          if (Array.isArray(conf.page_field_ids) && !conf.page_field_ids.includes(fieldId)) {
+            conf.page_field_ids.push(fieldId);
+          }
+          const previousFieldId = String(this._draft.attendeesFieldId || "");
+          stagedPreviousFieldId = previousFieldId;
+          this._updateSetting("attendeesFieldId", fieldId, { rerender: true });
+          const ok = await api.saveConfiguration(conf);
+          if (ok === false) throw new Error("Thymer rejected the change.");
+          stagedPreviousFieldId = null;
+          this._toast(`Added "${label}"`, "Future meetings will attach confident Person matches here.");
+        } catch (err) {
+          if (stagedPreviousFieldId !== null) {
+            this._updateSetting("attendeesFieldId", stagedPreviousFieldId, { rerender: true });
+          }
+          this._toast("Could not create Attendees", this._errorMessage(err));
+        }
+      })();
+      this._attendeesFieldCreateInFlight = task;
+      this._renderPanel();
+      try {
+        return await task;
+      } finally {
+        if (this._attendeesFieldCreateInFlight === task) this._attendeesFieldCreateInFlight = null;
+        if (this._panelEl && document.contains(this._panelEl)) this._renderPanel();
       }
     }
     _fieldSelectInput(label, key, types) {
@@ -6271,7 +6715,20 @@ ${transcriptText}` }]
         firstWord.start_timestamp,
         firstWord.start_timestamp && firstWord.start_timestamp.relative
       );
-      entries.push({ speaker: String(speaker), speakerKey, text, absoluteIso: absoluteIso || null, relativeSec });
+      entries.push({
+        speaker: String(speaker),
+        speakerKey,
+        text,
+        absoluteIso: absoluteIso || null,
+        relativeSec,
+        participant: {
+          id: participant.id != null ? participant.id : null,
+          name: String(participant.name || speaker || "").trim(),
+          email: String(participant.email || "").trim(),
+          is_host: participant.is_host == null ? null : !!participant.is_host,
+          platform: participant.platform || null
+        }
+      });
     }
     return entries;
   }

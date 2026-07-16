@@ -56,6 +56,15 @@
 			"active": true
 		},
 		{
+			"id": "participant_names",
+			"label": "Participant Names",
+			"type": "text",
+			"icon": "ti-users",
+			"many": false,
+			"read_only": false,
+			"active": true
+		},
+		{
 			"id": "recall_bot_id",
 			"label": "Bot ID",
 			"type": "text",
@@ -112,6 +121,7 @@
 		"join_at",
 		"transcript",
 		"summary",
+		"participant_names",
 		"recall_bot_id",
 		"recall_status",
 		"last_error"
@@ -121,7 +131,7 @@
 		"views": false,
 		"sidebar": true
 	},
-	"version": "1.20.8",
+	"version": "1.21.0",
 	"__source_repo": "https://github.com/akaready/thymer-recall-ai",
 	"__source_files": {
 		"branch": "main",

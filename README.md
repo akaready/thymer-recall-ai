@@ -38,6 +38,9 @@ Enjoy! 🙏
   "when the bot joins" are the same moment.
 - `Transcript` receives the fetched Recall transcript.
 - `Summary` receives the Claude summary.
+- `Participant Names` keeps the finalized Recall roster as plain text, including unmatched people.
+- `Attendees` is an optional relation you create or bind in Setup after choosing your People collection.
+  It links existing Person records on a unique exact email or display-name match; it never creates people.
 - `Recall Bot ID`, `Recall Status`, and `Last Error` track integration state.
 
 
@@ -115,6 +118,18 @@ sitting in an empty room.
 You can also send one from the **Recall Status** column in the table view, or from the microphone
 button on an inline reference to a Meeting record in the editor.
 
+### 6. Optional: link attendees to People
+
+In **Setup → People linking**, choose the collection that contains your Person/Contact records.
+Then bind an existing compatible multi-record relation or click **Create Attendees relation**.
+Creation is explicit and idempotent: the plugin re-checks the live schema and binds a compatible
+field instead of creating a duplicate. Changing the People collection clears the binding but never
+retargets or deletes the old relation.
+
+At meeting finalization, Recall's participant artifact supplies the full roster, including people
+who never spoke. The plugin writes every display name to `Participant Names`, then attaches only
+confident matches to `Attendees`. Ambiguous and unmatched names stay safely in the text field.
+
 &nbsp;
 
 ## ⚙️ All settings
@@ -124,7 +139,8 @@ button on an inline reference to a Meeting record in the editor.
 | **Bridge URL** | Address of your bridge (step 3). |
 | **Recall API key** / **Region** | Your Recall key and the region it came from — they must match. |
 | **Anthropic API key** / **Claude model** | Key and model used to write the summary. |
-| **Field mapping** | Point Meeting URL / Transcript / Summary at existing properties instead of the plugin's defaults. Leave on auto-detect if unsure. |
+| **Field mapping** | Point Meeting URL / Transcript / Summary / Participant Names at existing properties instead of the plugin's defaults. Leave on auto-detect if unsure. |
+| **People collection / Attendees relation** | Optionally bind meeting participants to existing Person records. Exact matching only; Person records are never auto-created. |
 | **Bot name** | The name the notetaker shows in the meeting. |
 | **Bot image** | Optional. A public HTTPS JPEG, 16:9, ideally 1280×720 and under 1.3 MB. Sent to Recall as `automatic_video_output`. |
 | **Join chat message** | Optional message the bot posts when it joins. |
@@ -156,13 +172,14 @@ After a bot is created, the plugin periodically calls Recall directly or through
 ```text
 GET /api/v1/bot/{bot_id}/
 GET recordings[].media_shortcuts.transcript.data.download_url from the bot response
+GET recordings[].media_shortcuts.participant_events.data.participants_download_url
 ```
 
 The default interval is 30 seconds. You can also click `Sync` later on a Meeting record with a `Recall Bot ID` to fetch the final transcript and generate the summary.
 
 > **Kill switch note:** the toggle in the settings-panel header disables the whole plugin at runtime — including transcript polling. A meeting recorded while the plugin is disabled won't stream into Thymer until you re-enable and `Sync`.
 
-When `Bridge URL` is set, the plugin also asks Recall to send real-time `transcript.data` events to `POST /api/recall/realtime` on the bridge. The bridge keeps a short transcript buffer so polling can write live speaker-attributed transcript lines into Thymer while the meeting is running. Bind a Cloudflare KV namespace named `RECALL_TRANSCRIPTS` if you want live updates to survive Worker isolate changes; final post-meeting transcript and summary polling works without KV. Recall perfect diarization is enabled with `recording_config.transcript.diarization.use_separate_streams_when_available`.
+When `Bridge URL` is set, the plugin also asks Recall to send real-time `transcript.data` events to `POST /api/recall/realtime` on the bridge. The bridge keeps a short transcript buffer so polling can write live speaker-attributed transcript lines into Thymer while the meeting is running, and proxies the finalized participant artifact for attendee linking. Bind a Cloudflare KV namespace named `RECALL_TRANSCRIPTS` if you want live updates to survive Worker isolate changes; final post-meeting transcript, attendees, and summary polling work without KV. Recall perfect diarization is enabled with `recording_config.transcript.diarization.use_separate_streams_when_available`.
 
 
 
