@@ -3601,7 +3601,7 @@ ${report}
   __name(migrateMeetingSchema, "migrateMeetingSchema");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.7";
+  var PLUGIN_VERSION = "1.22.8";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -6758,7 +6758,7 @@ ${transcriptText}` }]
             this._textInput("Bot image JPEG URL", "botImageUrl", "https://example.com/notetaker.jpg"),
             this._numberInput("Poll interval (seconds)", "pollSeconds", 10, 300),
             this._selectInput("Recall media retention", "recordingRetention", RECORDING_RETENTION_OPTIONS, {
-              hint: "Future bots only. Seven days is free. Expiration deletes Recall media\u2014not content saved in Thymer."
+              hint: "Future bots only. Expiration deletes Recall media, not content saved in Thymer."
             }),
             optionRow({
               type: "checkbox",
@@ -7447,6 +7447,11 @@ ${transcriptText}` }]
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-icon {
 				color: var(--tps-accent);
 				font-size: 14px;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-card .tps-button--ghost:hover {
+				color: var(--tps-accent);
+				border-color: var(--tps-accent);
+				background: var(--tps-accent-soft);
 			}
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-results {
 				display: grid;
