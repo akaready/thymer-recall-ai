@@ -3155,6 +3155,97 @@ ${report}
   }
   __name(deriveTranscriptTurnAnchors, "deriveTranscriptTurnAnchors");
 
+  // document-ownership.js
+  var LINE_META = Object.freeze({
+    SCHEMA: "recall_ai_schema",
+    BOT_ID: "recall_ai_bot_id",
+    ROLE: "recall_ai_role",
+    ENTRY_INDEX: "recall_ai_entry_index",
+    SECTION_ID: "recall_ai_section_id",
+    SECTION_START: "recall_ai_section_start",
+    SECTION_END: "recall_ai_section_end",
+    CITATIONS: "recall_ai_citations",
+    COMPLETE: "recall_ai_complete"
+  });
+  var LINE_META_SCHEMA = 1;
+  function lineMeta(line, key) {
+    return line && line.props && line.props[key] != null ? line.props[key] : null;
+  }
+  __name(lineMeta, "lineMeta");
+  function isOwnedLine(line, botId, role = "") {
+    if (!line || String(lineMeta(line, LINE_META.BOT_ID) || "") !== String(botId || "")) return false;
+    return !role || String(lineMeta(line, LINE_META.ROLE) || "") === role;
+  }
+  __name(isOwnedLine, "isOwnedLine");
+  function findOwnedLine(items, botId, role, index = null) {
+    return (Array.isArray(items) ? items : []).find((line) => {
+      if (!isOwnedLine(line, botId, role)) return false;
+      return index == null || Number(lineMeta(line, LINE_META.ENTRY_INDEX)) === Number(index);
+    }) || null;
+  }
+  __name(findOwnedLine, "findOwnedLine");
+  function ownershipProps(botId, role, extra = {}) {
+    const props = {
+      [LINE_META.SCHEMA]: LINE_META_SCHEMA,
+      [LINE_META.BOT_ID]: String(botId),
+      [LINE_META.ROLE]: role
+    };
+    if (extra.entryIndex != null) props[LINE_META.ENTRY_INDEX] = Number(extra.entryIndex);
+    if (extra.sectionId != null) props[LINE_META.SECTION_ID] = Number(extra.sectionId);
+    if (extra.sectionStart != null) props[LINE_META.SECTION_START] = Number(extra.sectionStart);
+    if (extra.sectionEnd != null) props[LINE_META.SECTION_END] = Number(extra.sectionEnd);
+    if (extra.citations != null) props[LINE_META.CITATIONS] = JSON.stringify(extra.citations);
+    if (extra.complete != null) props[LINE_META.COMPLETE] = extra.complete ? 1 : 0;
+    return props;
+  }
+  __name(ownershipProps, "ownershipProps");
+  async function runCoalesced(map, key, factory) {
+    const active = key && map && map.get(key);
+    if (active) return active;
+    const task = Promise.resolve().then(factory);
+    if (key && map) map.set(key, task);
+    try {
+      return await task;
+    } finally {
+      if (key && map && map.get(key) === task) map.delete(key);
+    }
+  }
+  __name(runCoalesced, "runCoalesced");
+  function planSummaryDestinations(notesLocation, propertyPresent, bodyState) {
+    const propertyRequired = notesLocation !== "body";
+    const bodyRequired = notesLocation !== "property";
+    const bodyProtected = bodyRequired && bodyState === "unknown";
+    const writeProperty = propertyRequired && !propertyPresent;
+    const writeBody = bodyRequired && ["missing", "incomplete", "unavailable"].includes(bodyState);
+    return {
+      propertyRequired,
+      bodyRequired,
+      bodyProtected,
+      writeProperty,
+      writeBody,
+      complete: (!propertyRequired || propertyPresent) && (!bodyRequired || bodyState === "owned" || bodyState === "legacy" || bodyProtected)
+    };
+  }
+  __name(planSummaryDestinations, "planSummaryDestinations");
+
+  // transcript-quality.js
+  function coalesceAdjacentTranscriptEntries(entries) {
+    const out = [];
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (!entry || !entry.text) continue;
+      const previous = out[out.length - 1];
+      const speakerKey = entry.speakerKey || `name:${String(entry.speaker || "").trim().toLowerCase()}`;
+      if (previous && previous.speakerKey === speakerKey) {
+        previous.text = `${previous.text} ${entry.text}`.replace(/\s{2,}/g, " ").trim();
+        previous.sourceCount += 1;
+        continue;
+      }
+      out.push({ ...entry, speakerKey, sourceCount: 1 });
+    }
+    return out;
+  }
+  __name(coalesceAdjacentTranscriptEntries, "coalesceAdjacentTranscriptEntries");
+
   // participant-linking.js
   function normalizeIdentity(value) {
     return String(value == null ? "" : value).normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
@@ -3292,7 +3383,9 @@ ${report}
   __name(matchParticipantsToPeople, "matchParticipantsToPeople");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.21.0";
+  var PLUGIN_VERSION = "1.22.0";
+  var MIN_BRIDGE_VERSION = "1.22.0";
+  var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze(["append-only-realtime", "bridge-checks", "participant-artifact"]);
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3636,6 +3729,7 @@ ${report}
       this._commandItem = null;
       this._navButton = null;
       this._syncButton = null;
+      this._diagnosticsButton = null;
       this._editorObserver = null;
       this._observedRoot = null;
       this._attachRetryTimer = null;
@@ -3644,6 +3738,10 @@ ${report}
       this._recordsByGuid = /* @__PURE__ */ new Map();
       this._pollers = /* @__PURE__ */ new Map();
       this._syncInFlight = /* @__PURE__ */ new Map();
+      this._botCreateInFlight = /* @__PURE__ */ new Map();
+      this._diagnosticsByRecord = /* @__PURE__ */ new Map();
+      this._setupDoctorState = null;
+      this._setupDoctorInFlight = null;
       this._workspaceCollections = [];
       this._workspaceCollectionsLoaded = false;
       this._workspaceCollectionsPromise = null;
@@ -3691,16 +3789,23 @@ ${report}
           if (kind === "summarizing" || kind === "processing") {
             return this._toast("Still working", "The meeting is over and the transcript is being processed. Nothing to do.");
           }
-          if (kind === "done") return void this._syncRecord(record, { summarize: true });
+          if (kind === "done") return void this._syncRecord(record, { summarize: true, repair: true });
           void this._startBot(record);
         }, "onClick")
       });
       this._syncButton = this.addCollectionNavigationButton({
-        label: "Sync",
+        label: "Repair Meeting",
         icon: "refresh",
-        tooltip: "Fetch transcript and summarize for this meeting",
+        tooltip: "Safely fill in missing transcript, summary, citations, and attendees",
         onlyWhenExpanded: true,
-        onClick: /* @__PURE__ */ __name(({ record }) => void this._syncRecord(record, { summarize: true }), "onClick")
+        onClick: /* @__PURE__ */ __name(({ record }) => void this._syncRecord(record, { summarize: true, repair: true }), "onClick")
+      });
+      this._diagnosticsButton = this.addCollectionNavigationButton({
+        label: "Diagnostics",
+        icon: "activity",
+        tooltip: "Show bridge, webhook, and transcript diagnostics for this meeting",
+        onlyWhenExpanded: true,
+        onClick: /* @__PURE__ */ __name(({ record }) => void this._showMeetingDiagnostics(record), "onClick")
       });
     }
     /**
@@ -3928,6 +4033,10 @@ ${report}
         if (this._syncButton && this._syncButton.remove) this._syncButton.remove();
       } catch {
       }
+      try {
+        if (this._diagnosticsButton && this._diagnosticsButton.remove) this._diagnosticsButton.remove();
+      } catch {
+      }
       if (this._editorObserver) this._editorObserver.disconnect();
       this._editorObserver = null;
       this._settingsPanel = null;
@@ -3941,6 +4050,9 @@ ${report}
       for (const poller of this._pollers && this._pollers.values ? this._pollers.values() : []) clearInterval(poller.timer);
       if (this._pollers && this._pollers.clear) this._pollers.clear();
       if (this._syncInFlight && this._syncInFlight.clear) this._syncInFlight.clear();
+      if (this._botCreateInFlight && this._botCreateInFlight.clear) this._botCreateInFlight.clear();
+      if (this._diagnosticsByRecord && this._diagnosticsByRecord.clear) this._diagnosticsByRecord.clear();
+      this._setupDoctorInFlight = null;
       this._workspaceCollectionsPromise = null;
       this._attendeesFieldCreateInFlight = null;
       this._safe("strip inline buttons", () => this._stripInlineButtons());
@@ -4279,7 +4391,16 @@ ${report}
      * @param {{immediate?: boolean}} [opts] immediate: ignore Join At and send the bot in
      *   right now. Lets you override a scheduled meeting without clearing the field.
      */
-    async _startBot(record, { immediate = false } = {}) {
+    async _startBot(record, options = {}) {
+      const key = record && record.guid || "";
+      const active = key && this._botCreateInFlight && this._botCreateInFlight.get(key);
+      if (active) {
+        this._toast("Notetaker is already being created", "Please wait for the current request to finish.");
+        return active;
+      }
+      return runCoalesced(this._botCreateInFlight, key, () => this._startBotOnce(record, options));
+    }
+    async _startBotOnce(record, { immediate = false } = {}) {
       if (!record) return this._toast("Open a Meeting record first", "This button needs an active record in this collection.");
       if (!this._settings.recallApiKey) return this._toast("Recall API key required", "Open Plugin: Meetings and add a Recall API key.");
       const activeBot = this._text(record, FIELDS.BOT_ID);
@@ -4436,7 +4557,7 @@ ${report}
         if (this._syncInFlight && this._syncInFlight.get(syncKey) === task) this._syncInFlight.delete(syncKey);
       }
     }
-    async _syncRecordOnce(record, { summarize = false, quiet = false, botId: knownBotId = "" } = {}) {
+    async _syncRecordOnce(record, { summarize = false, quiet = false, repair = false, botId: knownBotId = "" } = {}) {
       if (!record) {
         if (!quiet) this._toast("Open a Meeting record first", "Sync needs a meeting record with a Bot ID.");
         return false;
@@ -4452,6 +4573,7 @@ ${report}
         return false;
       }
       try {
+        const repairReport = [];
         const [bot, transcript] = await Promise.all([
           this._fetchRecallJson(`/api/v1/bot/${encodeURIComponent(botId)}/`).catch(() => null),
           this._fetchRecallJson(`/api/v1/bot/${encodeURIComponent(botId)}/transcript/`)
@@ -4466,6 +4588,7 @@ ${report}
         const ended = !!bot && isMeetingEndedStatus(recallStatus);
         const terminal = !!bot && isTerminalStatus(recallStatus);
         const rawEntries = transcriptEntries(transcript);
+        if (transcript && transcript.debug && record.guid) this._diagnosticsByRecord.set(record.guid, transcript.debug);
         const entries = ended && !liveTranscript ? coalesceAdjacentTranscriptEntries(rawEntries) : rawEntries;
         const transcriptText = entriesToText(entries, this._settings);
         this._log("sync poll", {
@@ -4476,19 +4599,42 @@ ${report}
           rows: transcriptRowCount(transcript),
           debug: transcript && transcript.debug || null
         });
-        const hasSummary = COMPLETED_STATUSES.has(status);
-        const finalTranscriptReady = !!transcriptText && !liveTranscript;
         const loc = this._settings.notesLocation;
-        const deferFinalBodyForSections = ended && finalTranscriptReady && summarize && this._settings.autoSummarize && !hasSummary && !!this._settings.anthropicApiKey && !!this._settings.saveTranscript && !!this._settings.transcriptSections && loc !== "property";
+        const transcriptCompletedBeforeRepair = COMPLETED_STATUSES.has(previousStatus);
+        const summaryCompletedBeforeRepair = COMPLETED_STATUSES.has(previousStatus);
+        const transcriptBodyState = loc !== "property" ? await this._bodyOwnershipState(record, botId, "transcript_root", "tx-head", transcriptCompletedBeforeRepair) : "disabled";
+        const summaryBodyState = loc !== "property" ? await this._bodyOwnershipState(record, botId, "summary_root", "summary-body", summaryCompletedBeforeRepair) : "disabled";
+        const summaryPropertyPresent = loc !== "body" && !!this._text(record, this._mappedFieldId(FIELDS.SUMMARY));
+        if (repair && (summaryBodyState === "owned" || summaryBodyState === "incomplete") && typeof record.getLineItems === "function") {
+          try {
+            await this._restoreMarkedSummaryReferences(await record.getLineItems(false), botId);
+          } catch {
+          }
+        }
+        const summaryPlan = planSummaryDestinations(loc, summaryPropertyPresent, summaryBodyState);
+        const summaryPropertyMissing = summaryPlan.writeProperty;
+        const summaryBodyMissing = summaryPlan.writeBody;
+        const summaryBodyProtected = summaryPlan.bodyProtected;
+        let hasSummary = summaryPlan.complete;
+        const finalTranscriptReady = !!transcriptText && !liveTranscript;
+        const deferFinalBodyForSections = ended && finalTranscriptReady && summarize && this._settings.autoSummarize && !hasSummary && !!this._settings.anthropicApiKey && !!this._settings.saveTranscript && !!this._settings.transcriptSections && summaryBodyMissing && loc !== "property";
         if (transcriptText) {
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._log("transcript written", { botId, characters: transcriptText.length });
           if (this._settings.saveTranscript) {
-            if (loc !== "body") this._setMappedField(record, FIELDS.TRANSCRIPT, transcriptText);
-            if (loc !== "property" && !deferFinalBodyForSections) {
+            if (loc !== "body") {
+              const existingTranscript = this._text(record, this._mappedFieldId(FIELDS.TRANSCRIPT));
+              if (!repair || !existingTranscript) {
+                this._setMappedField(record, FIELDS.TRANSCRIPT, transcriptText);
+                repairReport.push("transcript property repaired");
+              } else repairReport.push("transcript property already present");
+            }
+            const bodySafe = transcriptBodyState !== "unknown";
+            if (loc !== "property" && !deferFinalBodyForSections && bodySafe) {
               const newestLine = await this._streamTranscriptToBody(record, entries);
               this._scrollToLiveTranscript(record, newestLine);
-            }
+              repairReport.push(transcriptBodyState === "owned" || transcriptBodyState === "legacy" ? "transcript body already present" : "transcript body repaired");
+            } else if (repair && transcriptBodyState === "unknown") repairReport.push("legacy transcript body skipped (ownership unknown)");
           }
         } else if (terminal || transcript && transcript.debug && transcript.debug.kv === "MISSING") {
           this._setField(record, FIELDS.LAST_ERROR, describeTranscriptState(transcript, bot));
@@ -4498,20 +4644,31 @@ ${report}
         }
         if (ended && finalTranscriptReady) {
           await this._syncMeetingAttendees(record, botId, entries);
+          if (repair) repairReport.push("attendees checked");
         }
-        if (ended && summarize && this._settings.autoSummarize && !hasSummary) {
+        const shouldGenerateSummary = summaryPropertyMissing || summaryBodyMissing;
+        if (ended && summarize && this._settings.autoSummarize && shouldGenerateSummary) {
           if (!finalTranscriptReady) {
             this._setField(record, FIELDS.STATUS, "processing transcript");
             this._updateNavButtonForRecord(record);
             return false;
           }
-          await this._summarize(record, transcriptText, entries, { deferTranscriptBody: deferFinalBodyForSections });
-        }
+          const summaryOk = await this._summarize(record, transcriptText, entries, {
+            deferTranscriptBody: deferFinalBodyForSections,
+            writeProperty: summaryPropertyMissing,
+            writeBody: summaryBodyMissing
+          });
+          if (summaryOk) {
+            hasSummary = true;
+            repairReport.push("summary repaired");
+          } else if (repair) repairReport.push("summary failed");
+        } else if (repair && ended && hasSummary) repairReport.push(summaryBodyState === "unknown" ? "legacy summary skipped (ownership unknown)" : "summary already present");
+        else if (repair && ended && summaryBodyProtected) repairReport.push("legacy summary skipped (ownership unknown)");
         if (ended && (finalTranscriptReady || hasSummary)) {
           this._stopPolling(botId);
         }
         this._updateNavButtonForRecord(record);
-        if (!quiet) this._toast("Meeting synced", status);
+        if (!quiet) this._toast(repair ? "Meeting repair complete" : "Meeting synced", repair ? repairReport.join(" \xB7 ") || status : status);
         return ended && (finalTranscriptReady || hasSummary);
       } catch (err) {
         const msg = this._errorMessage(err);
@@ -4632,10 +4789,10 @@ ${report}
         this._log("participant linking failed without blocking meeting finalization", { error: this._errorMessage(err) });
       }
     }
-    async _summarize(record, transcriptText, entries, { deferTranscriptBody = false } = {}) {
+    async _summarize(record, transcriptText, entries, { deferTranscriptBody = false, writeProperty = true, writeBody = true } = {}) {
       if (!this._settings.anthropicApiKey) {
         this._setField(record, FIELDS.LAST_ERROR, "Anthropic API key is missing; transcript fetched but summary was skipped.");
-        return;
+        return false;
       }
       try {
         this._setField(record, FIELDS.STATUS, "summarizing");
@@ -4644,8 +4801,8 @@ ${report}
         const { summary, sections, citations } = await this._createSummary(transcriptText, entries);
         if (!summary) throw new Error("Claude returned an empty summary.");
         const loc = this._settings.notesLocation;
-        if (loc !== "body") this._setMappedField(record, FIELDS.SUMMARY, summary);
-        if (loc !== "property") {
+        if (loc !== "body" && writeProperty) this._setMappedField(record, FIELDS.SUMMARY, summary);
+        if (loc !== "property" && writeBody) {
           let sectionResult = { ok: false, anchors: [], turnAnchors: [] };
           if (this._settings.saveTranscript && this._settings.transcriptSections && sections.length && Array.isArray(entries) && entries.length) {
             sectionResult = await this._reorganizeTranscriptBySections(record, entries, sections);
@@ -4660,6 +4817,7 @@ ${report}
         this._setField(record, FIELDS.STATUS, "summarized");
         this._updateNavButtonForRecord(record);
         this._log("summary written", { characters: summary.length, sections: sections.length });
+        return true;
       } catch (err) {
         if (deferTranscriptBody && this._settings.saveTranscript && this._settings.notesLocation !== "property") {
           await this._streamTranscriptToBody(record, entries);
@@ -4668,6 +4826,7 @@ ${report}
         this._setField(record, FIELDS.STATUS, "summary_failed");
         this._updateNavButtonForRecord(record);
         this._log("summary failed", { error: this._errorMessage(err) });
+        return false;
       }
     }
     /**
@@ -4733,15 +4892,67 @@ ${transcriptText}` }]
      * Render summary + transcript into the record BODY as real Thymer blocks (headings, bold,
      * checkboxes) via insertFromMarkdown — a property can only show markdown as literal text.
      *
-     * ADDITIVE and guarded ONCE per bot. insertFromMarkdown appends (it does not replace), line items
-     * expose no getText() to find our old blocks, and delete() refuses items with children — so a
-     * "clear then rewrite" would be fragile and could clobber the user's own notes. Instead we write
-     * exactly once per recording: the localStorage guard keyed on the bot id makes the poll loop's
-     * repeated calls a no-op after the first. A genuinely new recording (new bot id) writes a new
-     * section, which is what you want.
+     * ADDITIVE and guarded once per bot. Persistent line-item metadata is the source of truth, allowing
+     * another device or an interrupted write to resume the same structure. localStorage is retained only
+     * as a legacy/cache hint; unowned content is never cleared or rewritten.
      */
     _bodyKey(record, suffix) {
       return `recall-ai/${this._selfGuid() || "collection"}/${record && record.guid || ""}/${suffix}`;
+    }
+    _lineMeta(line, key) {
+      return lineMeta(line, key);
+    }
+    _isOwnedLine(line, botId, role = "") {
+      return isOwnedLine(line, botId, role);
+    }
+    _findOwnedLine(items, botId, role, index = null) {
+      return findOwnedLine(items, botId, role, index);
+    }
+    async _markOwnedLine(line, botId, role, extra = {}) {
+      if (!line || typeof line.setMetaProperties !== "function" || !botId || !role) return false;
+      const props = ownershipProps(botId, role, extra);
+      try {
+        const ok = await line.setMetaProperties(props);
+        if (ok !== false) line.props = { ...line.props || {}, ...props };
+        return ok !== false;
+      } catch (err) {
+        this._log("line ownership metadata failed", { guid: line.guid, role, error: this._errorMessage(err) });
+        return false;
+      }
+    }
+    async _migrateLegacyTranscriptMetadata(items, heading, botId, tracked, written) {
+      if (!heading || !botId) return;
+      await this._markOwnedLine(heading, botId, "transcript_root");
+      const byGuid = new Map((Array.isArray(items) ? items : []).map((line) => [line.guid, line]));
+      const guids = Array.isArray(tracked) ? tracked : [];
+      const inline = this._settings.transcriptLayout === "inline";
+      for (let index = 0; index < Number(written || 0); index++) {
+        const turn = byGuid.get(guids[inline ? index : index * 2]);
+        if (turn) await this._markOwnedLine(turn, botId, "transcript_turn", { entryIndex: index });
+        if (!inline) {
+          const text = byGuid.get(guids[index * 2 + 1]);
+          if (text) await this._markOwnedLine(text, botId, "transcript_text", { entryIndex: index });
+        }
+      }
+    }
+    async _bodyOwnershipState(record, botId, role, legacySuffix, completed = false) {
+      if (!record || typeof record.getLineItems !== "function") return "unavailable";
+      try {
+        const items = await record.getLineItems(false);
+        const owned = this._findOwnedLine(items, botId, role);
+        if (owned) {
+          if (role === "summary_root" && Number(this._lineMeta(owned, LINE_META.COMPLETE)) !== 1) return "incomplete";
+          return "owned";
+        }
+      } catch {
+        return "unavailable";
+      }
+      try {
+        const legacy = localStorage.getItem(this._bodyKey(record, legacySuffix)) || "";
+        if (legacy && (legacy === botId || !legacySuffix.includes("summary"))) return "legacy";
+      } catch {
+      }
+      return completed ? "unknown" : "missing";
     }
     /** insertFromMarkdown treats `#` before a digit as a hashtag — escape so "#5" stays literal. */
     _escMd(text) {
@@ -4764,8 +4975,8 @@ ${transcriptText}` }]
      *   - inline: each turn a flat line "[time] Speaker: text" under the heading.
      *   - blocks: each turn a header line ("[time] Speaker") with the words nested BENEATH it, so a
      *     collapsed transcript is a scannable list of turns. Nesting proven against the live doc tree.
-     * Per-record `tx-head` (heading guid) and `tx-count` (utterances written) in localStorage keep a
-     * poll from re-adding what is already there.
+     * Each node carries its bot/role/entry index in document metadata. Per-record localStorage keys are
+     * only a fast cache and a migration path for meetings created before schema metadata existed.
      *
      * NEVER navigates or repaints — appending nodes elsewhere in the doc leaves your cursor alone.
      */
@@ -4775,21 +4986,30 @@ ${transcriptText}` }]
       const headKey = this._bodyKey(record, "tx-head");
       const countKey = this._bodyKey(record, "tx-count");
       const trackKey = this._bodyKey(record, "tx-guids");
+      const botId = this._text(record, FIELDS.BOT_ID) || "current";
       let written = 0;
       try {
         written = parseInt(localStorage.getItem(countKey) || "0", 10) || 0;
       } catch {
       }
-      if (entries.length <= written) return;
       try {
         let items = await record.getLineItems(false);
-        let heading = null;
+        let heading = this._findOwnedLine(items, botId, "transcript_root");
         let headGuid = "";
         try {
           headGuid = localStorage.getItem(headKey) || "";
         } catch {
         }
-        if (headGuid) heading = items.find((li) => li.guid === headGuid) || null;
+        if (!heading && headGuid) heading = items.find((li) => li.guid === headGuid) || null;
+        let tracked = [];
+        try {
+          tracked = JSON.parse(localStorage.getItem(trackKey) || "[]") || [];
+        } catch {
+        }
+        if (!Array.isArray(tracked)) tracked = [];
+        if (heading && !this._isOwnedLine(heading, botId, "transcript_root")) {
+          await this._migrateLegacyTranscriptMetadata(items, heading, botId, tracked, written);
+        }
         if (!heading) {
           const before = new Set(items.map((li) => li.guid));
           const anchorMd = this._headingAnchorMd(this._settings.transcriptHeadingText, this._settings.transcriptHeadingLevel);
@@ -4798,32 +5018,50 @@ ${transcriptText}` }]
           items = await record.getLineItems(false);
           heading = items.find((li) => !before.has(li.guid)) || null;
           if (!heading) return;
+          await this._markOwnedLine(heading, botId, "transcript_root");
           try {
             localStorage.setItem(headKey, heading.guid);
           } catch {
           }
           written = 0;
         }
-        const lastChildOf = /* @__PURE__ */ __name((parentGuid) => {
-          const kids = items.filter((li) => li.parent_guid === parentGuid);
-          return kids.length ? kids[kids.length - 1] : null;
-        }, "lastChildOf");
-        const fresh = entries.slice(written);
-        const settings = this._settings;
-        let tracked = [];
         try {
-          tracked = JSON.parse(localStorage.getItem(trackKey) || "[]") || [];
+          localStorage.setItem(headKey, heading.guid);
         } catch {
         }
-        if (!Array.isArray(tracked)) tracked = [];
-        let afterTurn = lastChildOf(heading.guid);
+        const existingTurns = new Map(items.filter((item) => this._isOwnedLine(item, botId, "transcript_turn") && this._lineMeta(item, LINE_META.ENTRY_INDEX) != null).map((item) => [Number(this._lineMeta(item, LINE_META.ENTRY_INDEX)), item]));
+        if (entries.every((_entry, index) => existingTurns.has(index))) return;
+        const sectionRanges = items.filter((item) => this._isOwnedLine(item, botId, "transcript_section")).map((item) => ({
+          item,
+          start: Number(this._lineMeta(item, LINE_META.SECTION_START)),
+          end: Number(this._lineMeta(item, LINE_META.SECTION_END))
+        })).filter((range) => Number.isFinite(range.start) && Number.isFinite(range.end));
+        const parentForIndex = /* @__PURE__ */ __name((index) => {
+          const section2 = sectionRanges.find((range) => index >= range.start && index <= range.end);
+          return section2 ? section2.item : heading;
+        }, "parentForIndex");
+        const afterByParent = /* @__PURE__ */ new Map();
+        const settings = this._settings;
         let newestGuid = null;
         let created = 0;
-        for (const e of fresh) {
+        for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+          const e = entries[entryIndex];
+          const existingTurn = existingTurns.get(entryIndex);
+          if (existingTurn) {
+            afterByParent.set(existingTurn.parent_guid, existingTurn);
+            continue;
+          }
+          const parent = parentForIndex(entryIndex);
+          let afterTurn = afterByParent.get(parent.guid) || null;
+          if (!afterTurn) {
+            const earlier = items.filter((item) => item.parent_guid === parent.guid && this._isOwnedLine(item, botId, "transcript_turn") && Number(this._lineMeta(item, LINE_META.ENTRY_INDEX)) < entryIndex);
+            afterTurn = earlier.length ? earlier[earlier.length - 1] : null;
+          }
           const inline = settings.transcriptLayout === "inline";
           const line = inline ? `${formatEntryHeader(e, settings)}: ${e.text}` : formatEntryHeader(e, settings);
-          const turn = await record.createLineItem(heading, afterTurn, "text", [{ type: "text", text: line }], null);
+          const turn = await record.createLineItem(parent, afterTurn, "text", [{ type: "text", text: line }], null);
           if (!turn) break;
+          await this._markOwnedLine(turn, botId, "transcript_turn", { entryIndex });
           if (!inline) {
             const textNode = await record.createLineItem(turn, null, "text", [{ type: "text", text: e.text }], null);
             if (!textNode) {
@@ -4833,16 +5071,19 @@ ${transcriptText}` }]
               }
               break;
             }
+            await this._markOwnedLine(textNode, botId, "transcript_text", { entryIndex });
             tracked.push(turn.guid, textNode.guid);
             newestGuid = textNode.guid;
           } else {
             tracked.push(turn.guid);
             newestGuid = turn.guid;
           }
-          afterTurn = turn;
+          afterByParent.set(parent.guid, turn);
+          items.push(turn);
+          existingTurns.set(entryIndex, turn);
           created += 1;
           try {
-            localStorage.setItem(countKey, String(written + created));
+            localStorage.setItem(countKey, String(existingTurns.size));
           } catch {
           }
           try {
@@ -4850,7 +5091,7 @@ ${transcriptText}` }]
           } catch {
           }
         }
-        this._log("transcript streamed to body", { newTurns: created, total: written + created, layout: settings.transcriptLayout });
+        this._log("transcript streamed to body", { newTurns: created, total: existingTurns.size, layout: settings.transcriptLayout });
         return newestGuid;
       } catch (err) {
         this._log("transcript stream failed", { error: this._errorMessage(err) });
@@ -4859,10 +5100,9 @@ ${transcriptText}` }]
     }
     /**
      * At meeting end, regroup the live (un-sectioned) transcript into collapsible topic sections:
-     * move existing streamed turns under section nodes when the final artifact matches, or build the
-     * sectioned shape directly when live rows never arrived. Only a mismatched final artifact falls back
-     * to deleting OUR tracked nodes and rebuilding; user notes are never removed. Returns stable line-item
-     * GUIDs for both topic headings and exact final transcript entries. Guarded once per bot.
+     * move existing streamed turns under section nodes, or build the sectioned shape directly when live
+     * rows never arrived. A mismatch is left intact: this path never rebuilds or replays an existing
+     * transcript. Returns stable line-item GUIDs for topic headings and exact final entries.
      */
     async _reorganizeTranscriptBySections(record, entries, sections) {
       if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.createLineItem !== "function" || typeof record.getLineItems !== "function") return { ok: false, anchors: [], turnAnchors: [] };
@@ -4875,16 +5115,20 @@ ${transcriptText}` }]
       const anchorsKey = this._bodyKey(record, `tx-section-anchors:${botId}`);
       const turnAnchorsKey = this._bodyKey(record, `tx-turn-anchors:${botId}`);
       try {
-        let state = "";
-        try {
-          state = localStorage.getItem(sectionedKey) || "";
-        } catch {
-        }
-        const startedAt = state.startsWith("writing:") ? Number(state.slice("writing:".length)) : 0;
-        if (state === "done" || startedAt && Date.now() - startedAt < 5 * 60 * 1e3) {
-          const anchors2 = await this._recoverTranscriptSectionAnchors(record, entries, sections, anchorsKey);
-          const turnAnchors2 = await this._recoverTranscriptTurnAnchors(record, entries, sections, anchors2, turnAnchorsKey);
-          return { ok: true, anchors: anchors2, turnAnchors: turnAnchors2 };
+        const persistedAnchors = await this._recoverTranscriptSectionAnchors(record, entries, sections, anchorsKey);
+        if (persistedAnchors.length === sections.length) {
+          const persistedTurns = await this._recoverTranscriptTurnAnchors(record, entries, sections, persistedAnchors, turnAnchorsKey);
+          const persistedItems = await record.getLineItems(false);
+          const hasOwnedRanges = persistedAnchors.every((anchor) => {
+            const node = persistedItems.find((item) => item.guid === anchor.guid);
+            return this._isOwnedLine(node, botId, "transcript_section") && this._lineMeta(node, LINE_META.SECTION_START) != null && this._lineMeta(node, LINE_META.SECTION_END) != null;
+          });
+          const hasFragments = persistedItems.some((item) => this._isOwnedLine(item, botId, "transcript_fragment"));
+          if (hasOwnedRanges && !hasFragments && persistedTurns.length < entries.length) {
+            await this._streamTranscriptToBody(record, entries);
+          }
+          const repairedTurns = await this._recoverTranscriptTurnAnchors(record, entries, sections, persistedAnchors, turnAnchorsKey);
+          return { ok: true, anchors: persistedAnchors, turnAnchors: repairedTurns };
         }
         try {
           localStorage.setItem(sectionedKey, `writing:${Date.now()}`);
@@ -4905,7 +5149,7 @@ ${transcriptText}` }]
         } catch {
         }
         let items = await record.getLineItems(false);
-        let heading = items.find((li) => li.guid === headGuid) || null;
+        let heading = this._findOwnedLine(items, botId, "transcript_root") || items.find((li) => li.guid === headGuid) || null;
         if (!heading) {
           const before = new Set(items.map((li) => li.guid));
           const anchorMd = this._headingAnchorMd(this._settings.transcriptHeadingText, this._settings.transcriptHeadingLevel);
@@ -4913,6 +5157,7 @@ ${transcriptText}` }]
           items = await record.getLineItems(false);
           heading = items.find((li) => !before.has(li.guid)) || null;
           if (!heading) return abort();
+          await this._markOwnedLine(heading, botId, "transcript_root");
           try {
             localStorage.setItem(headKey, heading.guid);
           } catch {
@@ -4924,16 +5169,18 @@ ${transcriptText}` }]
         } catch {
         }
         if (!Array.isArray(tracked)) tracked = [];
-        const trackedSet = new Set(tracked);
-        let turns = items.filter((li) => li.parent_guid === heading.guid && trackedSet.has(li.guid));
-        const sourceTurnCount = entries.reduce((sum, entry) => sum + Math.max(1, Number(entry && entry.sourceCount) || 1), 0);
-        const canMoveExisting = turns.length === sourceTurnCount && turns.every((li) => typeof li.move === "function");
-        if (turns.length && !canMoveExisting) {
-          await this._deleteTrackedDepthFirst(record, tracked);
-          items = await record.getLineItems(false);
-          tracked = [];
-          turns = [];
+        let legacyWritten = 0;
+        try {
+          legacyWritten = parseInt(localStorage.getItem(countKey) || "0", 10) || 0;
+        } catch {
         }
+        if (!this._isOwnedLine(heading, botId, "transcript_root")) {
+          await this._migrateLegacyTranscriptMetadata(items, heading, botId, tracked, legacyWritten);
+        }
+        const trackedSet = new Set(tracked);
+        const turns = items.filter((li) => this._isOwnedLine(li, botId, "transcript_turn"));
+        const canMoveExisting = turns.length > 0 && turns.every((li) => typeof li.move === "function");
+        if (turns.length && !canMoveExisting) return abort();
         const settings = this._settings;
         const newTracked = new Set(canMoveExisting ? tracked : []);
         const sourceOffsets = [];
@@ -4942,6 +5189,7 @@ ${transcriptText}` }]
           sourceOffsets.push(sourceCursor);
           sourceCursor += Math.max(1, Number(entry && entry.sourceCount) || 1);
         }
+        const turnBySourceIndex = new Map(turns.filter((turn) => this._lineMeta(turn, LINE_META.ENTRY_INDEX) != null).map((turn) => [Number(this._lineMeta(turn, LINE_META.ENTRY_INDEX)), turn]));
         let afterSection = items.filter((li) => li.parent_guid === heading.guid).at(-1) || null;
         let written = 0;
         const anchors = [];
@@ -4951,9 +5199,19 @@ ${transcriptText}` }]
           const secEntries = entries.slice(sec.start, sec.end + 1).filter(Boolean);
           if (!secEntries.length) continue;
           const label = formatSectionHeading(sec.title, secEntries[0], secEntries[secEntries.length - 1], settings);
-          const secNode = await record.createLineItem(heading, afterSection, "text", [{ type: "bold", text: label }], null);
-          if (!secNode) continue;
-          anchors.push({ sectionId: sec.sourceIndex ?? sectionOrder, guid: secNode.guid, title: label });
+          const sectionId = sec.sourceIndex ?? sectionOrder;
+          let secNode = items.find((item) => this._isOwnedLine(item, botId, "transcript_section") && Number(this._lineMeta(item, LINE_META.SECTION_ID)) === Number(sectionId)) || null;
+          if (!secNode) {
+            secNode = await record.createLineItem(heading, afterSection, "text", [{ type: "bold", text: label }], null);
+            if (!secNode) continue;
+            items.push(secNode);
+          }
+          await this._markOwnedLine(secNode, botId, "transcript_section", {
+            sectionId,
+            sectionStart: sec.start,
+            sectionEnd: sec.end
+          });
+          anchors.push({ sectionId, guid: secNode.guid, title: label });
           newTracked.add(secNode.guid);
           afterSection = secNode;
           let afterTurn = null;
@@ -4961,17 +5219,18 @@ ${transcriptText}` }]
             const e = entries[index];
             if (!e) continue;
             let turnTarget = null;
-            if (canMoveExisting) {
-              const count = Math.max(1, Number(e.sourceCount) || 1);
-              const group = turns.slice(sourceOffsets[index], sourceOffsets[index] + count);
+            const count = Math.max(1, Number(e.sourceCount) || 1);
+            let group = Array.from({ length: count }, (_unused, offset) => turnBySourceIndex.get(sourceOffsets[index] + offset)).filter(Boolean);
+            if (!group.length && canMoveExisting) group = turns.slice(sourceOffsets[index], sourceOffsets[index] + count);
+            if (group.length) {
               const primary = group[0];
               if (!primary) continue;
               const extras = group.slice(1);
               const extraChildren = extras.flatMap((turn) => items.filter((li) => li.parent_guid === turn.guid));
               const hasUserChildren = extraChildren.some((li) => !trackedSet.has(li.guid));
               const inline = settings.transcriptLayout === "inline";
-              const primaryText = inline ? null : items.find((li) => li.parent_guid === primary.guid && trackedSet.has(li.guid));
-              const canCompact = !hasUserChildren && typeof primary.setSegments === "function" && (inline || !!(primaryText && typeof primaryText.setSegments === "function")) && extras.every((turn) => typeof turn.delete === "function") && extraChildren.every((li) => typeof li.delete === "function");
+              const primaryText = inline ? null : items.find((li) => li.parent_guid === primary.guid && (trackedSet.has(li.guid) || this._isOwnedLine(li, botId, "transcript_text")));
+              const canCompact = group.length === count && !hasUserChildren && typeof primary.setSegments === "function" && (inline || !!(primaryText && typeof primaryText.setSegments === "function")) && extras.every((turn) => typeof turn.delete === "function") && extraChildren.every((li) => typeof li.delete === "function");
               if (canCompact) {
                 const line = inline ? `${formatEntryHeader(e, settings)}: ${e.text}` : formatEntryHeader(e, settings);
                 await primary.setSegments([{ type: "text", text: line }]);
@@ -4985,6 +5244,8 @@ ${transcriptText}` }]
                 }
                 const moved = await primary.move(secNode, afterTurn);
                 if (!moved) continue;
+                await this._markOwnedLine(moved, botId, "transcript_turn", { entryIndex: index });
+                if (primaryText) await this._markOwnedLine(primaryText, botId, "transcript_text", { entryIndex: index });
                 afterTurn = moved;
                 turnTarget = inline ? moved : primaryText;
               } else {
@@ -4996,23 +5257,36 @@ ${transcriptText}` }]
                   movedAny = true;
                 }
                 if (!movedAny) continue;
-                if (count === 1) turnTarget = inline ? afterTurn : primaryText;
+                if (count === 1 && group.length === 1) {
+                  await this._markOwnedLine(afterTurn, botId, "transcript_turn", { entryIndex: index });
+                  if (primaryText) await this._markOwnedLine(primaryText, botId, "transcript_text", { entryIndex: index });
+                  turnTarget = inline ? afterTurn : primaryText;
+                } else {
+                  for (const fragment of group) {
+                    await this._markOwnedLine(fragment, botId, "transcript_fragment");
+                    for (const child of items.filter((item) => item.parent_guid === fragment.guid && (trackedSet.has(item.guid) || this._isOwnedLine(item, botId, "transcript_text")))) {
+                      await this._markOwnedLine(child, botId, "transcript_fragment_text");
+                    }
+                  }
+                }
               }
             } else {
-              const turn = await record.createLineItem(secNode, afterTurn, "text", [{ type: "text", text: formatEntryHeader(e, settings) }], null);
+              const inline = settings.transcriptLayout === "inline";
+              const line = inline ? `${formatEntryHeader(e, settings)}: ${e.text}` : formatEntryHeader(e, settings);
+              const turn = await record.createLineItem(secNode, afterTurn, "text", [{ type: "text", text: line }], null);
               if (!turn) continue;
-              const textNode = await record.createLineItem(turn, null, "text", [{ type: "text", text: e.text }], null);
-              if (!textNode) {
-                try {
-                  await turn.delete();
-                } catch {
-                }
-                continue;
-              }
+              await this._markOwnedLine(turn, botId, "transcript_turn", { entryIndex: index });
               newTracked.add(turn.guid);
-              newTracked.add(textNode.guid);
               afterTurn = turn;
-              turnTarget = textNode;
+              if (inline) {
+                turnTarget = turn;
+              } else {
+                const textNode = await record.createLineItem(turn, null, "text", [{ type: "text", text: e.text }], null);
+                if (!textNode) continue;
+                await this._markOwnedLine(textNode, botId, "transcript_text", { entryIndex: index });
+                newTracked.add(textNode.guid);
+                turnTarget = textNode;
+              }
             }
             if (turnTarget && turnTarget.guid) turnAnchors.push({ entryIndex: index, guid: turnTarget.guid, title: formatTranscriptCitationLabel(e, settings) });
             written += 1;
@@ -5059,6 +5333,29 @@ ${transcriptText}` }]
         items = await record.getLineItems(false);
       } catch {
         return [];
+      }
+      const botId = this._text(record, FIELDS.BOT_ID) || "current";
+      const marked = items.filter((item) => this._isOwnedLine(item, botId, "transcript_section"));
+      if (marked.length) {
+        const byId = new Map(marked.map((item) => [Number(this._lineMeta(item, LINE_META.SECTION_ID)), item]));
+        const recovered = sections.map((section2, index) => {
+          const sectionId = section2.sourceIndex ?? index;
+          const node = byId.get(Number(sectionId));
+          const sectionEntries = entries.slice(section2.start, section2.end + 1).filter(Boolean);
+          if (!node || !sectionEntries.length) return null;
+          return {
+            sectionId,
+            guid: node.guid,
+            title: formatSectionHeading(section2.title, sectionEntries[0], sectionEntries[sectionEntries.length - 1], this._settings)
+          };
+        }).filter(Boolean);
+        if (recovered.length === sections.length) {
+          try {
+            localStorage.setItem(anchorsKey, JSON.stringify(recovered));
+          } catch {
+          }
+          return recovered;
+        }
       }
       let stored = [];
       try {
@@ -5107,6 +5404,28 @@ ${transcriptText}` }]
       } catch {
         return [];
       }
+      const botId = this._text(record, FIELDS.BOT_ID) || "current";
+      const marked = items.filter((item) => this._isOwnedLine(item, botId, "transcript_text") || this._isOwnedLine(item, botId, "transcript_turn"));
+      if (marked.length) {
+        const byIndex = /* @__PURE__ */ new Map();
+        for (const item of marked) {
+          const index = Number(this._lineMeta(item, LINE_META.ENTRY_INDEX));
+          if (!Number.isFinite(index)) continue;
+          const current = byIndex.get(index);
+          if (!current || this._isOwnedLine(item, botId, "transcript_text")) byIndex.set(index, item);
+        }
+        const recovered = entries.map((entry, entryIndex) => {
+          const node = byIndex.get(entryIndex);
+          return node ? { entryIndex, guid: node.guid, title: formatTranscriptCitationLabel(entry, this._settings) } : null;
+        }).filter(Boolean);
+        if (recovered.length) {
+          try {
+            localStorage.setItem(turnAnchorsKey, JSON.stringify(recovered));
+          } catch {
+          }
+          return recovered;
+        }
+      }
       let stored = [];
       try {
         stored = JSON.parse(localStorage.getItem(turnAnchorsKey) || "[]") || [];
@@ -5139,38 +5458,6 @@ ${transcriptText}` }]
       return turnAnchors;
     }
     /**
-     * Delete the given tracked line-item guids, leaves first (delete() rejects an item with children).
-     * Re-fetches each pass and stops the moment a pass makes NO progress — so a tracked turn that holds
-     * an UNtracked child (a note the user typed under it) is left intact rather than force-removed.
-     */
-    async _deleteTrackedDepthFirst(record, trackedGuids) {
-      const remaining = new Set(trackedGuids);
-      for (let pass = 0; pass < 60 && remaining.size; pass++) {
-        const items = await record.getLineItems(false);
-        const byGuid = new Map(items.map((li) => [li.guid, li]));
-        let progressed = false;
-        for (const guid of Array.from(remaining)) {
-          const li = byGuid.get(guid);
-          if (!li) {
-            remaining.delete(guid);
-            progressed = true;
-            continue;
-          }
-          let ok = false;
-          try {
-            ok = typeof li.delete === "function" ? await li.delete() : false;
-          } catch {
-            ok = false;
-          }
-          if (ok) {
-            remaining.delete(guid);
-            progressed = true;
-          }
-        }
-        if (!progressed) break;
-      }
-    }
-    /**
      * Append resolved transcript references to an already-parsed summary line. `setSegments`
      * changes only the line's inline content, so a Thymer task stays a task (and keeps its checkbox).
      * Citation failures are deliberately non-fatal: the summary line is still useful without its link.
@@ -5186,6 +5473,37 @@ ${transcriptText}` }]
         this._log("summary citation skipped", { lineItemGuid: lineItem.guid, error: this._errorMessage(err) });
       }
     }
+    _linePlainText(line) {
+      return (Array.isArray(line && line.segments) ? line.segments : []).map((segment) => {
+        if (!segment || segment.type === "ref") return "";
+        return typeof segment.text === "string" ? segment.text : "";
+      }).join("").trim();
+    }
+    async _restoreMarkedSummaryReferences(items, botId) {
+      const sectionAnchorById = /* @__PURE__ */ new Map();
+      const turnAnchorByIndex = /* @__PURE__ */ new Map();
+      for (const line of Array.isArray(items) ? items : []) {
+        if (this._isOwnedLine(line, botId, "transcript_section")) {
+          const id = Number(this._lineMeta(line, LINE_META.SECTION_ID));
+          if (Number.isFinite(id)) sectionAnchorById.set(id, { guid: line.guid, title: this._linePlainText(line) || "Transcript section" });
+        }
+        if (this._isOwnedLine(line, botId, "transcript_text") || this._isOwnedLine(line, botId, "transcript_turn")) {
+          const index = Number(this._lineMeta(line, LINE_META.ENTRY_INDEX));
+          if (Number.isFinite(index) && (!turnAnchorByIndex.has(index) || this._isOwnedLine(line, botId, "transcript_text"))) {
+            turnAnchorByIndex.set(index, { guid: line.guid, title: this._linePlainText(line) || "Transcript wording" });
+          }
+        }
+      }
+      for (const line of Array.isArray(items) ? items : []) {
+        if (!this._isOwnedLine(line, botId, "summary_item")) continue;
+        let citations = [];
+        try {
+          citations = JSON.parse(String(this._lineMeta(line, LINE_META.CITATIONS) || "[]"));
+        } catch {
+        }
+        await this._appendSummaryReferences(line, citations, sectionAnchorById, turnAnchorByIndex);
+      }
+    }
     /**
      * The summary as a collapsible "📝 Summary" heading in the body, once per bot, placed just BEFORE
      * the transcript heading (summary on top, transcript below). Rich markdown — headings, bold,
@@ -5195,16 +5513,22 @@ ${transcriptText}` }]
     async _writeSummaryToBody(record, summary, citations = [], sectionAnchors = [], turnAnchors = []) {
       if (!record || typeof record.insertFromMarkdown !== "function" || !summary || !summary.trim()) return false;
       const flagKey = this._bodyKey(record, "summary-body");
-      const botId = this._text(record, FIELDS.BOT_ID);
+      const botId = this._text(record, FIELDS.BOT_ID) || "current";
       const writingValue = `writing:${botId}:${Date.now()}`;
+      let items = typeof record.getLineItems === "function" ? await record.getLineItems(false) : [];
+      let head = this._findOwnedLine(items, botId, "summary_root");
+      if (head && Number(this._lineMeta(head, LINE_META.COMPLETE)) === 1) {
+        await this._restoreMarkedSummaryReferences(items, botId);
+        try {
+          localStorage.setItem(flagKey, botId);
+        } catch {
+        }
+        return true;
+      }
       try {
         const state = localStorage.getItem(flagKey) || "";
-        if (botId && state === botId) return true;
-        if (botId && state.startsWith(`writing:${botId}:`)) {
-          const startedAt = Number(state.slice(`writing:${botId}:`.length));
-          if (startedAt && Date.now() - startedAt < 5 * 60 * 1e3) return true;
-        }
-        if (botId) localStorage.setItem(flagKey, writingValue);
+        if (!head && state === botId) return true;
+        localStorage.setItem(flagKey, writingValue);
       } catch {
       }
       const fail = /* @__PURE__ */ __name(() => {
@@ -5215,22 +5539,25 @@ ${transcriptText}` }]
         return false;
       }, "fail");
       try {
-        let items = typeof record.getLineItems === "function" ? await record.getLineItems(false) : [];
-        let txHeadGuid = "";
-        try {
-          txHeadGuid = localStorage.getItem(this._bodyKey(record, "tx-head")) || "";
-        } catch {
+        if (!head) {
+          let txHeadGuid = "";
+          try {
+            txHeadGuid = localStorage.getItem(this._bodyKey(record, "tx-head")) || "";
+          } catch {
+          }
+          const ownedTranscript = this._findOwnedLine(items, botId, "transcript_root");
+          if (ownedTranscript) txHeadGuid = ownedTranscript.guid;
+          const topLevel = items.filter((li) => li.parent_guid === record.guid);
+          const txIdx = topLevel.findIndex((li) => li.guid === txHeadGuid);
+          const afterItem = txIdx > 0 ? topLevel[txIdx - 1] : null;
+          const before = new Set(items.map((li) => li.guid));
+          const anchorMd = this._headingAnchorMd(this._settings.summaryHeadingText, this._settings.summaryHeadingLevel);
+          if (!anchorMd || await record.insertFromMarkdown(anchorMd, null, afterItem) === false) return fail();
+          items = await record.getLineItems(false);
+          head = items.find((li) => !before.has(li.guid)) || null;
+          if (!head) return fail();
+          await this._markOwnedLine(head, botId, "summary_root", { complete: false });
         }
-        const topLevel = items.filter((li) => li.parent_guid === record.guid);
-        const txIdx = topLevel.findIndex((li) => li.guid === txHeadGuid);
-        const afterItem = txIdx > 0 ? topLevel[txIdx - 1] : null;
-        const before = new Set(items.map((li) => li.guid));
-        const anchorMd = this._headingAnchorMd(this._settings.summaryHeadingText, this._settings.summaryHeadingLevel);
-        if (!anchorMd) return fail();
-        if (await record.insertFromMarkdown(anchorMd, null, afterItem) === false) return fail();
-        items = await record.getLineItems(false);
-        const head = items.find((li) => !before.has(li.guid)) || null;
-        if (!head) return fail();
         const { preamble, groups } = groupSummaryLines(summary, citations);
         const sectionAnchorById = new Map((Array.isArray(sectionAnchors) ? sectionAnchors : []).filter((anchor) => anchor && Number.isFinite(Number(anchor.sectionId)) && anchor.guid).map((anchor) => [Number(anchor.sectionId), anchor]));
         const turnAnchorByIndex = new Map((Array.isArray(turnAnchors) ? turnAnchors : []).filter((anchor) => anchor && Number.isFinite(Number(anchor.entryIndex)) && anchor.guid).map((anchor) => [Number(anchor.entryIndex), anchor]));
@@ -5238,30 +5565,51 @@ ${transcriptText}` }]
           const kids = items.filter((li) => li.parent_guid === parentGuid);
           return kids.length ? kids[kids.length - 1] : null;
         }, "afterOf");
+        let summaryItemIndex = 0;
+        let writtenItems = 0;
         const insertSummaryLine = /* @__PURE__ */ __name(async (entry, parent, after) => {
+          const itemIndex = summaryItemIndex++;
+          const existing = this._findOwnedLine(items, botId, "summary_item", itemIndex);
+          if (existing) {
+            await this._appendSummaryReferences(existing, entry.citations, sectionAnchorById, turnAnchorByIndex);
+            writtenItems += 1;
+            return existing;
+          }
           const lineBefore = new Set(items.map((item) => item.guid));
           if (await record.insertFromMarkdown(this._escMd(entry.markdown), parent, after) === false) return after;
           items = await record.getLineItems(false);
           const created = items.find((item) => item.parent_guid === parent.guid && !lineBefore.has(item.guid)) || items.find((item) => !lineBefore.has(item.guid)) || null;
-          if (created) await this._appendSummaryReferences(created, entry.citations, sectionAnchorById, turnAnchorByIndex);
+          if (created) {
+            await this._markOwnedLine(created, botId, "summary_item", { entryIndex: itemIndex, citations: entry.citations });
+            await this._appendSummaryReferences(created, entry.citations, sectionAnchorById, turnAnchorByIndex);
+            writtenItems += 1;
+          }
           return created || after;
         }, "insertSummaryLine");
         let afterPreamble = null;
         for (const entry of preamble) {
           afterPreamble = await insertSummaryLine(entry, head, afterPreamble);
         }
-        for (const g of groups) {
-          const b = new Set(items.map((li) => li.guid));
-          if (await record.insertFromMarkdown(`### ${this._escMd(g.heading)}`, head, afterOf(head.guid)) === false) continue;
-          items = await record.getLineItems(false);
-          const sec = items.find((li) => li.parent_guid === head.guid && !b.has(li.guid)) || null;
+        for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+          const g = groups[groupIndex];
+          let sec = (items || []).find((item) => this._isOwnedLine(item, botId, "summary_section") && Number(this._lineMeta(item, LINE_META.SECTION_ID)) === groupIndex) || null;
+          if (!sec) {
+            const b = new Set(items.map((li) => li.guid));
+            if (await record.insertFromMarkdown(`### ${this._escMd(g.heading)}`, head, afterOf(head.guid)) === false) continue;
+            items = await record.getLineItems(false);
+            sec = items.find((li) => li.parent_guid === head.guid && !b.has(li.guid)) || null;
+            if (sec) await this._markOwnedLine(sec, botId, "summary_section", { sectionId: groupIndex });
+          }
           if (sec && g.content.length) {
             let afterContent = null;
             for (const entry of g.content) afterContent = await insertSummaryLine(entry, sec, afterContent);
           }
         }
+        const expectedItems = preamble.length + groups.reduce((sum, group) => sum + group.content.length, 0);
+        if (writtenItems !== expectedItems) return fail();
+        await this._markOwnedLine(head, botId, "summary_root", { complete: true });
         try {
-          if (botId) localStorage.setItem(flagKey, botId);
+          localStorage.setItem(flagKey, botId);
         } catch {
         }
         this._log("summary written to body", { botId });
@@ -5458,6 +5806,37 @@ ${transcriptText}` }]
       const json = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(formatBridgeError(json, response.status));
       return json;
+    }
+    async _showMeetingDiagnostics(record) {
+      if (!record) return this._toast("Open a Meeting record first", "Diagnostics needs an active Meeting record.");
+      const botId = this._text(record, FIELDS.BOT_ID);
+      if (!botId) return this._toast("No bot ID", "Send the notetaker before opening meeting diagnostics.");
+      if (!this._bridgeUrl()) return this._toast("Bridge not configured", "Realtime diagnostics require the hosted bridge.");
+      try {
+        const result = await this._bridgeJson("/api/recall/diagnostics", {
+          recallApiKey: this._settings.recallApiKey,
+          recallRegion: this._settings.recallRegion,
+          botId
+        });
+        const debug = result && result.debug || {};
+        if (record.guid) this._diagnosticsByRecord.set(record.guid, debug);
+        const parts = [
+          `Bridge ${debug.bridgeVersion || "unknown"}`,
+          `KV ${debug.kv || "unknown"}`,
+          `verification ${debug.webhookVerification || "unknown"}`,
+          `webhooks ${Number(debug.realtimePosts) || 0}`,
+          `rows ${Number(debug.liveRows) || 0}`,
+          `parse failures ${Number(debug.realtimeParseFailures) || 0}`,
+          `endpoints ${Number(debug.realtimeEndpoints) || 0}`,
+          `transcript artifacts ${Number(debug.transcriptArtifacts) || 0}`
+        ];
+        if (debug.liveUpdatedAt) parts.push(`last event ${new Date(debug.liveUpdatedAt).toLocaleString()}`);
+        if (Array.isArray(debug.transcriptStatuses) && debug.transcriptStatuses.length) parts.push(`transcript ${debug.transcriptStatuses.join(", ")}`);
+        if (Array.isArray(debug.realtimeEndpointStatuses) && debug.realtimeEndpointStatuses.length) parts.push(`endpoint status ${debug.realtimeEndpointStatuses.join(", ")}`);
+        this._toast("Meeting diagnostics", parts.join(" \xB7 "));
+      } catch (err) {
+        this._toast("Unable to load diagnostics", this._errorMessage(err));
+      }
     }
     _collectionFields() {
       const conf = this.getConfiguration ? this.getConfiguration() : {};
@@ -5797,8 +6176,114 @@ ${transcriptText}` }]
             this._setupSteps()
           ]
         }),
+        this._setupDoctorSection(),
         this._peopleLinkingSection()
       ];
+    }
+    _setupDoctorSection() {
+      const state = this._setupDoctorState;
+      const rows = state && Array.isArray(state.results) ? state.results : [];
+      return section({
+        label: "Setup Doctor",
+        hint: "Checks the bridge, credentials, storage, and field bindings without creating a bot or generating text.",
+        body: [
+          h(
+            "div",
+            { class: `${ROOT_CLASS}-field` },
+            button({
+              label: this._setupDoctorInFlight ? "Checking\u2026" : "Run setup check",
+              variant: "ghost",
+              disabled: !!this._setupDoctorInFlight,
+              onClick: /* @__PURE__ */ __name(() => void this._runSetupDoctor(), "onClick")
+            }),
+            state && state.checkedAt ? h("span", { class: `${ROOT_CLASS}-field-hint` }, `Last checked ${new Date(state.checkedAt).toLocaleString()}`) : null
+          ),
+          rows.length ? h("div", { class: `${ROOT_CLASS}-doctor-results` }, rows.map(
+            (item) => h(
+              "div",
+              { class: `${ROOT_CLASS}-doctor-result ${ROOT_CLASS}-doctor-result--${item.level}` },
+              h("i", { class: `ti ti-${item.level === "pass" ? "circle-check" : item.level === "warn" ? "alert-triangle" : "circle-x"}`, "aria-hidden": "true" }),
+              h("span", {}, h("strong", {}, item.label), ` \u2014 ${item.message}`)
+            )
+          )) : h("span", { class: `${ROOT_CLASS}-field-hint` }, "No checks run yet.")
+        ]
+      });
+    }
+    async _runSetupDoctor() {
+      if (this._setupDoctorInFlight) return this._setupDoctorInFlight;
+      const task = (async () => {
+        const results = [];
+        const add = /* @__PURE__ */ __name((level, label, message) => results.push({ level, label, message }), "add");
+        const bridge = this._bridgeUrl();
+        let health = null;
+        if (!bridge || !/^https:\/\//i.test(bridge)) {
+          add("fail", "Bridge", "Enter a valid HTTPS Bridge URL.");
+        } else {
+          try {
+            const response = await fetchWithBackoff(`${bridge}/health`, { method: "GET" });
+            health = await response.json().catch(() => ({}));
+            if (!response.ok || !health.ok) throw new Error(formatBridgeError(health, response.status));
+            const version = String(health.bridgeVersion || "0.0.0");
+            if (compareVersions(version, MIN_BRIDGE_VERSION) < 0) add("fail", "Bridge", `Version ${version} is too old; deploy ${MIN_BRIDGE_VERSION}.`);
+            else add("pass", "Bridge", `Version ${version} is reachable.`);
+            const capabilities = new Set(Array.isArray(health.capabilities) ? health.capabilities : []);
+            const missingCapabilities = REQUIRED_BRIDGE_CAPABILITIES.filter((capability) => !capabilities.has(capability));
+            if (missingCapabilities.length) add("fail", "Bridge capabilities", `Missing ${missingCapabilities.join(", ")}.`);
+            else add("pass", "Bridge capabilities", "Realtime storage, connection checks, and participant artifacts are supported.");
+            if (health.kv === "bound") add("pass", "Live storage", "RECALL_TRANSCRIPTS is bound.");
+            else add("fail", "Live storage", "Bind the RECALL_TRANSCRIPTS KV namespace and redeploy.");
+            if (health.webhookVerification === "enforced") add("pass", "Webhook security", "Recall signatures are enforced.");
+            else add("warn", "Webhook security", "Compatibility mode is accepting unsigned events; add RECALL_WORKSPACE_VERIFICATION_SECRET when convenient.");
+          } catch (err) {
+            add("fail", "Bridge", this._errorMessage(err));
+          }
+        }
+        if (!this._settings.recallApiKey) add("fail", "Recall", "Recall API key is missing.");
+        else if (health && health.ok && compareVersions(String(health.bridgeVersion || "0.0.0"), MIN_BRIDGE_VERSION) >= 0) {
+          try {
+            await this._bridgeJson("/api/recall/check", {
+              recallApiKey: this._settings.recallApiKey,
+              recallRegion: this._settings.recallRegion
+            });
+            add("pass", "Recall", `Key works in ${this._settings.recallRegion}.`);
+          } catch (err) {
+            add("fail", "Recall", this._errorMessage(err));
+          }
+        }
+        if (!this._settings.anthropicApiKey) add("fail", "Claude", "Anthropic API key is missing.");
+        else if (health && health.ok && compareVersions(String(health.bridgeVersion || "0.0.0"), MIN_BRIDGE_VERSION) >= 0) {
+          try {
+            const checked = await this._bridgeJson("/api/anthropic/check", {
+              anthropicApiKey: this._settings.anthropicApiKey,
+              anthropicModel: this._settings.anthropicModel
+            });
+            if (checked.modelAvailable === false) add("warn", "Claude", `Key works, but ${this._settings.anthropicModel} was not returned by the Models API.`);
+            else add("pass", "Claude", `Key and ${this._settings.anthropicModel} are available.`);
+          } catch (err) {
+            add("fail", "Claude", this._errorMessage(err));
+          }
+        }
+        const required = [FIELDS.MEETING_URL, FIELDS.TRANSCRIPT, FIELDS.SUMMARY, FIELDS.PARTICIPANT_NAMES];
+        const missing = required.filter((field) => !this._fieldById(this._mappedFieldId(field)));
+        if (missing.length) add("fail", "Fields", `Missing or invalid: ${missing.join(", ")}.`);
+        else add("pass", "Fields", "Meeting URL, Transcript, Summary, and Participant Names are bound.");
+        const peopleGuid = String(this._settings.personCollectionGuid || "");
+        if (!peopleGuid) add("warn", "People linking", "Optional and not configured.");
+        else if (isCompatibleAttendeesField(this._fieldById(this._settings.attendeesFieldId), peopleGuid)) add("pass", "People linking", "Attendees relation is compatible.");
+        else add("fail", "People linking", "Choose or create a compatible Attendees relation.");
+        this._setupDoctorState = { checkedAt: Date.now(), results };
+        this._renderPanel();
+        const failures = results.filter((item) => item.level === "fail").length;
+        this._toast(failures ? "Setup needs attention" : "Setup looks healthy", failures ? `${failures} check${failures === 1 ? "" : "s"} failed.` : "All required checks passed.");
+      })();
+      this._setupDoctorInFlight = task;
+      this._renderPanel();
+      try {
+        await task;
+      } finally {
+        if (this._setupDoctorInFlight === task) this._setupDoctorInFlight = null;
+        this._renderPanel();
+      }
     }
     _peopleLinkingSection() {
       const targetGuid = String(this._draft.personCollectionGuid || "");
@@ -6650,6 +7135,24 @@ ${transcriptText}` }]
 				text-decoration: underline;
 				text-underline-offset: 2px;
 			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-results {
+				display: grid;
+				gap: 7px;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-result {
+				display: flex;
+				align-items: flex-start;
+				gap: 8px;
+				padding: 8px 10px;
+				border: 1px solid var(--tps-divider);
+				border-radius: var(--tps-radius-sm, 4px);
+				color: var(--tps-text-muted);
+				font-size: var(--tps-fs-hint);
+				line-height: 1.4;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-result--pass i { color: var(--tps-success, #10b981); }
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-result--warn i { color: var(--tps-warning, #f59e0b); }
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-result--fail i { color: var(--tps-danger, #ef4444); }
 			.${ROOT_CLASS}-panel input,
 			.${ROOT_CLASS}-panel textarea,
 			.${ROOT_CLASS}-panel select {
@@ -6733,22 +7236,6 @@ ${transcriptText}` }]
     return entries;
   }
   __name(transcriptEntries, "transcriptEntries");
-  function coalesceAdjacentTranscriptEntries(entries) {
-    const out = [];
-    for (const entry of Array.isArray(entries) ? entries : []) {
-      if (!entry || !entry.text) continue;
-      const previous = out[out.length - 1];
-      const speakerKey = entry.speakerKey || `name:${String(entry.speaker || "").trim().toLowerCase()}`;
-      if (previous && previous.speakerKey === speakerKey) {
-        previous.text = `${previous.text} ${entry.text}`.replace(/\s{2,}/g, " ").trim();
-        previous.sourceCount += 1;
-        continue;
-      }
-      out.push({ ...entry, speakerKey, sourceCount: 1 });
-    }
-    return out;
-  }
-  __name(coalesceAdjacentTranscriptEntries, "coalesceAdjacentTranscriptEntries");
   function entryStamp(entry, settings) {
     const clock = entry.absoluteIso ? formatClockTime(entry.absoluteIso) : null;
     const elapsed = entry.relativeSec == null ? null : formatRelativeTime(entry.relativeSec);
@@ -7065,6 +7552,15 @@ ${transcriptText}` }]
     return Math.min(max, Math.max(min, n));
   }
   __name(clampNumber, "clampNumber");
+  function compareVersions(left, right) {
+    const a = String(left || "").split(".").map((part) => parseInt(part, 10) || 0);
+    const b = String(right || "").split(".").map((part) => parseInt(part, 10) || 0);
+    for (let index = 0; index < Math.max(a.length, b.length); index++) {
+      if ((a[index] || 0) !== (b[index] || 0)) return (a[index] || 0) > (b[index] || 0) ? 1 : -1;
+    }
+    return 0;
+  }
+  __name(compareVersions, "compareVersions");
   function propertyValueToText(value) {
     if (value == null) return "";
     if (typeof value === "string" || typeof value === "number") return String(value).trim();

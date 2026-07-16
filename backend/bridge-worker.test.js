@@ -1,6 +1,57 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { test } from 'node:test';
 import worker from './bridge-worker.js';
+
+function kvStore(pageSize = 1000) {
+	const values = new Map();
+	return {
+		values,
+		async get(keyOrKeys, type) {
+			const parse = value => value == null ? null : type === 'json' ? JSON.parse(value) : value;
+			if (Array.isArray(keyOrKeys)) return new Map(keyOrKeys.map(key => [key, parse(values.get(key))]));
+			return parse(values.get(keyOrKeys));
+		},
+		async put(key, value) { values.set(key, value); },
+		async list({ prefix = '', cursor } = {}) {
+			const offset = Number(cursor) || 0;
+			const names = Array.from(values.keys()).filter(key => key.startsWith(prefix)).sort();
+			const page = names.slice(offset, offset + pageSize);
+			const next = offset + page.length;
+			return {
+				keys: page.map(name => ({ name })),
+				list_complete: next >= names.length,
+				...(next < names.length ? { cursor: String(next) } : {}),
+			};
+		},
+	};
+}
+
+function realtimePayload(botId, relative, text = 'Hello', speaker = 'Ada') {
+	return {
+		event: 'transcript.data',
+		data: {
+			bot: { id: botId },
+			transcript: { id: `tx-${botId}` },
+			recording: { id: `rec-${botId}` },
+			data: {
+				participant: { name: speaker },
+				words: text ? [{ text, start_timestamp: { relative } }] : [],
+			},
+		},
+	};
+}
+
+function signedHeaders(secret, id, timestamp, raw, extraSignature = '') {
+	const key = Buffer.from(secret.slice('whsec_'.length), 'base64');
+	const signature = createHmac('sha256', key).update(`${id}.${timestamp}.${raw}`).digest('base64');
+	return {
+		'content-type': 'application/json',
+		'webhook-id': id,
+		'webhook-timestamp': timestamp,
+		'webhook-signature': `${extraSignature ? `${extraSignature} ` : ''}v1,${signature}`,
+	};
+}
 
 test('create bot forwards through bridge with Recall token', async () => {
 	let forwarded = null;
@@ -382,4 +433,173 @@ test('summary endpoint returns text content', async () => {
 
 	assert.equal(response.status, 200);
 	assert.equal(json.summary, 'Decision: ship it.');
+});
+
+test('health and credential checks expose only stable validation state', async () => {
+	const health = await worker.fetch(new Request('https://bridge.test/health'), {
+		RECALL_TRANSCRIPTS: kvStore(),
+		RECALL_WORKSPACE_VERIFICATION_SECRET: 'whsec_dGVzdA==',
+	});
+	const healthJson = await health.json();
+	assert.equal(healthJson.ok, true);
+	assert.equal(healthJson.bridgeVersion, '1.22.0');
+	assert.equal(healthJson.kv, 'bound');
+	assert.equal(healthJson.webhookVerification, 'enforced');
+	assert.ok(healthJson.capabilities.includes('append-only-realtime'));
+
+	const recall = await worker.fetch(new Request('https://bridge.test/api/recall/check', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ recallApiKey: 'recall-secret', recallRegion: 'eu-central-1' }),
+	}), {
+		__fetch: async (url, options) => {
+			assert.equal(url, 'https://eu-central-1.recall.ai/api/v1/bot/?use_cursor=true');
+			assert.equal(options.headers.Authorization, 'Token recall-secret');
+			return Response.json({ results: [{ id: 'must-not-leak' }] });
+		},
+	});
+	assert.deepEqual(await recall.json(), { ok: true, region: 'eu-central-1' });
+
+	const anthropic = await worker.fetch(new Request('https://bridge.test/api/anthropic/check', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ anthropicApiKey: 'anthropic-secret', anthropicModel: 'claude-test' }),
+	}), {
+		__fetch: async (url, options) => {
+			assert.equal(url, 'https://api.anthropic.com/v1/models?limit=100');
+			assert.equal(options.headers['x-api-key'], 'anthropic-secret');
+			return Response.json({ data: [{ id: 'claude-test' }] });
+		},
+	});
+	assert.deepEqual(await anthropic.json(), { ok: true, model: 'claude-test', modelAvailable: true });
+});
+
+test('signed realtime webhook accepts rotated signatures and rejects invalid or stale requests', async () => {
+	const secret = 'whsec_dGVzdC13ZWJob29rLXNlY3JldA==';
+	const store = kvStore();
+	const env = { RECALL_TRANSCRIPTS: store, RECALL_WORKSPACE_VERIFICATION_SECRET: secret };
+	const raw = JSON.stringify(realtimePayload('bot_signed', 1, 'Verified'));
+	const timestamp = String(Math.floor(Date.now() / 1000));
+	const valid = await worker.fetch(new Request('https://bridge.test/api/recall/realtime', {
+		method: 'POST',
+		headers: signedHeaders(secret, 'evt-valid', timestamp, raw, 'v1,AAAA'),
+		body: raw,
+	}), env);
+	assert.equal(valid.status, 202);
+	assert.equal(store.values.size, 1);
+
+	const invalid = await worker.fetch(new Request('https://bridge.test/api/recall/realtime', {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			'webhook-id': 'evt-invalid',
+			'webhook-timestamp': timestamp,
+			'webhook-signature': 'v1,AAAA',
+		},
+		body: raw,
+	}), env);
+	assert.equal(invalid.status, 401);
+	assert.equal(store.values.size, 1);
+
+	const staleTimestamp = String(Math.floor(Date.now() / 1000) - 3600);
+	const stale = await worker.fetch(new Request('https://bridge.test/api/recall/realtime', {
+		method: 'POST',
+		headers: signedHeaders(secret, 'evt-stale', staleTimestamp, raw),
+		body: raw,
+	}), env);
+	assert.equal(stale.status, 401);
+	assert.equal(store.values.size, 1);
+});
+
+test('append-only realtime storage deduplicates, counts malformed events, and orders rows', async () => {
+	const store = kvStore();
+	const env = { RECALL_TRANSCRIPTS: store };
+	const post = (id, payload) => worker.fetch(new Request('https://bridge.test/api/recall/realtime', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json', 'webhook-id': id },
+		body: JSON.stringify(payload),
+	}), env);
+	await Promise.all([
+		post('evt-late', realtimePayload('bot_append_only', 8, 'Second')),
+		post('evt-early', realtimePayload('bot_append_only', 2, 'First')),
+		post('evt-empty', realtimePayload('bot_append_only', 4, '')),
+		post('evt-early', realtimePayload('bot_append_only', 2, 'First')),
+	]);
+	assert.equal(store.values.size, 3);
+	assert.ok(Array.from(store.values.keys()).every(key => key.startsWith('bot:bot_append_only:event:')));
+
+	const transcript = await worker.fetch(new Request('https://bridge.test/api/recall/transcript', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ botId: 'bot_append_only', recallApiKey: 'key' }),
+	}), { ...env, __fetch: async () => Response.json({ detail: 'not ready' }, { status: 404 }) });
+	const json = await transcript.json();
+	assert.equal(transcript.status, 200);
+	assert.deepEqual(json.results.map(row => row.text), ['First', 'Second']);
+	assert.equal(json.receivedPosts, 3);
+	assert.equal(json.parseFailures, 1);
+});
+
+test('KV migration reads legacy sessions and paginated event keys in bulk', async () => {
+	const store = kvStore(40);
+	const botId = 'bot_paginated_migration';
+	await store.put(`bot:${botId}`, JSON.stringify({
+		botId,
+		rows: [{ speaker: 'Ada', text: 'Legacy', relativeTime: 0 }],
+		receivedPosts: 1,
+		updatedAt: 1,
+	}));
+	for (let index = 1; index <= 105; index += 1) {
+		await store.put(`bot:${botId}:event:${String(index).padStart(3, '0')}`, JSON.stringify({
+			id: String(index).padStart(3, '0'),
+			botId,
+			parseStatus: 'parsed',
+			receivedAt: index,
+			row: { speaker: 'Ada', text: `Row ${index}`, relativeTime: index },
+		}));
+	}
+	const response = await worker.fetch(new Request('https://bridge.test/api/recall/transcript', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ botId, recallApiKey: 'key' }),
+	}), {
+		RECALL_TRANSCRIPTS: store,
+		__fetch: async () => Response.json({ detail: 'not ready' }, { status: 404 }),
+	});
+	const json = await response.json();
+	assert.equal(response.status, 200);
+	assert.equal(json.results.length, 106);
+	assert.equal(json.results[0].text, 'Legacy');
+	assert.equal(json.results[105].text, 'Row 105');
+	assert.equal(json.receivedPosts, 106);
+});
+
+test('bot creation reuses a nonterminal bot with matching record metadata', async () => {
+	let posts = 0;
+	const response = await worker.fetch(new Request('https://bridge.test/api/recall/bots', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			recallApiKey: 'key',
+			payload: {
+				meeting_url: 'https://meet.google.com/reuse-me',
+				metadata: { record_guid: 'record-123', plugin: 'thymer-recall-ai' },
+			},
+		}),
+	}), {
+		__fetch: async (url, options) => {
+			if (options.method === 'POST') posts += 1;
+			assert.match(url, /metadata__record_guid=record-123/);
+			return Response.json({ results: [{
+				id: 'bot-existing',
+				meeting_url: 'https://meet.google.com/reuse-me',
+				status: { code: 'in_call_recording' },
+			}] });
+		},
+	});
+	const json = await response.json();
+	assert.equal(response.status, 200);
+	assert.equal(json.botId, 'bot-existing');
+	assert.equal(json.deduplicated, true);
+	assert.equal(posts, 0);
 });

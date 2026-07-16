@@ -6,6 +6,16 @@ const RECALL_REGIONS = Object.freeze({
 	payg: 'https://api.recall.ai',
 });
 
+const BRIDGE_VERSION = '1.22.0';
+const BRIDGE_CAPABILITIES = Object.freeze([
+	'append-only-realtime',
+	'bridge-checks',
+	'participant-artifact',
+	'signed-realtime',
+]);
+const REALTIME_TTL_SECONDS = 60 * 60 * 24 * 7;
+const WEBHOOK_MAX_AGE_SECONDS = 5 * 60;
+const TERMINAL_BOT_STATUSES = new Set(['done', 'fatal', 'call_ended', 'recording_done', 'media_expired', 'analysis_done', 'analysis_failed']);
 const LIVE_SESSIONS = new Map();
 
 export default {
@@ -19,17 +29,23 @@ export default {
 				const store = transcriptStore(env);
 				return json({
 					ok: true,
+					bridgeVersion: BRIDGE_VERSION,
+					capabilities: BRIDGE_CAPABILITIES,
 					kv: store ? 'bound' : 'MISSING',
+					webhookVerification: env.RECALL_WORKSPACE_VERIFICATION_SECRET ? 'enforced' : 'compatibility',
 					kvHint: store ? undefined : 'Bind a KV namespace named RECALL_TRANSCRIPTS to this Worker, or the live transcript cannot be stored.',
 				});
 			}
 			if (request.method !== 'POST') return json({ error: 'Not found' }, 404);
 			if (url.pathname === '/api/recall/bots') return await createRecallBot(request, env);
+			if (url.pathname === '/api/recall/check') return await checkRecallConnection(request, env);
 			if (url.pathname === '/api/recall/bot') return await getRecallBot(request, env);
+			if (url.pathname === '/api/recall/diagnostics') return await getRecallDiagnostics(request, env);
 			if (url.pathname === '/api/recall/transcript') return await getRecallTranscript(request, env);
 			if (url.pathname === '/api/recall/participants') return await getRecallParticipants(request, env);
 			if (url.pathname === '/api/recall/leave') return await leaveRecallCall(request, env);
 			if (url.pathname === '/api/recall/realtime') return await receiveRealtimeTranscript(request, env);
+			if (url.pathname === '/api/anthropic/check') return await checkAnthropicConnection(request, env);
 			if (url.pathname === '/api/anthropic/summary') return await createSummary(request, env);
 			return json({ error: 'Not found' }, 404);
 		} catch (err) {
@@ -59,6 +75,18 @@ async function createRecallBot(request, env) {
 			in_call_recording: image,
 		};
 	}
+	const existing = await findExistingRecallBot(env, body.recallRegion, apiKey, payload);
+	if (existing) {
+		const botId = existing.id || existing.bot_id;
+		if (botId) upsertSession(botId);
+		console.info('[recall-ai bridge] reused existing bot', { botId, recordGuid: payload.metadata && payload.metadata.record_guid });
+		return json({
+			botId,
+			status: latestRecallStatus(existing) || 'bot.created',
+			recall: existing,
+			deduplicated: true,
+		});
+	}
 	const response = await recallFetch(env, body.recallRegion, '/api/v1/bot/', {
 		method: 'POST',
 		headers: recallHeaders(apiKey),
@@ -67,7 +95,7 @@ async function createRecallBot(request, env) {
 	const data = await safeJson(response);
 	if (!response.ok) return json({ error: recallError(data, response.status), detail: data }, response.status);
 	const botId = data.id || data.bot_id;
-	if (botId) upsertSession(botId, { updatedAt: Date.now() });
+	if (botId) upsertSession(botId);
 	console.info('[recall-ai bridge] created bot', {
 		botId,
 		status: latestRecallStatus(data) || 'bot.created',
@@ -78,6 +106,79 @@ async function createRecallBot(request, env) {
 		botId,
 		status: latestRecallStatus(data) || 'bot.created',
 		recall: data,
+	});
+}
+
+async function findExistingRecallBot(env, region, apiKey, payload) {
+	const metadata = payload && payload.metadata || {};
+	const recordGuid = String(metadata.record_guid || '').trim();
+	if (!recordGuid) return null;
+	const source = String(metadata.source || 'thymer-recall-ai-plugin').trim();
+	try {
+		const response = await recallFetch(env, region, `/api/v1/bot/?use_cursor=true&metadata__record_guid=${encodeURIComponent(recordGuid)}&metadata__source=${encodeURIComponent(source)}`, {
+			method: 'GET',
+			headers: recallHeaders(apiKey, false),
+		});
+		const data = await safeJson(response);
+		if (!response.ok) return null;
+		const bots = Array.isArray(data && data.results) ? data.results : Array.isArray(data) ? data : [];
+		const meetingUrl = String(payload.meeting_url || '').trim();
+		return bots.find(bot => {
+			const status = String(latestRecallStatus(bot) || '').toLowerCase();
+			if (TERMINAL_BOT_STATUSES.has(status) || status.includes('fatal') || status.includes('done')) return false;
+			const candidate = typeof bot.meeting_url === 'string'
+				? bot.meeting_url
+				: firstString(bot.meeting_url && bot.meeting_url.url, bot.meeting_url && bot.meeting_url.meeting_url);
+			return !candidate || !meetingUrl || candidate === meetingUrl;
+		}) || null;
+	} catch {
+		// Deduplication is a guard, not a reason to make bot creation unavailable.
+		return null;
+	}
+}
+
+async function checkRecallConnection(request, env) {
+	const body = await readJson(request);
+	const apiKey = recallApiKey(body, env);
+	if (!apiKey) return json({ ok: false, error: 'Recall API key is required' }, 400);
+	const response = await recallFetch(env, body.recallRegion, '/api/v1/bot/?use_cursor=true', {
+		method: 'GET',
+		headers: recallHeaders(apiKey, false),
+	});
+	const data = await safeJson(response);
+	if (!response.ok) return json({
+		ok: false,
+		error: response.status === 401 || response.status === 403
+			? 'Recall rejected this key for the selected region.'
+			: `Recall validation failed (${response.status}).`,
+	}, response.status);
+	return json({ ok: true, region: String(body.recallRegion || 'us-east-1') });
+}
+
+async function checkAnthropicConnection(request, env) {
+	const body = await readJson(request);
+	const apiKey = body.anthropicApiKey || env.ANTHROPIC_API_KEY || '';
+	if (!apiKey) return json({ ok: false, error: 'Anthropic API key is required' }, 400);
+	const model = String(body.anthropicModel || env.ANTHROPIC_MODEL || '').trim();
+	const response = await fetchImpl(env)('https://api.anthropic.com/v1/models?limit=100', {
+		method: 'GET',
+		headers: {
+			'x-api-key': apiKey,
+			'anthropic-version': '2023-06-01',
+		},
+	});
+	const data = await safeJson(response);
+	if (!response.ok) return json({
+		ok: false,
+		error: response.status === 401 || response.status === 403
+			? 'Anthropic rejected this API key.'
+			: `Anthropic validation failed (${response.status}).`,
+	}, response.status);
+	const models = Array.isArray(data && data.data) ? data.data : [];
+	return json({
+		ok: true,
+		model,
+		modelAvailable: !model || models.some(item => item && item.id === model),
 	});
 }
 
@@ -93,6 +194,21 @@ async function getRecallBot(request, env) {
 	const data = await safeJson(response);
 	if (!response.ok) return json({ error: recallError(data, response.status), detail: data }, response.status);
 	return json(data);
+}
+
+async function getRecallDiagnostics(request, env) {
+	const body = await readJson(request);
+	const apiKey = recallApiKey(body, env);
+	if (!apiKey) return json({ error: 'Recall API key is required' }, 400);
+	if (!body.botId) return json({ error: 'botId is required' }, 400);
+	const live = await liveTranscriptPayload(body.botId, env);
+	const response = await recallFetch(env, body.recallRegion, `/api/v1/bot/${encodeURIComponent(body.botId)}/`, {
+		method: 'GET',
+		headers: recallHeaders(apiKey, false),
+	});
+	const bot = await safeJson(response);
+	if (!response.ok) return json({ error: recallError(bot, response.status) }, response.status);
+	return json({ ok: true, debug: await transcriptDebug(env, body.recallRegion, apiKey, bot, live) });
 }
 
 /** Pull the notetaker out of the call. Recall keeps whatever it has already recorded. */
@@ -205,7 +321,14 @@ async function getRecallParticipants(request, env) {
 }
 
 async function receiveRealtimeTranscript(request, env) {
-	const payload = await readJson(request);
+	const rawBody = await request.text();
+	try {
+		await verifyRecallWebhook(request.headers, rawBody, env.RECALL_WORKSPACE_VERIFICATION_SECRET || '');
+	} catch (err) {
+		console.warn('[recall-ai bridge] rejected realtime webhook', { error: errorMessage(err) });
+		return json({ ok: false, error: 'Recall webhook verification failed' }, 401);
+	}
+	const payload = parseJson(rawBody);
 	const botId = botIdFromPayload(payload);
 	if (!botId) {
 		console.info('[recall-ai bridge] realtime ignored: missing bot id', {
@@ -214,42 +337,33 @@ async function receiveRealtimeTranscript(request, env) {
 		});
 		return json({ ok: true, ignored: 'missing bot id' }, 202);
 	}
-	// Store FINALIZED utterances only. `transcript.partial_data` is the recognizer's live guess —
-	// "chap" -> "chapter" -> "chapter 16" -> ... — one event per word as it refines. Storing those
-	// filled the transcript with every intermediate state of the same sentence. `transcript.data` is
-	// the completed utterance: one clean line. New bots no longer subscribe to partials at all, but a
-	// bot created before this fix still sends them, so drop them here too.
 	const eventName = (payload && payload.event) || '';
-	if (eventName && eventName !== 'transcript.data') {
-		return json({ ok: true, ignored: `non-final event ${eventName}` }, 202);
-	}
-	// Refresh from KV before appending. Webhook POSTs can hit different Worker isolates, so each
-	// isolate's in-memory session is only a cache and must never be treated as the source of truth.
-	const session = await getLiveSession(botId, env, true);
-	session.receivedPosts = (Number(session.receivedPosts) || 0) + 1;
-	const row = normalizeRealtimeTranscript(payload);
-	if (!row || !row.text) {
+	const receivedAt = Date.now();
+	const row = eventName && eventName !== 'transcript.data' ? null : normalizeRealtimeTranscript(payload);
+	if (row && !row.absoluteTime) row.absoluteTime = new Date(receivedAt).toISOString();
+	const eventId = await realtimeEventId(request.headers, rawBody);
+	const event = {
+		id: eventId,
+		botId,
+		eventName: eventName || null,
+		parseStatus: eventName && eventName !== 'transcript.data' ? 'ignored_non_final' : (row && row.text ? 'parsed' : 'empty_transcript'),
+		receivedAt,
+		row: row && row.text ? row : null,
+		transcriptId: artifactId(payload, 'transcript'),
+		recordingId: artifactId(payload, 'recording'),
+	};
+	const session = upsertSession(botId);
+	mergeRealtimeEvent(session, event);
+	await saveRealtimeEvent(event, env);
+	if (!event.row) {
 		console.info('[recall-ai bridge] realtime ignored: empty transcript', {
 			botId,
-			event: payload && payload.event || null,
+			event: eventName || null,
+			parseStatus: event.parseStatus,
 			hasWords: !!(payload && payload.data && payload.data.data && payload.data.data.words),
 		});
-		session.updatedAt = Date.now();
-		await saveLiveSession(session, env);
-		return json({ ok: true, ignored: 'empty transcript' }, 202);
+		return json({ ok: true, ignored: event.parseStatus }, 202);
 	}
-	// Stamp the wall-clock time we RECEIVED this finalized utterance — the realtime webhook carries
-	// no absolute time, and receipt is within a second or two of when it was spoken. The plugin
-	// renders this in the reader's local timezone as "[2:47 PM]".
-	if (!row.absoluteTime) row.absoluteTime = new Date().toISOString();
-	const key = `${row.relativeTime || ''}:${row.speaker}:${row.text}`;
-	if (!session.keys.has(key)) {
-		session.keys.add(key);
-		session.rows.push(row);
-		if (session.rows.length > 5000) session.rows.shift();
-	}
-	session.updatedAt = Date.now();
-	await saveLiveSession(session, env);
 	console.info('[recall-ai bridge] realtime transcript row', {
 		botId,
 		speaker: row.speaker,
@@ -258,6 +372,45 @@ async function receiveRealtimeTranscript(request, env) {
 		receivedPosts: session.receivedPosts,
 	});
 	return json({ ok: true }, 202);
+}
+
+async function verifyRecallWebhook(headers, rawBody, secret) {
+	if (!secret) return { configured: false };
+	if (!String(secret).startsWith('whsec_')) throw new Error('Verification secret must start with whsec_');
+	const id = headers.get('webhook-id') || headers.get('svix-id') || '';
+	const timestamp = headers.get('webhook-timestamp') || headers.get('svix-timestamp') || '';
+	const signatures = headers.get('webhook-signature') || headers.get('svix-signature') || '';
+	if (!id || !timestamp || !signatures) throw new Error('Missing verification headers');
+	const seconds = Number(timestamp);
+	if (!Number.isFinite(seconds) || Math.abs(Date.now() / 1000 - seconds) > WEBHOOK_MAX_AGE_SECONDS) throw new Error('Stale webhook timestamp');
+	const keyBytes = base64Bytes(String(secret).slice('whsec_'.length));
+	const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+	const message = new TextEncoder().encode(`${id}.${timestamp}.${rawBody}`);
+	const expected = new Uint8Array(await crypto.subtle.sign('HMAC', key, message));
+	for (const token of signatures.split(/\s+/)) {
+		const [version, encoded] = token.split(',');
+		if (version !== 'v1' || !encoded) continue;
+		let actual;
+		try { actual = base64Bytes(encoded); } catch { continue; }
+		if (timingSafeEqual(expected, actual)) return { configured: true };
+	}
+	throw new Error('No matching signature');
+}
+
+async function realtimeEventId(headers, rawBody) {
+	const supplied = headers.get('webhook-id') || headers.get('svix-id') || '';
+	if (supplied) return supplied.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180);
+	try {
+		const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rawBody)));
+		return `fallback-${Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+	} catch {
+		return `fallback-${fnv1a(rawBody)}`;
+	}
+}
+
+function artifactId(payload, kind) {
+	const outer = payload && payload.data || {};
+	return firstString(outer && outer[kind] && outer[kind].id, payload && payload[`${kind}_id`]) || null;
 }
 
 async function createSummary(request, env) {
@@ -370,6 +523,34 @@ async function readJson(request) {
 	catch { return {}; }
 }
 
+function parseJson(value) {
+	try { return JSON.parse(String(value || '')); }
+	catch { return {}; }
+}
+
+function base64Bytes(value) {
+	const binary = atob(String(value || ''));
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+	return bytes;
+}
+
+function timingSafeEqual(a, b) {
+	if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array) || a.length !== b.length) return false;
+	let difference = 0;
+	for (let index = 0; index < a.length; index++) difference |= a[index] ^ b[index];
+	return difference === 0;
+}
+
+function fnv1a(value) {
+	let hash = 2166136261;
+	for (const char of String(value || '')) {
+		hash ^= char.charCodeAt(0);
+		hash = Math.imul(hash, 16777619);
+	}
+	return (hash >>> 0).toString(36);
+}
+
 async function safeJson(response) {
 	try { return await response.json(); }
 	catch { return {}; }
@@ -387,7 +568,14 @@ function latestRecallStatus(bot) {
 function upsertSession(botId, patch = {}) {
 	let session = LIVE_SESSIONS.get(botId);
 	if (!session) {
-		session = { botId, rows: [], keys: new Set(), receivedPosts: 0, updatedAt: Date.now() };
+		session = {
+			botId,
+			events: new Map(),
+			rows: [],
+			receivedPosts: 0,
+			parseFailures: 0,
+			updatedAt: 0,
+		};
 		LIVE_SESSIONS.set(botId, session);
 	}
 	Object.assign(session, patch);
@@ -415,59 +603,121 @@ async function liveTranscriptPayload(botId, env) {
 		results: session ? session.rows : [],
 		live: true,
 		receivedPosts: session ? Number(session.receivedPosts) || 0 : 0,
-		updatedAt: session ? session.updatedAt : null,
+		parseFailures: session ? Number(session.parseFailures) || 0 : 0,
+		updatedAt: session && session.updatedAt ? session.updatedAt : null,
+		bridgeVersion: BRIDGE_VERSION,
 	};
 }
 
 async function loadLiveSession(botId, env) {
 	const store = transcriptStore(env);
-	if (!store || !store.get) return null;
+	if (!store || !store.get) return LIVE_SESSIONS.get(botId) || null;
 	try {
-		const raw = await store.get(`bot:${botId}`, 'json');
-		if (!raw || !Array.isArray(raw.rows)) return null;
-		const existing = LIVE_SESSIONS.get(botId);
-		const rows = [];
-		const keys = new Set();
-		for (const row of [...raw.rows, ...(existing && Array.isArray(existing.rows) ? existing.rows : [])]) {
-			const key = `${row.relativeTime || ''}:${row.speaker}:${row.text}`;
-			if (keys.has(key)) continue;
-			keys.add(key);
-			rows.push(row);
+		const session = upsertSession(botId);
+		// One-release migration path for the pre-1.22 coalesced session key.
+		const legacy = await store.get(`bot:${botId}`, 'json');
+		if (legacy && Array.isArray(legacy.rows)) {
+			legacy.rows.forEach((row, index) => mergeRealtimeEvent(session, {
+				id: `legacy-${index}-${fnv1a(`${row && row.relativeTime || ''}:${row && row.speaker || ''}:${row && row.text || ''}`)}`,
+				botId,
+				eventName: 'transcript.data',
+				parseStatus: row && row.text ? 'parsed' : 'empty_transcript',
+				receivedAt: Number(legacy.updatedAt) || 0,
+				row: row && row.text ? row : null,
+			}));
 		}
-		rows.sort((a, b) => (Number(a && a.relativeTime) || 0) - (Number(b && b.relativeTime) || 0));
-		const session = {
-			botId,
-			rows,
-			keys,
-			receivedPosts: Math.max(Number(raw.receivedPosts) || 0, Number(existing && existing.receivedPosts) || 0),
-			updatedAt: Math.max(Number(raw.updatedAt) || 0, Number(existing && existing.updatedAt) || 0) || Date.now(),
-		};
-		LIVE_SESSIONS.set(botId, session);
+		const keys = await listRealtimeEventKeys(store, botId);
+		for (let index = 0; index < keys.length; index += 100) {
+			const batch = keys.slice(index, index + 100);
+			const values = await getKvJsonBatch(store, batch);
+			for (const key of batch) {
+				const event = values.get(key);
+				if (event && event.id) mergeRealtimeEvent(session, event);
+			}
+		}
+		// Legacy counts include ignored posts that cannot be reconstructed as individual keys.
+		session.receivedPosts = Math.max(Number(session.receivedPosts) || 0, Number(legacy && legacy.receivedPosts) || 0);
+		session.updatedAt = Math.max(Number(session.updatedAt) || 0, Number(legacy && legacy.updatedAt) || 0);
 		return session;
 	} catch {
-		return null;
+		return LIVE_SESSIONS.get(botId) || null;
 	}
 }
 
-async function saveLiveSession(session, env) {
+async function saveRealtimeEvent(event, env) {
 	const store = transcriptStore(env);
 	if (!store || !store.put) {
 		// Workers run many isolates: the isolate Recall POSTs to is usually NOT the one the plugin
 		// polls. Without KV the rows live in one isolate's memory and are never seen again — which
 		// looks exactly like "Recall never sent a transcript". Say so, loudly, every time.
-		console.error('[recall-ai bridge] NO KV BINDING — the live transcript is being discarded. Bind a KV namespace named RECALL_TRANSCRIPTS to this Worker.', { botId: session.botId });
+		console.error('[recall-ai bridge] NO KV BINDING — the live transcript exists only in this Worker isolate. Bind a KV namespace named RECALL_TRANSCRIPTS.', { botId: event.botId });
 		return;
 	}
 	try {
-		await store.put(`bot:${session.botId}`, JSON.stringify({
-			botId: session.botId,
-			rows: session.rows,
-			receivedPosts: Number(session.receivedPosts) || 0,
-			updatedAt: session.updatedAt,
-		}), { expirationTtl: 60 * 60 * 24 * 7 });
+		await store.put(realtimeEventKey(event.botId, event.id), JSON.stringify(event), { expirationTtl: REALTIME_TTL_SECONDS });
 	} catch (err) {
-		console.error('[recall-ai bridge] KV write failed — live transcript row lost', { botId: session.botId, error: errorMessage(err) });
+		console.error('[recall-ai bridge] KV event write failed', { botId: event.botId, eventId: event.id, error: errorMessage(err) });
 	}
+}
+
+function mergeRealtimeEvent(session, event) {
+	if (!session || !event || !event.id || session.events.has(event.id)) return;
+	session.events.set(event.id, event);
+	const ordered = Array.from(session.events.values()).sort(compareRealtimeEvents);
+	const rows = [];
+	const rowKeys = new Set();
+	for (const item of ordered) {
+		const row = item && item.row;
+		if (!row || !row.text) continue;
+		const key = `${row.relativeTime == null ? '' : row.relativeTime}:${row.speaker}:${row.text}`;
+		if (rowKeys.has(key)) continue;
+		rowKeys.add(key);
+		rows.push(row);
+	}
+	session.rows = rows.slice(-5000);
+	session.receivedPosts = session.events.size;
+	session.parseFailures = ordered.filter(item => item && item.parseStatus !== 'parsed').length;
+	session.updatedAt = Math.max(...ordered.map(item => Number(item && item.receivedAt) || 0), Number(session.updatedAt) || 0) || Date.now();
+}
+
+function compareRealtimeEvents(a, b) {
+	const ar = Number(a && a.row && a.row.relativeTime);
+	const br = Number(b && b.row && b.row.relativeTime);
+	const aHas = Number.isFinite(ar);
+	const bHas = Number.isFinite(br);
+	if (aHas && bHas && ar !== br) return ar - br;
+	if (aHas !== bHas) return aHas ? -1 : 1;
+	const received = (Number(a && a.receivedAt) || 0) - (Number(b && b.receivedAt) || 0);
+	return received || String(a && a.id || '').localeCompare(String(b && b.id || ''));
+}
+
+function realtimeEventKey(botId, eventId) {
+	return `bot:${botId}:event:${eventId}`;
+}
+
+async function listRealtimeEventKeys(store, botId) {
+	if (!store || typeof store.list !== 'function') return [];
+	const prefix = `bot:${botId}:event:`;
+	const keys = [];
+	let cursor = undefined;
+	do {
+		const page = await store.list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
+		for (const item of Array.isArray(page && page.keys) ? page.keys : []) {
+			if (item && item.name) keys.push(item.name);
+		}
+		cursor = page && page.list_complete === false ? page.cursor : undefined;
+	} while (cursor);
+	return keys;
+}
+
+async function getKvJsonBatch(store, keys) {
+	if (!keys.length) return new Map();
+	try {
+		const result = await store.get(keys, 'json');
+		if (result instanceof Map) return result;
+	} catch { /* older mocks/runtimes: fall through */ }
+	const pairs = await Promise.all(keys.map(async key => [key, await store.get(key, 'json')]));
+	return new Map(pairs);
 }
 
 function transcriptStore(env) {
@@ -594,7 +844,10 @@ async function transcriptDebug(env, region, apiKey, bot, live) {
 		kv: transcriptStore(env) ? 'bound' : 'MISSING',
 		liveRows: live && Array.isArray(live.results) ? live.results.length : 0,
 		realtimePosts: live ? Number(live.receivedPosts) || 0 : 0,
+		realtimeParseFailures: live ? Number(live.parseFailures) || 0 : 0,
 		liveUpdatedAt: live ? live.updatedAt : null,
+		bridgeVersion: BRIDGE_VERSION,
+		webhookVerification: env.RECALL_WORKSPACE_VERIFICATION_SECRET ? 'enforced' : 'compatibility',
 		...realtime,
 	};
 }

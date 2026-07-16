@@ -95,6 +95,9 @@ no secrets.
 ### 4. Paste them into the plugin
 
 Put the bridge address and both keys into the **Connection** section of the settings panel.
+Then open **Setup → Setup Doctor** and click **Run setup check**. It validates the bridge version,
+KV binding, webhook-verification mode, Recall key/region, Claude key/model, and field bindings without
+creating a bot or generating a summary.
 
 ### 5. Send the notetaker
 
@@ -175,11 +178,27 @@ GET recordings[].media_shortcuts.transcript.data.download_url from the bot respo
 GET recordings[].media_shortcuts.participant_events.data.participants_download_url
 ```
 
-The default interval is 30 seconds. You can also click `Sync` later on a Meeting record with a `Recall Bot ID` to fetch the final transcript and generate the summary.
+The default interval is 30 seconds. You can also click **Repair Meeting** later on a Meeting record
+with a `Recall Bot ID`. Repair re-fetches Recall's authoritative final artifacts and fills only missing
+plugin-owned transcript entries, summary destinations, citations, and attendee links. It does not
+replace an existing summary, task state, manual attendee relation, or unowned body content. Use the
+record's **Diagnostics** action to see received webhook events, parsed rows, last-event time, KV state,
+transcript artifacts, realtime endpoints, and bridge version.
 
-> **Kill switch note:** the toggle in the settings-panel header disables the whole plugin at runtime — including transcript polling. A meeting recorded while the plugin is disabled won't stream into Thymer until you re-enable and `Sync`.
+> **Kill switch note:** the toggle in the settings-panel header disables the whole plugin at runtime — including transcript polling. A meeting recorded while the plugin is disabled won't stream into Thymer until you re-enable and run **Repair Meeting**.
 
-When `Bridge URL` is set, the plugin also asks Recall to send real-time `transcript.data` events to `POST /api/recall/realtime` on the bridge. The bridge keeps a short transcript buffer so polling can write live speaker-attributed transcript lines into Thymer while the meeting is running, and proxies the finalized participant artifact for attendee linking. Bind a Cloudflare KV namespace named `RECALL_TRANSCRIPTS` if you want live updates to survive Worker isolate changes; final post-meeting transcript, attendees, and summary polling work without KV. Recall perfect diarization is enabled with `recording_config.transcript.diarization.use_separate_streams_when_available`.
+When `Bridge URL` is set, the plugin also asks Recall to send real-time `transcript.data` events to
+`POST /api/recall/realtime` on the bridge. Each accepted event gets its own idempotent, seven-day KV
+entry, so concurrent webhooks cannot overwrite one another. Bind a Cloudflare KV namespace named
+`RECALL_TRANSCRIPTS` for reliable live updates across Worker isolates; final post-meeting transcript,
+attendees, and summary polling still work without KV. The final Recall artifact remains authoritative.
+Recall perfect diarization is enabled with
+`recording_config.transcript.diarization.use_separate_streams_when_available`.
+
+Topic-section summaries cite the most relevant wording or topic heading with native Thymer reference
+chips. Action items are written as real interactive tasks, and the plugin marks every body node it
+creates with persistent ownership metadata so retries and other devices recover the same structure
+instead of replaying the transcript or duplicating the summary.
 
 
 

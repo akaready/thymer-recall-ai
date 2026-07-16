@@ -12,8 +12,9 @@ Recall will show that your API key was never used.)
 The **bridge** is a tiny program that sits on the internet and passes those requests along
 for you. Thymer talks to your bridge, and your bridge talks to Recall and Claude.
 
-You host it yourself, so **your keys stay yours** — the bridge holds no secrets of its own.
-It just forwards whatever the plugin sends it.
+You host it yourself, so **your Recall and Claude keys stay yours** — the bridge does not retain
+them. It just forwards whatever the plugin sends it. You can optionally store Recall's workspace
+webhook-verification secret on the Worker so forged realtime events are rejected.
 
 We'll put it on **Cloudflare Workers**, which is free for this.
 
@@ -62,10 +63,10 @@ Paste your address into a browser tab and add `/health` on the end:
 https://thymer-recall-bridge.your-name.workers.dev/health
 ```
 
-You should see exactly this:
+You should see a response shaped like this:
 
 ```json
-{"ok":true}
+{"ok":true,"bridgeVersion":"1.22.0","capabilities":["append-only-realtime","bridge-checks","participant-artifact","signed-realtime"],"kv":"MISSING","webhookVerification":"compatibility"}
 ```
 
 That's it — your bridge is alive. 🎉 (Your browser may show it with a "Pretty-print"
@@ -83,10 +84,11 @@ That's it — you're done.
 
 ---
 
-## Optional: better live transcripts
+## Add storage for live transcripts
 
-Everything works without this. Skip it unless you want the transcript to fill in reliably
-*while the meeting is still happening*.
+The finalized post-meeting transcript works without this. Add KV if you want the transcript to fill
+in reliably *while the meeting is still happening*. Setup Doctor intentionally flags a missing KV
+binding because live rows otherwise disappear when Cloudflare routes the poll to another isolate.
 
 Cloudflare may run your bridge on different machines from one moment to the next, which can
 make it forget the live transcript lines it's holding. Giving it a small bit of storage fixes
@@ -132,7 +134,27 @@ Nothing visibly changes, which is unnerving. To check: go back to **Settings →
 should see `RECALL_TRANSCRIPTS` listed as a KV namespace binding. That's all there is to see.
 
 Without this you still get the **full transcript and the summary** after the meeting ends — you
-just may not see lines appear live during the call.
+just may not see lines appear live during the call. With bridge 1.22+, each webhook is stored under
+its own idempotent key for seven days, so simultaneous deliveries no longer race through one shared
+session object.
+
+---
+
+## Optional: verify Recall webhooks
+
+Recall can sign realtime requests with a workspace verification secret. This is optional during the
+upgrade: if the Worker variable is absent, the bridge stays in compatibility mode and Setup Doctor
+shows a warning.
+
+1. In Recall, open **Developers → API Keys & Secrets** and create/copy the workspace verification
+   secret. It starts with `whsec_`.
+2. In Cloudflare, open the Worker → **Settings → Variables and Secrets** and add an encrypted secret
+   named exactly `RECALL_WORKSPACE_VERIFICATION_SECRET`.
+3. Redeploy the Worker and run Setup Doctor again.
+
+The bridge verifies the raw request body plus `webhook-id`, `webhook-timestamp`, and every `v1`
+signature in `webhook-signature`. It accepts Recall's rotated multi-signature headers and rejects
+missing, invalid, or stale signed requests before storing anything.
 
 ---
 
@@ -143,7 +165,8 @@ just may not see lines appear live during the call.
 | Thymer says **"Failed to fetch"** | The Bridge URL is empty, wrong, or has a typo. Recall will also show the key was never used. |
 | `/health` doesn't load | The worker didn't deploy. Re-check Step 3 — make sure you pasted the *entire* file. |
 | **"Recall returned 401"** | The Recall key is wrong, or it belongs to a different region than the one selected in the plugin. Keys are per-region. |
-| Transcript is empty during the meeting | Expected without the KV step above. The full transcript still arrives after the meeting. |
+| Transcript is empty during the meeting | Run Setup Doctor and Meeting Diagnostics. `webhooks > 0, rows = 0` means parsing; `webhooks = 0` means delivery/configuration. The final transcript still arrives after the meeting. |
+| Realtime webhooks return 401 | The configured workspace verification secret does not match Recall, or Recall's signed timestamp is stale. |
 
 ---
 
@@ -154,9 +177,12 @@ If you'd rather use the CLI: rename `wrangler.toml.example` to `wrangler.toml`, 
 
 ## For the curious — what the bridge exposes
 
-`POST /api/recall/bots`, `POST /api/recall/bot`, `POST /api/recall/transcript`, `POST /api/recall/participants`,
-`POST /api/recall/realtime`, `POST /api/anthropic/summary`, and `GET /health`.
+`POST /api/recall/bots`, `POST /api/recall/check`, `POST /api/recall/bot`,
+`POST /api/recall/diagnostics`, `POST /api/recall/transcript`, `POST /api/recall/participants`,
+`POST /api/recall/realtime`, `POST /api/anthropic/check`, `POST /api/anthropic/summary`, and
+`GET /health`.
 
 The plugin sends its own Recall/Claude keys with each request and the bridge forwards them.
-No secrets need to be stored on the worker. (You *may* optionally set `RECALL_API_KEY`,
-`ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL` as worker variables to act as defaults.)
+No Recall or Claude API keys need to be stored on the worker. (You *may* optionally set
+`RECALL_API_KEY`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL` as worker variables to act as defaults.)
+`RECALL_WORKSPACE_VERIFICATION_SECRET` is used only to authenticate incoming Recall requests.
