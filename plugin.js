@@ -3344,6 +3344,7 @@ ${report}
   // api-costs.js
   var RECALL_PAYG_RECORDING_PER_HOUR_USD = 0.5;
   var RECALL_TRANSCRIPTION_PER_HOUR_USD = 0.15;
+  var PRICING_VERIFIED_DATE = "July 16, 2026";
   var CLAUDE_ESTIMATE_INPUT_TOKENS = 12e3;
   var CLAUDE_ESTIMATE_OUTPUT_TOKENS = 1500;
   var SONNET_5_STANDARD_PRICE_START = Date.UTC(2026, 8, 1);
@@ -3410,10 +3411,6 @@ ${report}
     return "Storage: $0 with the selected retention because media expires within Recall\u2019s free 7-day window.";
   }
   __name(recallStorageCostNote, "recallStorageCostNote");
-  function standardSonnet5Estimate(options = {}) {
-    return estimateClaudeSummaryCost("claude-sonnet-5", { ...options, at: SONNET_5_STANDARD_PRICE_START });
-  }
-  __name(standardSonnet5Estimate, "standardSonnet5Estimate");
 
   // participant-linking.js
   function normalizeIdentity(value) {
@@ -3527,6 +3524,7 @@ ${report}
     const guids = [];
     const matchedNames = [];
     const unmatchedNames = [];
+    const creatableParticipants = [];
     for (const participant of dedupeParticipants(participants)) {
       const emailMatches = participant.email ? byEmail.get(participant.email) || [] : [];
       const nameMatches = participant.name ? byName.get(normalizeIdentity(participant.name)) || [] : [];
@@ -3536,9 +3534,10 @@ ${report}
         if (participant.name) matchedNames.push(participant.name);
       } else if (participant.name) {
         unmatchedNames.push(participant.name);
+        if (!emailMatches.length && !nameMatches.length) creatableParticipants.push(participant);
       }
     }
-    return { guids, matchedNames, unmatchedNames };
+    return { guids, matchedNames, unmatchedNames, creatableParticipants };
   }
   __name(matchParticipantsToPeople, "matchParticipantsToPeople");
 
@@ -3600,8 +3599,113 @@ ${report}
   }
   __name(migrateMeetingSchema, "migrateMeetingSchema");
 
+  // time-formatting.js
+  var TRANSCRIPT_TIMESTAMP_GROUPS = Object.freeze([
+    Object.freeze({
+      label: "Clock time",
+      options: Object.freeze([
+        Object.freeze(["clock", "12-hour \u2014 2:47 PM"]),
+        Object.freeze(["clock-lower", "12-hour, lowercase \u2014 2:47 pm"]),
+        Object.freeze(["clock-24", "24-hour \u2014 14:47"])
+      ])
+    }),
+    Object.freeze({
+      label: "Meeting time",
+      options: Object.freeze([
+        Object.freeze(["elapsed", "Elapsed \u2014 0:37"])
+      ])
+    })
+  ]);
+  var SECTION_RANGE_STYLE_GROUPS = Object.freeze([
+    Object.freeze({
+      label: "12-hour clock",
+      options: Object.freeze([
+        Object.freeze(["clock", "Compact \u2014 2:47\u20132:52 PM"]),
+        Object.freeze(["clock-long", "Full \u2014 2:47 PM \u2013 2:52 PM"]),
+        Object.freeze(["clock-lower", "Compact, lowercase \u2014 2:47\u20132:52 pm"]),
+        Object.freeze(["clock-lower-long", "Full, lowercase \u2014 2:47 pm \u2013 2:52 pm"]),
+        Object.freeze(["start-clock", "Start only \u2014 2:47 PM"]),
+        Object.freeze(["start-clock-lower", "Start only, lowercase \u2014 2:47 pm"])
+      ])
+    }),
+    Object.freeze({
+      label: "24-hour clock",
+      options: Object.freeze([
+        Object.freeze(["clock-24", "Compact \u2014 14:47\u201314:52"]),
+        Object.freeze(["clock-24-long", "Full \u2014 14:47 \u2013 14:52"]),
+        Object.freeze(["start-clock-24", "Start only \u2014 14:47"])
+      ])
+    }),
+    Object.freeze({
+      label: "Elapsed time",
+      options: Object.freeze([
+        Object.freeze(["elapsed", "Range \u2014 0:00\u20135:12"]),
+        Object.freeze(["start-elapsed", "Start only \u2014 0:00"])
+      ])
+    })
+  ]);
+  var timestampStyles = new Set(TRANSCRIPT_TIMESTAMP_GROUPS.flatMap((group) => group.options.map(([value]) => value)));
+  var rangeStyles = new Set(SECTION_RANGE_STYLE_GROUPS.flatMap((group) => group.options.map(([value]) => value)));
+  function normalizeTranscriptTimestampStyle(value) {
+    return timestampStyles.has(value) ? value : "clock";
+  }
+  __name(normalizeTranscriptTimestampStyle, "normalizeTranscriptTimestampStyle");
+  function normalizeSectionRangeStyle(value) {
+    return rangeStyles.has(value) ? value : "clock";
+  }
+  __name(normalizeSectionRangeStyle, "normalizeSectionRangeStyle");
+  function formatClockTime(iso, style = "clock") {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    const normalized = String(style || "clock");
+    try {
+      const text = normalized.includes("24") ? d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }) : d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+      return normalized.includes("lower") ? text.replace(/\b(?:AM|PM)\b/gi, (match) => match.toLowerCase()) : text;
+    } catch {
+      return null;
+    }
+  }
+  __name(formatClockTime, "formatClockTime");
+  function entryStamp(entry, settings) {
+    const style = normalizeTranscriptTimestampStyle(settings && settings.transcriptTimestamps);
+    const clock = entry && entry.absoluteIso ? formatClockTime(entry.absoluteIso, style) : null;
+    const elapsed = entry && entry.relativeSec != null ? formatRelativeTime(entry.relativeSec) : null;
+    return style === "elapsed" ? elapsed || clock : clock || elapsed;
+  }
+  __name(entryStamp, "entryStamp");
+  function compactClockRange(a, b) {
+    if (!a || !b) return a || b || "";
+    if (a === b) return a;
+    const am = a.match(/\s*(AM|PM)$/i);
+    const bm = b.match(/\s*(AM|PM)$/i);
+    if (am && bm && am[1].toLowerCase() === bm[1].toLowerCase()) return `${a.replace(/\s*(AM|PM)$/i, "")}\u2013${b}`;
+    return `${a}\u2013${b}`;
+  }
+  __name(compactClockRange, "compactClockRange");
+  function sectionRange(first, last, settings) {
+    const style = normalizeSectionRangeStyle(settings && settings.sectionRangeStyle);
+    const elapsed = /* @__PURE__ */ __name((entry) => entry && entry.relativeSec != null ? formatRelativeTime(entry.relativeSec) : null, "elapsed");
+    if (style === "elapsed") return compactClockRange(elapsed(first), elapsed(last));
+    if (style === "start-elapsed") return elapsed(first) || "";
+    const clockStyle = style.includes("24") ? "clock-24" : style.includes("lower") ? "clock-lower" : "clock";
+    const clock = /* @__PURE__ */ __name((entry) => entry && entry.absoluteIso ? formatClockTime(entry.absoluteIso, clockStyle) : null, "clock");
+    if (style.startsWith("start-")) return clock(first) || "";
+    const a = clock(first);
+    const b = clock(last);
+    if (style.endsWith("-long")) return a && b && a !== b ? `${a} \u2013 ${b}` : a || b || "";
+    return compactClockRange(a, b);
+  }
+  __name(sectionRange, "sectionRange");
+  function formatRelativeTime(seconds) {
+    const total = Math.max(0, Math.floor(seconds));
+    const minutes = Math.floor(total / 60);
+    const remainder = total % 60;
+    return `${minutes}:${String(remainder).padStart(2, "0")}`;
+  }
+  __name(formatRelativeTime, "formatRelativeTime");
+
   // plugin.js
-  var PLUGIN_VERSION = "1.22.9";
+  var PLUGIN_VERSION = "1.22.10";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -3669,6 +3773,7 @@ ${report}
     participantNamesFieldId: "",
     attendeesFieldId: "",
     mapParticipantNamesToAttendees: false,
+    createMissingPeople: false,
     botImageUrl: "",
     botImageData: "",
     botImageName: "",
@@ -3707,13 +3812,6 @@ ${report}
     ["h3", "Heading 3"],
     ["none", "No heading (plain line)"]
   ];
-  var SECTION_RANGE_STYLES = [
-    ["clock", "Clock, compact \u2014 2:47\u20132:52 PM"],
-    ["clock-long", "Clock, full \u2014 2:47 PM \u2013 2:52 PM"],
-    ["elapsed", "Elapsed \u2014 0:00\u20135:12"],
-    ["start-clock", "Start time only \u2014 2:47 PM"],
-    ["start-elapsed", "Start elapsed only \u2014 0:00"]
-  ];
   var API_KEY_FIELDS = Object.freeze(["recallApiKey", "anthropicApiKey"]);
   var BOT_IMAGE_FIELDS = Object.freeze(["botImageData", "botImageName"]);
   var SECRET_KEYS = Object.freeze([...API_KEY_FIELDS]);
@@ -3732,6 +3830,7 @@ ${report}
       attendeesFieldId: str("attendeesFieldId"),
       // Preserve an existing opt-in from the retired two-dropdown setup; new installs default off.
       mapParticipantNamesToAttendees: typeof src.mapParticipantNamesToAttendees === "boolean" ? src.mapParticipantNamesToAttendees : !!(String(src.personCollectionGuid || "").trim() && String(src.attendeesFieldId || "").trim()),
+      createMissingPeople: bool("createMissingPeople"),
       botImageUrl: str("botImageUrl"),
       botImageData: str("botImageData"),
       botImageName: str("botImageName"),
@@ -3742,7 +3841,7 @@ ${report}
       autoSchedule: bool("autoSchedule"),
       recordingRetention: normalizeRecordingRetention(src.recordingRetention),
       autoSummarize: bool("autoSummarize"),
-      transcriptTimestamps: src.transcriptTimestamps === "elapsed" ? "elapsed" : "clock",
+      transcriptTimestamps: normalizeTranscriptTimestampStyle(src.transcriptTimestamps),
       saveTranscript: bool("saveTranscript"),
       transcriptLayout: src.transcriptLayout === "inline" ? "inline" : "blocks",
       utteranceTimestamps: bool("utteranceTimestamps"),
@@ -3750,7 +3849,7 @@ ${report}
       turnHeaderTemplate: str("turnHeaderTemplate"),
       transcriptSections: bool("transcriptSections"),
       sectionHeadingTemplate: str("sectionHeadingTemplate"),
-      sectionRangeStyle: ["clock", "clock-long", "elapsed", "start-clock", "start-elapsed"].includes(src.sectionRangeStyle) ? src.sectionRangeStyle : "clock",
+      sectionRangeStyle: normalizeSectionRangeStyle(src.sectionRangeStyle),
       summaryPrompt: str("summaryPrompt"),
       transcriptHeadingText: str("transcriptHeadingText"),
       transcriptHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.transcriptHeadingLevel) ? src.transcriptHeadingLevel : "h3",
@@ -3965,6 +4064,7 @@ ${report}
       this._pollers = /* @__PURE__ */ new Map();
       this._syncInFlight = /* @__PURE__ */ new Map();
       this._botCreateInFlight = /* @__PURE__ */ new Map();
+      this._personCreateInFlight = /* @__PURE__ */ new Map();
       this._diagnosticsByRecord = /* @__PURE__ */ new Map();
       this._setupDoctorState = null;
       this._setupDoctorInFlight = null;
@@ -4992,6 +5092,24 @@ ${report}
       if (!participants.length) participants = participantsFromTranscriptEntries(entries);
       return { participants: dedupeParticipants(participants), source };
     }
+    async _createMissingPerson(peopleCollection, participant) {
+      const name = String(participant && participant.name || "").trim().replace(/\s+/g, " ");
+      if (!name || !peopleCollection || typeof peopleCollection.createRecord !== "function") return null;
+      let collectionGuid = "";
+      try {
+        collectionGuid = peopleCollection.getGuid?.() || "";
+      } catch {
+      }
+      const key = `${collectionGuid}:${normalizeIdentity(name)}`;
+      return runCoalesced(this._personCreateInFlight, key, async () => {
+        const latest = typeof peopleCollection.getAllRecords === "function" ? await peopleCollection.getAllRecords() : [];
+        const rematched = matchParticipantsToPeople([participant], latest);
+        if (rematched.guids.length) return { guid: rematched.guids[0], created: false };
+        if (!rematched.creatableParticipants.length) return null;
+        const guid = peopleCollection.createRecord(name);
+        return guid ? { guid, created: true } : null;
+      });
+    }
     /** Save raw names and optionally attach confident matches through the Attendees field restriction. */
     async _syncMeetingAttendees(record, botId, entries) {
       try {
@@ -5026,6 +5144,19 @@ ${report}
         const matched = matchParticipantsToPeople(matchable, people);
         const prop = this._prop(record, field.id);
         if (!prop || typeof prop.set !== "function") return;
+        const createdGuids = [];
+        let createdCount = 0;
+        if (this._settings.createMissingPeople) {
+          for (const participant of matched.creatableParticipants) {
+            try {
+              const result = await this._createMissingPerson(peopleCollection, participant);
+              if (result && result.guid && !createdGuids.includes(result.guid)) createdGuids.push(result.guid);
+              if (result && result.created) createdCount++;
+            } catch (err) {
+              this._log("person creation skipped", { name: participant.name || "", error: this._errorMessage(err) });
+            }
+          }
+        }
         const existing = [];
         try {
           for (const linked of prop.linkedRecords ? prop.linkedRecords() : []) {
@@ -5040,13 +5171,14 @@ ${report}
           }
         } catch {
         }
-        const next = mergeAttendeeGuids(existing, matched.guids);
+        const next = mergeAttendeeGuids(existing, [...matched.guids, ...createdGuids]);
         if (next.length) prop.set(next);
         this._log("participants linked", {
           source,
           names: names.length,
           matched: matched.guids.length,
           unmatched: matched.unmatchedNames.length,
+          created: createdCount,
           preserved: existing.length
         });
       } catch (err) {
@@ -6507,64 +6639,41 @@ ${transcriptText}` }]
     _tabCosts() {
       const recall = estimateRecallCost(60);
       const selectedModel = String(this._draft.anthropicModel || DEFAULT_SETTINGS.anthropicModel).trim();
-      const links = h(
-        "span",
-        { class: `${ROOT_CLASS}-field-hint` },
-        "Prices checked July 16, 2026: ",
-        h("a", { href: "https://www.recall.ai/pricing", target: "_blank", rel: "noopener noreferrer" }, "Recall pricing"),
-        " \xB7 ",
-        h("a", { href: "https://platform.claude.com/docs/en/about-claude/pricing", target: "_blank", rel: "noopener noreferrer" }, "Claude pricing"),
-        ". Actual charges vary by plan and usage."
-      );
+      const row = /* @__PURE__ */ __name((label, ...details) => h(
+        "div",
+        { class: `${ROOT_CLASS}-cost-row` },
+        h("span", { class: `${ROOT_CLASS}-field-label` }, label),
+        h("span", { class: `${ROOT_CLASS}-field-hint` }, ...details)
+      ), "row");
+      const storage = recallStorageCostNote(this._draft.recordingRetention).replace(/^(?:Ongoing )?Storage:\s*/i, "").replace(/^Storage\s+/i, "");
       return [section({
         label: "API cost estimates",
         hint: "One active meeting hour at public list prices. Estimates\u2014not billing.",
         body: [
-          h(
-            "div",
-            { class: `${ROOT_CLASS}-field` },
-            h("span", { class: `${ROOT_CLASS}-field-label` }, "Recall.ai pay-as-you-go"),
-            h(
-              "span",
-              { class: `${ROOT_CLASS}-field-hint` },
-              `~${formatEstimatedUsd(recall.totalUsd)} per active bot-hour (${formatEstimatedUsd(recall.recordingUsd)} recording + ${formatEstimatedUsd(recall.transcriptionUsd)} transcription). Waiting-room time counts.`
-            )
+          row(
+            "Recall.ai pay-as-you-go",
+            `~${formatEstimatedUsd(recall.totalUsd)} per active bot-hour (${formatEstimatedUsd(recall.recordingUsd)} recording + ${formatEstimatedUsd(recall.transcriptionUsd)} transcription; waiting-room time counts).`
           ),
           ...CLAUDE_MODELS.map(([model, label]) => {
             const estimate = estimateClaudeSummaryCost(model);
-            const total = recall.totalUsd + estimate.totalUsd;
             const rate = `$${estimate.inputPerMillionUsd}/$${estimate.outputPerMillionUsd} per million input/output tokens`;
-            let future = "";
-            if (model === "claude-sonnet-5" && estimate.promotional) {
-              const standard = standardSonnet5Estimate();
-              future = ` Intro price through August 31, 2026; then ~${formatEstimatedUsd(standard.totalUsd)}.`;
-            }
-            return h(
-              "div",
-              { class: `${ROOT_CLASS}-field` },
-              h("span", { class: `${ROOT_CLASS}-field-label` }, `${label.split(" \u2014 ")[0]}${model === selectedModel ? " \u2014 selected" : ""}`),
-              h(
-                "span",
-                { class: `${ROOT_CLASS}-field-hint` },
-                `Claude ~${formatEstimatedUsd(estimate.totalUsd)} (${rate}); ~${formatEstimatedUsd(total)} with Recall.${future}`
-              )
+            return row(
+              `${label.split(" \u2014 ")[0]}${model === selectedModel ? " \u2014 selected" : ""}`,
+              `~${formatEstimatedUsd(estimate.totalUsd)} per meeting hour (${rate}).`
             );
           }),
-          h(
-            "div",
-            { class: `${ROOT_CLASS}-field` },
-            h("span", { class: `${ROOT_CLASS}-field-label` }, "Storage"),
-            h("span", { class: `${ROOT_CLASS}-field-hint` }, recallStorageCostNote(this._draft.recordingRetention))
+          row("Storage", storage),
+          row(
+            "Estimate basis",
+            `About ${Math.round(CLAUDE_ESTIMATE_INPUT_TOKENS / 1e3)}k input and ${CLAUDE_ESTIMATE_OUTPUT_TOKENS.toLocaleString()} output tokens; Sonnet 5 and Opus 4.8 use a 1.3\xD7 tokenizer adjustment.`
           ),
-          h(
-            "div",
-            { class: `${ROOT_CLASS}-field` },
-            h(
-              "span",
-              { class: `${ROOT_CLASS}-field-hint` },
-              `Assumes about ${Math.round(CLAUDE_ESTIMATE_INPUT_TOKENS / 1e3)}k input and ${CLAUDE_ESTIMATE_OUTPUT_TOKENS.toLocaleString()} output tokens; Sonnet 5 and Opus 4.8 use a 1.3\xD7 tokenizer adjustment.`
-            ),
-            links
+          row(
+            "Rates checked",
+            `${PRICING_VERIFIED_DATE} \xB7 `,
+            h("a", { href: "https://www.recall.ai/pricing", target: "_blank", rel: "noopener noreferrer" }, "Recall pricing"),
+            " \xB7 ",
+            h("a", { href: "https://platform.claude.com/docs/en/about-claude/pricing", target: "_blank", rel: "noopener noreferrer" }, "Claude pricing"),
+            ". Actual charges vary by plan and usage."
           )
         ]
       })];
@@ -6682,7 +6791,8 @@ ${transcriptText}` }]
                 name = target.getName?.() || name;
               } catch {
               }
-              add("pass", "Attendee matching", `${attendeesLabel} is limited to ${name}; confident participant matches will be added.`);
+              const creation = this._settings.createMissingPeople ? " Missing named participants will be created." : "";
+              add("pass", "Attendee matching", `${attendeesLabel} is limited to ${name}; confident participant matches will be added.${creation}`);
             } else add("fail", "Attendee matching", `The collection restriction on ${attendeesLabel} points to an unavailable collection.`);
           }
         }
@@ -6700,38 +6810,27 @@ ${transcriptText}` }]
         this._renderPanel();
       }
     }
-    _attendeeMappingSection() {
-      const field = this._attendeesField();
-      const targetGuid = attendeesTargetCollectionGuid(field);
-      const target = targetGuid ? this._collectionByGuid(targetGuid) : null;
-      let targetName = "";
-      try {
-        targetName = target?.getName?.() || "";
-      } catch {
-      }
-      const status = !field ? "Choose a multi-record collection-link property." : targetGuid ? this._draft.mapParticipantNamesToAttendees ? `Matching within ${targetName || targetGuid}.` : "" : "Limit this property to your People or Contacts collection before enabling matching.";
-      return section({
-        label: "Attendee mapping",
-        body: [
-          optionRow({
-            type: "checkbox",
-            name: "mapParticipantNamesToAttendees",
-            label: "Map Participant Names (plaintext) to Attendees (collection items)?",
-            desc: "Adds confident matches only. Existing links are preserved; People are never created.",
-            checked: !!this._draft.mapParticipantNamesToAttendees,
-            onChange: /* @__PURE__ */ __name((event) => this._updateSetting("mapParticipantNamesToAttendees", !!event.target.checked, { rerender: true }), "onChange")
-          }),
-          this._fieldSelectInput("Attendees field", "attendeesFieldId", ["record"], {
-            filter: isAttendeesRelationField,
-            emptyTypeLabel: "multi-record collection-link"
-          }),
-          status ? h(
-            "div",
-            { class: `${ROOT_CLASS}-field` },
-            h("span", { class: `${ROOT_CLASS}-field-hint` }, status)
-          ) : null
-        ]
-      });
+    _attendeeMappingControls() {
+      return [
+        optionRow({
+          type: "checkbox",
+          name: "mapParticipantNamesToAttendees",
+          label: "Map Participant Names (plaintext) to Attendees (collection items)?",
+          checked: !!this._draft.mapParticipantNamesToAttendees,
+          onChange: /* @__PURE__ */ __name((event) => this._updateSetting("mapParticipantNamesToAttendees", !!event.target.checked, { rerender: true }), "onChange")
+        }),
+        this._fieldSelectInput("Attendees field", "attendeesFieldId", ["record"], {
+          filter: isAttendeesRelationField,
+          emptyTypeLabel: "multi-record collection-link"
+        }),
+        optionRow({
+          type: "checkbox",
+          name: "createMissingPeople",
+          label: "Create missing People records when mapping",
+          checked: !!this._draft.createMissingPeople,
+          onChange: /* @__PURE__ */ __name((event) => this._updateSetting("createMissingPeople", !!event.target.checked, { rerender: true }), "onChange")
+        })
+      ];
     }
     _tabConnection(draft) {
       return [
@@ -6772,7 +6871,6 @@ ${transcriptText}` }]
               type: "checkbox",
               name: "sendJoinChatMessage",
               label: "Send join chat message",
-              desc: "Notify participants when the bot joins, when supported by the meeting platform.",
               checked: !!draft.sendJoinChatMessage,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("sendJoinChatMessage", !!event.target.checked, { rerender: true }), "onChange")
             }),
@@ -6788,10 +6886,10 @@ ${transcriptText}` }]
           body: [
             this._fieldSelectInput("Meeting URL field", "meetingUrlFieldId", ["url", "text"]),
             this._fieldSelectInput("Join At field", "joinAtFieldId", ["datetime", "date"]),
-            this._fieldSelectInput("Participant Names field", "participantNamesFieldId", ["text"])
+            this._fieldSelectInput("Participant Names field", "participantNamesFieldId", ["text"]),
+            ...this._attendeeMappingControls()
           ]
-        }),
-        this._attendeeMappingSection()
+        })
       ];
     }
     _tabTranscripts(draft) {
@@ -6824,10 +6922,7 @@ ${transcriptText}` }]
                 ["blocks", "Speaker blocks (collapsible)"],
                 ["inline", "Inline lines"]
               ]),
-              this._selectInput("Timestamps", "transcriptTimestamps", [
-                ["clock", "Clock time (2:47 PM)"],
-                ["elapsed", "Elapsed time (0:37)"]
-              ]),
+              this._groupedSelectInput("Timestamps", "transcriptTimestamps", TRANSCRIPT_TIMESTAMP_GROUPS),
               this._textInput("Turn header", "turnHeaderTemplate", "[{Time}] {Speaker}", false, "Use {Speaker} and {Time}."),
               optionRow({
                 type: "checkbox",
@@ -6840,7 +6935,6 @@ ${transcriptText}` }]
                 type: "checkbox",
                 name: "followLiveTranscript",
                 label: "Follow live transcript in the open record",
-                desc: "Pauses while you type; lines still save.",
                 checked: draft.followLiveTranscript !== false,
                 onChange: /* @__PURE__ */ __name((event) => this._updateSetting("followLiveTranscript", !!event.target.checked, { rerender: true }), "onChange")
               })
@@ -6853,13 +6947,12 @@ ${transcriptText}` }]
                 type: "checkbox",
                 name: "transcriptSections",
                 label: "Group into topic sections",
-                desc: "Adds collapsible topic headings after the meeting using Claude.",
                 checked: !!draft.transcriptSections,
                 onChange: /* @__PURE__ */ __name((event) => this._updateSetting("transcriptSections", !!event.target.checked, { rerender: true }), "onChange")
               }),
               ...draft.transcriptSections ? [
                 this._textInput("Heading template", "sectionHeadingTemplate", "{Topic} | {Range}", false, "Use {Topic} and {Range}."),
-                this._selectInput("Range style", "sectionRangeStyle", SECTION_RANGE_STYLES)
+                this._groupedSelectInput("Range style", "sectionRangeStyle", SECTION_RANGE_STYLE_GROUPS)
               ] : []
             ]
           })
@@ -6963,7 +7056,7 @@ ${transcriptText}` }]
         h(
           "li",
           {},
-          "Optional: in Field Mapping, turn on \u201CMap Participant Names (plaintext) to Attendees (collection items)?\u201D and choose the relation to use. In the Meetings collection property settings, limit that relation to your People or Contacts collection. Existing People are added only on a confident match."
+          "Optional: in Field Mapping, turn on \u201CMap Participant Names (plaintext) to Attendees (collection items)?\u201D and choose the relation to use. In the Meetings collection property settings, limit that relation to your People or Contacts collection. Existing People are added only on a confident match; \u201CCreate missing People records when mapping\u201D can add unmatched named participants."
         )
       );
     }
@@ -7088,6 +7181,22 @@ ${transcriptText}` }]
           onChange: /* @__PURE__ */ __name((event) => onChange ? onChange(event.target.value) : this._updateSetting(key, event.target.value, { rerender: true }), "onChange")
         }, ...options.map(([value, optionLabel]) => h("option", { value, selected: current === value }, optionLabel))),
         hint ? h("span", { class: `${ROOT_CLASS}-field-hint` }, hint) : null
+      );
+    }
+    _groupedSelectInput(label, key, groups) {
+      const current = this._draft[key] || DEFAULT_SETTINGS[key];
+      return h(
+        "label",
+        { class: `${ROOT_CLASS}-field` },
+        h("span", { class: `${ROOT_CLASS}-field-label` }, label),
+        h("select", {
+          value: current,
+          onChange: /* @__PURE__ */ __name((event) => this._updateSetting(key, event.target.value, { rerender: true }), "onChange")
+        }, ...(Array.isArray(groups) ? groups : []).map((group) => h(
+          "optgroup",
+          { label: group.label },
+          ...(Array.isArray(group.options) ? group.options : []).map(([value, optionLabel]) => h("option", { value, selected: current === value }, optionLabel))
+        )))
       );
     }
     _modelSelectInput(label, key) {
@@ -7313,6 +7422,13 @@ ${transcriptText}` }]
 				color: var(--tps-accent);
 				text-decoration: underline;
 				text-underline-offset: 2px;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-cost-row {
+				display: grid;
+				grid-template-columns: max-content minmax(0, 1fr);
+				align-items: baseline;
+				column-gap: var(--tps-space-3);
+				row-gap: var(--tps-space-1);
 			}
 			/* The native file input is hidden, not removed \u2014 it still does the picking. */
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-file-native {
@@ -7554,12 +7670,6 @@ ${transcriptText}` }]
     return entries;
   }
   __name(transcriptEntries, "transcriptEntries");
-  function entryStamp(entry, settings) {
-    const clock = entry.absoluteIso ? formatClockTime(entry.absoluteIso) : null;
-    const elapsed = entry.relativeSec == null ? null : formatRelativeTime(entry.relativeSec);
-    return settings.transcriptTimestamps === "elapsed" ? elapsed || clock : clock || elapsed;
-  }
-  __name(entryStamp, "entryStamp");
   function formatTranscriptCitationLabel(entry, settings) {
     const speaker = String(entry && entry.speaker || "Speaker").trim() || "Speaker";
     const stamp = entryStamp(entry, settings);
@@ -7574,33 +7684,6 @@ ${transcriptText}` }]
     return tidied.replace(/\s{2,}/g, " ").trim() || (entry.speaker || "");
   }
   __name(formatEntryHeader, "formatEntryHeader");
-  function sectionRange(first, last, settings) {
-    const clock = /* @__PURE__ */ __name((e) => e && e.absoluteIso ? formatClockTime(e.absoluteIso) : null, "clock");
-    const elapsed = /* @__PURE__ */ __name((e) => e && e.relativeSec != null ? formatRelativeTime(e.relativeSec) : null, "elapsed");
-    const dash = /* @__PURE__ */ __name((x, y) => x && y ? x === y ? x : `${x}\u2013${y}` : x || y || "", "dash");
-    switch (settings.sectionRangeStyle) {
-      case "elapsed":
-        return dash(elapsed(first), elapsed(last));
-      case "start-clock":
-        return clock(first) || "";
-      case "start-elapsed":
-        return elapsed(first) || "";
-      case "clock-long": {
-        const a = clock(first), b = clock(last);
-        return a && b && a !== b ? `${a} \u2013 ${b}` : a || b || "";
-      }
-      case "clock":
-      default: {
-        const a = clock(first), b = clock(last);
-        if (!a || !b) return a || b || "";
-        if (a === b) return a;
-        const am = a.match(/\s*(AM|PM)$/i), bm = b.match(/\s*(AM|PM)$/i);
-        if (am && bm && am[1].toUpperCase() === bm[1].toUpperCase()) return `${a.replace(/\s*(AM|PM)$/i, "")}\u2013${b}`;
-        return `${a}\u2013${b}`;
-      }
-    }
-  }
-  __name(sectionRange, "sectionRange");
   function formatSectionHeading(title, firstEntry, lastEntry, settings) {
     const range = sectionRange(firstEntry, lastEntry, settings);
     const template = settings.sectionHeadingTemplate || "{Topic} | {Range}";
@@ -7736,16 +7819,6 @@ ${transcriptText}` }]
     return null;
   }
   __name(firstStringVal, "firstStringVal");
-  function formatClockTime(iso) {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return null;
-    try {
-      return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-    } catch {
-      return null;
-    }
-  }
-  __name(formatClockTime, "formatClockTime");
   function transcriptRowCount(raw) {
     if (Array.isArray(raw)) return raw.length;
     if (raw && Array.isArray(raw.results)) return raw.results.length;
@@ -7853,13 +7926,6 @@ ${transcriptText}` }]
     return null;
   }
   __name(firstNumber, "firstNumber");
-  function formatRelativeTime(seconds) {
-    const total = Math.max(0, Math.floor(seconds));
-    const m = Math.floor(total / 60);
-    const s = total % 60;
-    return `${m}:${String(s).padStart(2, "0")}`;
-  }
-  __name(formatRelativeTime, "formatRelativeTime");
   function bytesToBase64(bytes) {
     let binary = "";
     const chunk = 32768;

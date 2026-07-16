@@ -41,7 +41,7 @@ Enjoy! 🙏
 - `Participant Names` keeps the finalized Recall roster as plain text, including unmatched people.
 - `Attendees` is an automatically created multi-record collection-link property. Restrict it to your
   People/Contacts collection, then optionally map unique exact email or display-name matches into it.
-  The plugin never creates people.
+  Creating missing People records is available as a separate option and is off by default.
 - `Recall Bot ID`, `Recall Status`, and `Last Error` track integration state.
 
 On upgrade, the old `Transcript` and `Summary` text properties are hidden and removed from the page/table
@@ -156,7 +156,9 @@ of truth for where matching occurs.
 
 At meeting finalization, Recall's participant artifact supplies the full roster, including people
 who never spoke. The plugin writes every display name to `Participant Names`, then attaches only
-confident matches to `Attendees`. Ambiguous and unmatched names stay safely in the text field.
+confident matches to `Attendees`. Ambiguous names stay safely in the text field. If **Create missing
+People records when mapping** is enabled, an unmatched named participant with no exact email or name
+candidate creates one new record in the restricted People collection; ambiguous matches are never created.
 
 &nbsp;
 
@@ -170,7 +172,8 @@ confident matches to `Attendees`. Ambiguous and unmatched names stay safely in t
 | **Anthropic API key** / **Claude model** | Key and model used to write the summary. |
 | **Costs** | One-hour planning estimate for Recall plus every Claude model, with the selected model highlighted and storage shown separately. |
 | **Field mapping** | Point Meeting URL, Join At, Participant Names, and Attendees at existing properties instead of the plugin defaults. Transcript and summary always use the page body. |
-| **Map Participant Names (plaintext) to Attendees (collection items)?** | Optionally attach confident matches through the selected multi-record relation. Existing links are preserved; Person records are never created. |
+| **Map Participant Names (plaintext) to Attendees (collection items)?** | Optionally attach confident matches through the selected multi-record relation. Existing links are preserved. |
+| **Create missing People records when mapping** | Create an unambiguous missing named participant in the relation's restricted People collection. Off by default. |
 | **Bot name** | The name the notetaker shows in the meeting. |
 | **Bot image** | Optional. A public HTTPS JPEG, 16:9, ideally 1280×720 and under 1.3 MB. Sent to Recall as `automatic_video_output`. |
 | **Join chat message** | Optional message the bot posts when it joins. |
