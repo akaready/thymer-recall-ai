@@ -103,7 +103,7 @@ Then open **Setup → Setup Doctor** and click **Run setup check**. It validates
 KV binding, webhook-verification mode, Recall key/region, Claude key/model, and field bindings without
 creating a bot or generating a summary.
 
-The Setup tab also shows an **Expected API cost** preview before the first call. It uses public
+The **Costs** tab shows an API cost preview before the first call. It uses public
 pay-as-you-go list prices and shows Recall recording + transcription, the Claude summary estimate and
 combined total for every selectable model, and storage separately. Estimates assume a one-hour active
 bot and a typical one-hour transcript/summary; the assumptions and direct pricing links are shown in
@@ -148,11 +148,11 @@ button on an inline reference to a Meeting record in the editor.
 
 ### 6. Optional: link attendees to People
 
-The plugin creates the multi-record `Attendees` collection-link property automatically. In the Meetings
-collection property settings, open **Attendees**, limit its links to one collection, and choose your
-People or Contacts collection. Then open **Field Mapping** and enable **Map Participant Names to
-Attendees?** The collection restriction is the source of truth; there is no second collection picker
-inside the plugin to drift out of sync.
+The plugin creates the multi-record `Attendees` collection-link property automatically. In **Field
+Mapping**, enable **Map Participant Names (plaintext) to Attendees (collection items)?** and select
+the relation to use. Then open that property in the Meetings collection settings, limit its links to
+one collection, and choose your People or Contacts collection. The relation restriction is the source
+of truth for where matching occurs.
 
 At meeting finalization, Recall's participant artifact supplies the full roster, including people
 who never spoke. The plugin writes every display name to `Participant Names`, then attaches only
@@ -168,9 +168,9 @@ confident matches to `Attendees`. Ambiguous and unmatched names stay safely in t
 | **Recall API key** / **Region** | Your Recall key and the region it came from — they must match. |
 | **Recall media retention** | How long future bots keep Recall’s audio/video, transcript, participant, and debug artifacts. Defaults to 7 days, inside Recall’s free storage window. |
 | **Anthropic API key** / **Claude model** | Key and model used to write the summary. |
-| **Expected API cost** | One-hour planning estimate for Recall plus every Claude model, with the selected model highlighted and storage shown separately. |
-| **Field mapping** | Point Meeting URL, Join At, and Participant Names at existing properties instead of the plugin defaults. Transcript and summary always use the page body. |
-| **Map Participant Names to Attendees?** | Optionally attach confident matches from the collection restriction configured on the automatic Attendees property. Existing links are preserved; Person records are never created. |
+| **Costs** | One-hour planning estimate for Recall plus every Claude model, with the selected model highlighted and storage shown separately. |
+| **Field mapping** | Point Meeting URL, Join At, Participant Names, and Attendees at existing properties instead of the plugin defaults. Transcript and summary always use the page body. |
+| **Map Participant Names (plaintext) to Attendees (collection items)?** | Optionally attach confident matches through the selected multi-record relation. Existing links are preserved; Person records are never created. |
 | **Bot name** | The name the notetaker shows in the meeting. |
 | **Bot image** | Optional. A public HTTPS JPEG, 16:9, ideally 1280×720 and under 1.3 MB. Sent to Recall as `automatic_video_output`. |
 | **Join chat message** | Optional message the bot posts when it joins. |

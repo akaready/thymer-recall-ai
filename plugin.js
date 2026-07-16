@@ -3461,8 +3461,10 @@ ${report}
     return !!field && field.active !== false && String(field.type || "").toLowerCase() === "record" && field.many === true;
   }
   __name(isAttendeesRelationField, "isAttendeesRelationField");
-  function findAttendeesRelationField(fields) {
+  function findAttendeesRelationField(fields, preferredId = "") {
     const relations = (Array.isArray(fields) ? fields : []).filter(isAttendeesRelationField);
+    const selected = String(preferredId || "").trim();
+    if (selected) return relations.find((field) => String(field.id || "") === selected) || null;
     return relations.find((field) => String(field.id || "") === "attendees") || relations.find((field) => String(field.label || "").trim().toLowerCase() === "attendees") || null;
   }
   __name(findAttendeesRelationField, "findAttendeesRelationField");
@@ -3599,7 +3601,7 @@ ${report}
   __name(migrateMeetingSchema, "migrateMeetingSchema");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.6";
+  var PLUGIN_VERSION = "1.22.7";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -3630,7 +3632,8 @@ ${report}
   var CANONICAL_FIELD_FOR_SETTING = Object.freeze({
     meetingUrlFieldId: FIELDS.MEETING_URL,
     joinAtFieldId: FIELDS.JOIN_AT,
-    participantNamesFieldId: FIELDS.PARTICIPANT_NAMES
+    participantNamesFieldId: FIELDS.PARTICIPANT_NAMES,
+    attendeesFieldId: FIELDS.ATTENDEES
   });
   var CREATE_FIELD_OPTION = "__create__";
   var ROOT_CLASS = "plg-recall-ai";
@@ -3664,6 +3667,7 @@ ${report}
     meetingUrlFieldId: "",
     joinAtFieldId: "",
     participantNamesFieldId: "",
+    attendeesFieldId: "",
     mapParticipantNamesToAttendees: false,
     botImageUrl: "",
     botImageData: "",
@@ -3725,6 +3729,7 @@ ${report}
       meetingUrlFieldId: str("meetingUrlFieldId"),
       joinAtFieldId: str("joinAtFieldId"),
       participantNamesFieldId: str("participantNamesFieldId"),
+      attendeesFieldId: str("attendeesFieldId"),
       // Preserve an existing opt-in from the retired two-dropdown setup; new installs default off.
       mapParticipantNamesToAttendees: typeof src.mapParticipantNamesToAttendees === "boolean" ? src.mapParticipantNamesToAttendees : !!(String(src.personCollectionGuid || "").trim() && String(src.attendeesFieldId || "").trim()),
       botImageUrl: str("botImageUrl"),
@@ -6161,12 +6166,14 @@ ${transcriptText}` }]
       return this._collectionFields().find((field) => String(field.id) === String(id)) || null;
     }
     _attendeesField() {
-      return findAttendeesRelationField(this._collectionFields());
+      const selected = String(this._settings.attendeesFieldId || "").trim();
+      return findAttendeesRelationField(this._collectionFields(), selected);
     }
     _mappingSettingFor(field) {
       if (field === FIELDS.MEETING_URL) return "meetingUrlFieldId";
       if (field === FIELDS.JOIN_AT) return "joinAtFieldId";
       if (field === FIELDS.PARTICIPANT_NAMES) return "participantNamesFieldId";
+      if (field === FIELDS.ATTENDEES) return "attendeesFieldId";
       return "";
     }
     _mappedFieldId(field) {
@@ -6451,7 +6458,8 @@ ${transcriptText}` }]
             { value: "connection", label: "Connection" },
             { value: "fields", label: "Field Mapping" },
             { value: "transcripts", label: "Transcripts" },
-            { value: "summary", label: "Summary" }
+            { value: "summary", label: "Summary" },
+            { value: "costs", label: "Costs" }
           ],
           value: this._activeTab,
           onChange: /* @__PURE__ */ __name((value) => {
@@ -6473,6 +6481,8 @@ ${transcriptText}` }]
           return this._tabTranscripts(draft);
         case "summary":
           return this._tabSummary(draft);
+        case "costs":
+          return this._tabCosts();
         case "setup":
         default:
           return this._tabSetup(draft);
@@ -6491,25 +6501,24 @@ ${transcriptText}` }]
             this._setupSteps()
           ]
         }),
-        this._costPreviewSection(),
         this._setupDoctorSection()
       ];
     }
-    _costPreviewSection() {
+    _tabCosts() {
       const recall = estimateRecallCost(60);
       const selectedModel = String(this._draft.anthropicModel || DEFAULT_SETTINGS.anthropicModel).trim();
       const links = h(
         "span",
         { class: `${ROOT_CLASS}-field-hint` },
-        "Public list prices, checked July 16, 2026: ",
+        "Prices checked July 16, 2026: ",
         h("a", { href: "https://www.recall.ai/pricing", target: "_blank", rel: "noopener noreferrer" }, "Recall pricing"),
         " \xB7 ",
         h("a", { href: "https://platform.claude.com/docs/en/about-claude/pricing", target: "_blank", rel: "noopener noreferrer" }, "Claude pricing"),
-        ". Credits, waiting-room time, unusually long transcripts, adaptive thinking, and custom plans can change the actual bill."
+        ". Actual charges vary by plan and usage."
       );
-      return section({
-        label: "Expected API cost",
-        hint: "Planning estimates for one active meeting hour\u2014not live account billing.",
+      return [section({
+        label: "API cost estimates",
+        hint: "One active meeting hour at public list prices. Estimates\u2014not billing.",
         body: [
           h(
             "div",
@@ -6518,7 +6527,7 @@ ${transcriptText}` }]
             h(
               "span",
               { class: `${ROOT_CLASS}-field-hint` },
-              `~${formatEstimatedUsd(recall.totalUsd)} per active bot-hour: ${formatEstimatedUsd(recall.recordingUsd)} recording + ${formatEstimatedUsd(recall.transcriptionUsd)} built-in transcription. Recall prorates to the second; time waiting to enter the call counts.`
+              `~${formatEstimatedUsd(recall.totalUsd)} per active bot-hour (${formatEstimatedUsd(recall.recordingUsd)} recording + ${formatEstimatedUsd(recall.transcriptionUsd)} transcription). Waiting-room time counts.`
             )
           ),
           ...CLAUDE_MODELS.map(([model, label]) => {
@@ -6528,7 +6537,7 @@ ${transcriptText}` }]
             let future = "";
             if (model === "claude-sonnet-5" && estimate.promotional) {
               const standard = standardSonnet5Estimate();
-              future = ` Introductory through August 31, 2026; then Claude ~${formatEstimatedUsd(standard.totalUsd)}.`;
+              future = ` Intro price through August 31, 2026; then ~${formatEstimatedUsd(standard.totalUsd)}.`;
             }
             return h(
               "div",
@@ -6537,7 +6546,7 @@ ${transcriptText}` }]
               h(
                 "span",
                 { class: `${ROOT_CLASS}-field-hint` },
-                `Claude ~${formatEstimatedUsd(estimate.totalUsd)} (${rate}); ~${formatEstimatedUsd(total)} including Recall.${future}`
+                `Claude ~${formatEstimatedUsd(estimate.totalUsd)} (${rate}); ~${formatEstimatedUsd(total)} with Recall.${future}`
               )
             );
           }),
@@ -6553,12 +6562,12 @@ ${transcriptText}` }]
             h(
               "span",
               { class: `${ROOT_CLASS}-field-hint` },
-              `Claude estimates assume about ${Math.round(CLAUDE_ESTIMATE_INPUT_TOKENS / 1e3)}k input and ${CLAUDE_ESTIMATE_OUTPUT_TOKENS.toLocaleString()} output tokens for a one-hour transcript and summary; Sonnet 5 and Opus 4.8 are adjusted for Anthropic\u2019s roughly 30% larger tokenizer.`
+              `Assumes about ${Math.round(CLAUDE_ESTIMATE_INPUT_TOKENS / 1e3)}k input and ${CLAUDE_ESTIMATE_OUTPUT_TOKENS.toLocaleString()} output tokens; Sonnet 5 and Opus 4.8 use a 1.3\xD7 tokenizer adjustment.`
             ),
             links
           )
         ]
-      });
+      })];
     }
     _setupDoctorSection() {
       const state = this._setupDoctorState;
@@ -6572,7 +6581,7 @@ ${transcriptText}` }]
             { class: `${ROOT_CLASS}-field` },
             button({
               label: this._setupDoctorInFlight ? "Checking\u2026" : "Run setup check",
-              variant: "primary",
+              variant: "ghost",
               size: "md",
               disabled: !!this._setupDoctorInFlight,
               onClick: /* @__PURE__ */ __name(() => void this._runSetupDoctor(), "onClick")
@@ -6658,11 +6667,12 @@ ${transcriptText}` }]
         if (missing.length) add("fail", "Fields", `Missing or invalid: ${missing.join(", ")}.`);
         else add("pass", "Fields", "Meeting URL and Participant Names are bound; transcript and summary use the page body.");
         const attendees = this._attendeesField();
-        if (!attendees) add("fail", "Attendees", "The automatic multi-record Attendees relation is missing or has an incompatible type.");
+        if (!attendees) add("fail", "Attendees", "Choose a valid multi-record collection-link field in Field Mapping.");
         else if (!this._settings.mapParticipantNamesToAttendees) add("warn", "Attendee matching", "Optional and turned off; Attendees remains available for manual links.");
         else {
+          const attendeesLabel = String(attendees.label || "Attendees");
           const peopleGuid = attendeesTargetCollectionGuid(attendees);
-          if (!peopleGuid) add("fail", "Attendee matching", "Limit the Attendees property to your People collection in the Meetings collection property settings.");
+          if (!peopleGuid) add("fail", "Attendee matching", `Limit ${attendeesLabel} to your People collection in the Meetings collection property settings.`);
           else {
             if (!this._workspaceCollectionsLoaded) await this._loadWorkspaceCollections(true);
             const target = this._collectionByGuid(peopleGuid);
@@ -6672,8 +6682,8 @@ ${transcriptText}` }]
                 name = target.getName?.() || name;
               } catch {
               }
-              add("pass", "Attendee matching", `Attendees is limited to ${name}; confident participant matches will be added.`);
-            } else add("fail", "Attendee matching", "The collection restriction on Attendees points to an unavailable collection.");
+              add("pass", "Attendee matching", `${attendeesLabel} is limited to ${name}; confident participant matches will be added.`);
+            } else add("fail", "Attendee matching", `The collection restriction on ${attendeesLabel} points to an unavailable collection.`);
           }
         }
         this._setupDoctorState = { checkedAt: Date.now(), results };
@@ -6699,24 +6709,27 @@ ${transcriptText}` }]
         targetName = target?.getName?.() || "";
       } catch {
       }
-      const status = !field ? "Attendees is missing or is not a multi-record link property. Reload once so the plugin can repair the collection schema." : targetGuid ? `Attendees is limited to ${targetName || targetGuid}. The plugin will search only that collection.` : "Before enabling matching: open the Meetings collection settings \u2192 Properties \u2192 Attendees, limit links to one collection, and choose your People or Contacts collection.";
+      const status = !field ? "Choose a multi-record collection-link property." : targetGuid ? this._draft.mapParticipantNamesToAttendees ? `Matching within ${targetName || targetGuid}.` : "" : "Limit this property to your People or Contacts collection before enabling matching.";
       return section({
-        label: "Attendees",
-        hint: "The plugin creates this multi-record collection-link property automatically. You choose which People collection it is allowed to link to.",
+        label: "Attendee mapping",
         body: [
           optionRow({
             type: "checkbox",
             name: "mapParticipantNamesToAttendees",
-            label: "Map Participant Names to Attendees?",
-            desc: "After a call, add unique exact email or name matches from the restricted People collection. Existing and manual Attendees links are preserved; Person records are never created.",
+            label: "Map Participant Names (plaintext) to Attendees (collection items)?",
+            desc: "Adds confident matches only. Existing links are preserved; People are never created.",
             checked: !!this._draft.mapParticipantNamesToAttendees,
             onChange: /* @__PURE__ */ __name((event) => this._updateSetting("mapParticipantNamesToAttendees", !!event.target.checked, { rerender: true }), "onChange")
           }),
-          h(
+          this._fieldSelectInput("Attendees field", "attendeesFieldId", ["record"], {
+            filter: isAttendeesRelationField,
+            emptyTypeLabel: "multi-record collection-link"
+          }),
+          status ? h(
             "div",
             { class: `${ROOT_CLASS}-field` },
             h("span", { class: `${ROOT_CLASS}-field-hint` }, status)
-          )
+          ) : null
         ]
       });
     }
@@ -6724,17 +6737,14 @@ ${transcriptText}` }]
       return [
         section({
           label: "Keys & bridge",
-          hint: "Your two keys and your bridge address. New here? Do the Setup tab first.",
           body: [
-            this._textInput("Bridge URL", "bridgeUrl", "https://your-bridge.example.com", false, "The web address of your bridge, from step 3 of Setup."),
-            this._bridgeLink(),
+            this._textInput("Bridge URL", "bridgeUrl", "https://your-bridge.example.com"),
             this._textInput("Recall API key", "recallApiKey", "Token from Recall", true),
             this._textInput("Anthropic API key", "anthropicApiKey", "Claude API key for summaries", true)
           ]
         }),
         section({
           label: "Recall",
-          hint: "The notetaker itself \u2014 where it runs, how it looks, and how often the plugin checks in.",
           body: [
             this._selectInput("Region", "recallRegion", [
               ["us-west-2", "US West 2"],
@@ -6746,15 +6756,15 @@ ${transcriptText}` }]
             this._textInput("Bot name", "botName", "Thymer Notetaker"),
             this._fileInput("Bot image JPEG upload", "botImageData", "botImageName"),
             this._textInput("Bot image JPEG URL", "botImageUrl", "https://example.com/notetaker.jpg"),
-            this._numberInput("Poll every seconds", "pollSeconds", 10, 300),
+            this._numberInput("Poll interval (seconds)", "pollSeconds", 10, 300),
             this._selectInput("Recall media retention", "recordingRetention", RECORDING_RETENTION_OPTIONS, {
-              hint: "Applies to future bots. Recall media includes audio/video, transcripts, participant data, and debugging artifacts\u2014not the copy already saved in Thymer. Seven days stays inside Recall\u2019s free storage window and leaves time for Repair Meeting. Expiration is permanent. Existing media is unchanged; delete it from the Recall bot dashboard with \u22EF \u2192 Delete media."
+              hint: "Future bots only. Seven days is free. Expiration deletes Recall media\u2014not content saved in Thymer."
             }),
             optionRow({
               type: "checkbox",
               name: "autoSchedule",
               label: "Send the bot automatically to scheduled meetings",
-              desc: "When a Meeting has a Join At time at least 10 minutes away, book the notetaker without waiting for a click. Meetings starting sooner still need a click, so a bot is never sent into a room early. Each bot uses Recall credits.",
+              desc: "Schedules meetings with a Join At time at least 10 minutes away. Nearer meetings still need Join Now.",
               checked: !!draft.autoSchedule,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("autoSchedule", !!event.target.checked, { rerender: true }), "onChange")
             }),
@@ -6766,7 +6776,7 @@ ${transcriptText}` }]
               checked: !!draft.sendJoinChatMessage,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("sendJoinChatMessage", !!event.target.checked, { rerender: true }), "onChange")
             }),
-            this._textareaInput("Join chat message", "joinChatMessage", 3)
+            draft.sendJoinChatMessage ? this._textareaInput("Join chat message", "joinChatMessage", 3) : null
           ]
         })
       ];
@@ -6775,7 +6785,6 @@ ${transcriptText}` }]
       return [
         section({
           label: "Field Mapping",
-          hint: "Which of this collection's properties Recall.ai should read and write. Leave on auto-detect if unsure.",
           body: [
             this._fieldSelectInput("Meeting URL field", "meetingUrlFieldId", ["url", "text"]),
             this._fieldSelectInput("Join At field", "joinAtFieldId", ["datetime", "date"]),
@@ -6786,119 +6795,114 @@ ${transcriptText}` }]
       ];
     }
     _tabTranscripts(draft) {
+      const enabled = draft.saveTranscript !== false;
       return [
         section({
-          label: "Heading",
-          hint: 'The title line the transcript is written under, in the record body. Pick "No heading" to drop the title (and its emoji) and just indent the transcript.',
-          body: [
-            this._textInput("Heading text", "transcriptHeadingText", "\u{1F399}\uFE0F Transcript"),
-            this._selectInput("Heading level", "transcriptHeadingLevel", HEADING_LEVEL_OPTIONS)
-          ]
-        }),
-        section({
-          label: "Formatting",
-          hint: "How the transcript is captured and laid out.",
+          label: "Output",
           body: [
             optionRow({
               type: "checkbox",
               name: "saveTranscript",
-              label: "Save the transcript",
-              desc: "Keep the transcript on the record. Turn off to get only the summary \u2014 Recall is still transcribed so the summary can be written.",
-              checked: draft.saveTranscript !== false,
+              label: "Save transcript",
+              checked: enabled,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("saveTranscript", !!event.target.checked, { rerender: true }), "onChange")
-            }),
-            this._selectInput("Layout", "transcriptLayout", [
-              ["blocks", "Speaker blocks (collapsible)"],
-              ["inline", "Inline lines"]
-            ]),
-            this._selectInput("Timestamps", "transcriptTimestamps", [
-              ["clock", "Clock time (2:47 PM)"],
-              ["elapsed", "Elapsed time (0:37)"]
-            ]),
-            this._textInput("Turn header", "turnHeaderTemplate", "[{Time}] {Speaker}", false, "Each speaker turn\u2019s header. Use {Speaker} and {Time} \u2014 add any characters you like around them."),
-            optionRow({
-              type: "checkbox",
-              name: "utteranceTimestamps",
-              label: "Timestamp every line",
-              desc: "Show the time on each speaker turn. Off shows the speaker only (times still appear on section headings).",
-              checked: draft.utteranceTimestamps !== false,
-              onChange: /* @__PURE__ */ __name((event) => this._updateSetting("utteranceTimestamps", !!event.target.checked, { rerender: true }), "onChange")
-            }),
-            optionRow({
-              type: "checkbox",
-              name: "followLiveTranscript",
-              label: "Follow the live transcript",
-              desc: "While the meeting runs, scroll the open record to each new line as it arrives so the transcript streams in view. Skipped whenever you are typing in that record. Off = lines still stream but only show when you next open/scroll the record.",
-              checked: draft.followLiveTranscript !== false,
-              onChange: /* @__PURE__ */ __name((event) => this._updateSetting("followLiveTranscript", !!event.target.checked, { rerender: true }), "onChange")
             })
           ]
         }),
-        section({
-          label: "AI topic sections",
-          hint: "Group the finished transcript into named, time-ranged topic sections that track the summary. Uses your Claude key; sections appear when the meeting ends.",
-          body: [
-            optionRow({
-              type: "checkbox",
-              name: "transcriptSections",
-              label: "Group into topic sections",
-              desc: "When the meeting ends, reorganize the live transcript into collapsible topic sections. The live feed during the meeting is unchanged.",
-              checked: !!draft.transcriptSections,
-              onChange: /* @__PURE__ */ __name((event) => this._updateSetting("transcriptSections", !!event.target.checked, { rerender: true }), "onChange")
-            }),
-            this._textInput("Heading template", "sectionHeadingTemplate", "{Topic} | {Range}", false, "Use {Topic} and {Range} \u2014 add any characters you like around them."),
-            this._selectInput("Range style", "sectionRangeStyle", SECTION_RANGE_STYLES)
-          ]
-        })
+        ...enabled ? [
+          section({
+            label: "Heading",
+            body: [
+              this._textInput("Heading text", "transcriptHeadingText", "\u{1F399}\uFE0F Transcript"),
+              this._selectInput("Heading level", "transcriptHeadingLevel", HEADING_LEVEL_OPTIONS)
+            ]
+          }),
+          section({
+            label: "Formatting",
+            body: [
+              this._selectInput("Layout", "transcriptLayout", [
+                ["blocks", "Speaker blocks (collapsible)"],
+                ["inline", "Inline lines"]
+              ]),
+              this._selectInput("Timestamps", "transcriptTimestamps", [
+                ["clock", "Clock time (2:47 PM)"],
+                ["elapsed", "Elapsed time (0:37)"]
+              ]),
+              this._textInput("Turn header", "turnHeaderTemplate", "[{Time}] {Speaker}", false, "Use {Speaker} and {Time}."),
+              optionRow({
+                type: "checkbox",
+                name: "utteranceTimestamps",
+                label: "Timestamp each speaker turn",
+                checked: draft.utteranceTimestamps !== false,
+                onChange: /* @__PURE__ */ __name((event) => this._updateSetting("utteranceTimestamps", !!event.target.checked, { rerender: true }), "onChange")
+              }),
+              optionRow({
+                type: "checkbox",
+                name: "followLiveTranscript",
+                label: "Follow live transcript in the open record",
+                desc: "Pauses while you type; lines still save.",
+                checked: draft.followLiveTranscript !== false,
+                onChange: /* @__PURE__ */ __name((event) => this._updateSetting("followLiveTranscript", !!event.target.checked, { rerender: true }), "onChange")
+              })
+            ]
+          }),
+          section({
+            label: "AI topic sections",
+            body: [
+              optionRow({
+                type: "checkbox",
+                name: "transcriptSections",
+                label: "Group into topic sections",
+                desc: "Adds collapsible topic headings after the meeting using Claude.",
+                checked: !!draft.transcriptSections,
+                onChange: /* @__PURE__ */ __name((event) => this._updateSetting("transcriptSections", !!event.target.checked, { rerender: true }), "onChange")
+              }),
+              ...draft.transcriptSections ? [
+                this._textInput("Heading template", "sectionHeadingTemplate", "{Topic} | {Range}", false, "Use {Topic} and {Range}."),
+                this._selectInput("Range style", "sectionRangeStyle", SECTION_RANGE_STYLES)
+              ] : []
+            ]
+          })
+        ] : []
       ];
     }
     _tabSummary(draft) {
+      const enabled = !!draft.autoSummarize;
       return [
         section({
-          label: "Heading",
-          hint: 'The title line the summary is written under, in the record body. Pick "No heading" to drop the title (and its emoji) and just indent the summary.',
+          label: "Output",
           body: [
-            this._textInput("Heading text", "summaryHeadingText", "\u{1F4DD} Summary"),
-            this._selectInput("Heading level", "summaryHeadingLevel", HEADING_LEVEL_OPTIONS)
-          ]
-        }),
-        section({
-          label: "Generation",
-          body: [
-            this._modelSelectInput("Claude model", "anthropicModel"),
             optionRow({
               type: "checkbox",
               name: "autoSummarize",
-              label: "Auto summarize after meeting is done",
-              desc: "When polling sees a terminal bot status, fetch the final transcript and summarize it.",
-              checked: !!draft.autoSummarize,
+              label: "Auto summarize after the meeting",
+              checked: enabled,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("autoSummarize", !!event.target.checked, { rerender: true }), "onChange")
-            }),
-            this._textareaInput("Summary prompt", "summaryPrompt", 8)
+            })
           ]
-        })
+        }),
+        ...enabled ? [
+          section({
+            label: "Heading",
+            body: [
+              this._textInput("Heading text", "summaryHeadingText", "\u{1F4DD} Summary"),
+              this._selectInput("Heading level", "summaryHeadingLevel", HEADING_LEVEL_OPTIONS)
+            ]
+          }),
+          section({
+            label: "Generation",
+            body: [
+              this._modelSelectInput("Claude model", "anthropicModel"),
+              this._textareaInput("Summary prompt", "summaryPrompt", 8)
+            ]
+          })
+        ] : []
       ];
     }
     _bridgeWorkerUrl() {
       const conf = this.getConfiguration ? this.getConfiguration() : {};
       const repo = String(conf && conf.repository || "https://github.com/akaready/thymer-recall-ai").replace(/\/+$/, "");
       return `${repo}/tree/main/backend`;
-    }
-    _bridgeLink() {
-      return h(
-        "div",
-        { class: `${ROOT_CLASS}-field` },
-        h(
-          "span",
-          { class: `${ROOT_CLASS}-field-hint` },
-          "Get the worker: ",
-          h("a", {
-            href: this._bridgeWorkerUrl(),
-            target: "_blank",
-            rel: "noopener noreferrer"
-          }, "backend/bridge-worker.js + deploy guide on GitHub \u2192")
-        )
-      );
     }
     /** Recall API keys are issued per region, so the link has to follow the Region setting. */
     _recallKeyUrl() {
@@ -6959,7 +6963,7 @@ ${transcriptText}` }]
         h(
           "li",
           {},
-          "Optional: in the Meetings collection property settings, open Attendees and limit its links to your People or Contacts collection. Then turn on \u201CMap Participant Names to Attendees?\u201D in Field Mapping. Participant names are always kept as text; existing People are added only on a confident match."
+          "Optional: in Field Mapping, turn on \u201CMap Participant Names (plaintext) to Attendees (collection items)?\u201D and choose the relation to use. In the Meetings collection property settings, limit that relation to your People or Contacts collection. Existing People are added only on a confident match."
         )
       );
     }
@@ -7087,19 +7091,12 @@ ${transcriptText}` }]
       );
     }
     _modelSelectInput(label, key) {
-      const options = CLAUDE_MODELS.map(([value, text]) => {
-        const estimate2 = estimateClaudeSummaryCost(value);
-        const promo = estimate2 && estimate2.promotional ? " intro" : "";
-        return [value, estimate2 ? `${text} \xB7 ~${formatEstimatedUsd(estimate2.totalUsd)}/meeting hr${promo}` : text];
-      });
+      const options = CLAUDE_MODELS.map(([value, text]) => [value, text]);
       const current = String(this._draft[key] || DEFAULT_SETTINGS.anthropicModel).trim();
       if (current && !options.some(([value]) => value === current)) {
         options.push([current, `${current} (current)`]);
       }
-      const estimate = estimateClaudeSummaryCost(current);
-      const recall = estimateRecallCost(60);
-      const hint = estimate ? this._draft.autoSummarize ? `Estimated for a one-hour meeting: Claude ~${formatEstimatedUsd(estimate.totalUsd)}; ~${formatEstimatedUsd(recall.totalUsd + estimate.totalUsd)} including Recall, before paid storage.` : `Auto summarize is off, so Claude is $0 unless a summary is generated later. With this model, a one-hour summary is estimated at ~${formatEstimatedUsd(estimate.totalUsd)}.` : "No cost estimate is available for this custom model ID.";
-      return this._selectInput(label, key, options, { hint });
+      return this._selectInput(label, key, options);
     }
     /**
      * Add the canonical property to this collection, for the case the dropdown exists to solve:
@@ -7136,9 +7133,12 @@ ${transcriptText}` }]
         this._toast(`Could not add "${def.label}"`, this._errorMessage(err));
       }
     }
-    _fieldSelectInput(label, key, types) {
+    _fieldSelectInput(label, key, types, { filter, emptyTypeLabel } = {}) {
       const allowed = new Set((types || []).map((type) => String(type).toLowerCase()));
-      const fields = this._collectionFields().filter((field) => !allowed.size || allowed.has(String(field.type || "").toLowerCase()));
+      const fields = this._collectionFields().filter((field) => {
+        if (allowed.size && !allowed.has(String(field.type || "").toLowerCase())) return false;
+        return typeof filter !== "function" || filter(field);
+      });
       const options = [["", "Auto-detect"]];
       for (const field of fields) {
         options.push([field.id, `${field.label || field.id} (${field.id})`]);
@@ -7158,7 +7158,7 @@ ${transcriptText}` }]
           }
           this._updateSetting(key, value, { rerender: true });
         }, "onChange"),
-        hint: missing && !fields.length ? `This collection has no ${(types || []).join(" or ")} property for Recall.ai to use. Create one above.` : ""
+        hint: missing && !fields.length ? `This collection has no ${emptyTypeLabel || (types || []).join(" or ")} property for Recall.ai to use. Create one above.` : ""
       });
     }
     _textareaInput(label, key, rows = 4) {
