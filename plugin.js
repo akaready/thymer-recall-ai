@@ -3707,7 +3707,7 @@ ${report}
   __name(formatRelativeTime, "formatRelativeTime");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.11";
+  var PLUGIN_VERSION = "1.22.12";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -4068,7 +4068,7 @@ ${report}
       this._botCreateInFlight = /* @__PURE__ */ new Map();
       this._personCreateInFlight = /* @__PURE__ */ new Map();
       this._diagnosticsByRecord = /* @__PURE__ */ new Map();
-      this._setupDoctorState = null;
+      this._setupDoctorState = this._loadSetupDoctorState();
       this._setupDoctorInFlight = null;
       this._workspaceCollections = [];
       this._workspaceCollectionsLoaded = false;
@@ -6709,7 +6709,7 @@ ${transcriptText}` }]
             (item) => h(
               "div",
               { class: `${ROOT_CLASS}-doctor-result ${ROOT_CLASS}-doctor-result--${item.level}` },
-              h("i", { class: `ti ti-${item.level === "pass" ? "circle-check" : item.level === "warn" ? "alert-triangle" : "circle-x"}`, "aria-hidden": "true" }),
+              h("i", { class: `ti ti-${item.level === "pass" ? "circle-check" : item.level === "warn" ? "alert-triangle" : "x"}`, "aria-hidden": "true" }),
               h("span", {}, h("strong", {}, item.label), ` \u2014 ${item.message}`)
             )
           )) : h("span", { class: `${ROOT_CLASS}-field-hint` }, "No checks run yet.")
@@ -6723,6 +6723,41 @@ ${transcriptText}` }]
       }
       return doctor;
     }
+    _setupDoctorStorageKey() {
+      let workspace = "";
+      try {
+        workspace = (this.getWorkspaceGuid ? this.getWorkspaceGuid() : "") || "";
+      } catch {
+      }
+      let collection = "";
+      try {
+        collection = (this.collection && this.collection.getGuid ? this.collection.getGuid() : "") || "";
+      } catch {
+      }
+      return `recall-ai/${workspace || "default"}/${collection || "collection"}/setup-doctor-v1`;
+    }
+    _loadSetupDoctorState() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(this._setupDoctorStorageKey()) || "null");
+        const checkedAt = Number(parsed && parsed.checkedAt);
+        const rawResults = parsed && Array.isArray(parsed.results) ? parsed.results : [];
+        if (!Number.isFinite(checkedAt) || checkedAt <= 0 || !rawResults.length) return null;
+        const results = rawResults.slice(0, 30).map((item) => ({
+          level: ["pass", "warn", "fail"].includes(String(item && item.level)) ? String(item.level) : "fail",
+          label: String(item && item.label || "").slice(0, 100),
+          message: String(item && item.message || "").slice(0, 1e3)
+        })).filter((item) => item.label && item.message);
+        return results.length ? { checkedAt, results } : null;
+      } catch {
+        return null;
+      }
+    }
+    _saveSetupDoctorState(state) {
+      try {
+        localStorage.setItem(this._setupDoctorStorageKey(), JSON.stringify(state));
+      } catch {
+      }
+    }
     async _runSetupDoctor() {
       if (this._setupDoctorInFlight) return this._setupDoctorInFlight;
       const task = (async () => {
@@ -6734,7 +6769,8 @@ ${transcriptText}` }]
           add("fail", "Bridge", "Enter a valid HTTPS Bridge URL.");
         } else {
           try {
-            const response = await fetchWithBackoff(`${bridge}/health`, { method: "GET" });
+            const healthUrl = `${bridge}/health?setup_doctor=${Date.now()}`;
+            const response = await fetchWithBackoff(healthUrl, { method: "GET", cache: "no-store" });
             health = await response.json().catch(() => ({}));
             if (!response.ok || !health.ok) throw new Error(formatBridgeError(health, response.status));
             const version = String(health.bridgeVersion || "0.0.0");
@@ -6747,7 +6783,7 @@ ${transcriptText}` }]
             if (health.kv === "bound") add("pass", "Live storage", "RECALL_TRANSCRIPTS is bound.");
             else add("fail", "Live storage", "Bind the RECALL_TRANSCRIPTS KV namespace and redeploy.");
             if (health.webhookVerification === "enforced") add("pass", "Live transcript security", "The public realtime endpoint accepts only transcript events signed by Recall.");
-            else add("warn", "Live transcript security (optional)", "Recall uses the public Worker webhook to send transcript lines while the meeting is running. Compatibility mode accepts unsigned posts, so another sender could forge rows or spam the endpoint. A Workspace Secret lets the Worker prove each event came from Recall before storing it; it does not turn streaming on. See Setup step 5 above.");
+            else add("warn", "Live transcript security (optional)", "This Worker still reports compatibility mode, which accepts unsigned transcript posts. In the same production Worker, add a Secret named RECALL_WORKSPACE_VERIFICATION_SECRET, paste the Recall Workspace Secret as its value, and select Deploy. See Setup step 5.");
           } catch (err) {
             add("fail", "Bridge", this._errorMessage(err));
           }
@@ -6805,6 +6841,7 @@ ${transcriptText}` }]
           }
         }
         this._setupDoctorState = { checkedAt: Date.now(), results };
+        this._saveSetupDoctorState(this._setupDoctorState);
         this._renderPanel();
         const failures = results.filter((item) => item.level === "fail").length;
         this._toast(failures ? "Setup needs attention" : "Setup looks healthy", failures ? `${failures} check${failures === 1 ? "" : "s"} failed.` : "All required checks passed.");
@@ -7016,9 +7053,72 @@ ${transcriptText}` }]
       const s = this._draft || this._settings || {};
       return !!(String(s.recallApiKey || "").trim() && String(s.anthropicApiKey || "").trim() && String(s.bridgeUrl || "").trim());
     }
+    async _copySetupValue(value, copyButton) {
+      const text = String(value || "");
+      let copied = false;
+      try {
+        const write = typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText;
+        if (typeof write === "function") {
+          await write.call(navigator.clipboard, text);
+          copied = true;
+        }
+      } catch {
+      }
+      if (!copied) {
+        let input = null;
+        try {
+          input = document.createElement("textarea");
+          input.value = text;
+          input.setAttribute("readonly", "");
+          input.style.position = "fixed";
+          input.style.opacity = "0";
+          document.body.appendChild(input);
+          input.select();
+          copied = document.execCommand("copy");
+        } catch {
+        } finally {
+          try {
+            input?.remove();
+          } catch {
+          }
+        }
+      }
+      if (copied) {
+        const label = copyButton && copyButton.querySelector ? copyButton.querySelector(`.${ROOT_CLASS}-setup-copy-label`) : null;
+        if (label) label.textContent = "Copied";
+        if (copyButton && copyButton.classList) copyButton.classList.add(`${ROOT_CLASS}-setup-copy-button--copied`);
+        setTimeout(() => {
+          if (label && label.isConnected) label.textContent = "Copy";
+          if (copyButton && copyButton.isConnected) copyButton.classList.remove(`${ROOT_CLASS}-setup-copy-button--copied`);
+        }, 1600);
+        this._toast("Copied", `${text} copied to the clipboard.`);
+      } else {
+        this._toast("Copy failed", "Select the secret name and copy it manually.");
+      }
+      return copied;
+    }
     _setupSteps() {
       const link = /* @__PURE__ */ __name((href, text) => h("a", { href, target: "_blank", rel: "noopener noreferrer" }, text), "link");
-      const code = /* @__PURE__ */ __name((text) => h("code", {}, text), "code");
+      const copyCode = /* @__PURE__ */ __name((text) => h(
+        "span",
+        { class: `${ROOT_CLASS}-setup-copy` },
+        h("code", { title: "Select and copy this value" }, text),
+        h(
+          "button",
+          {
+            type: "button",
+            class: `${ROOT_CLASS}-setup-copy-button`,
+            title: `Copy ${text}`,
+            "aria-label": `Copy ${text}`,
+            onClick: /* @__PURE__ */ __name((event) => {
+              event.preventDefault();
+              void this._copySetupValue(text, event.currentTarget);
+            }, "onClick")
+          },
+          h("i", { class: "ti ti-copy", "aria-hidden": "true" }),
+          h("span", { class: `${ROOT_CLASS}-setup-copy-label` }, "Copy")
+        )
+      ), "copyCode");
       return h(
         "ol",
         { class: `${ROOT_CLASS}-steps` },
@@ -7051,7 +7151,7 @@ ${transcriptText}` }]
           "Recall sends each live transcript line to your bridge through a webhook while the meeting is running. Because that Worker endpoint is public, the secret lets it verify that every event was signed by Recall before it stores the row; this prevents forged transcript text and endpoint spam. It does not enable streaming\u2014the webhook works in compatibility mode without it. To enforce verification, in your ",
           link(this._recallKeyUrl(), "Recall API Keys & Secrets page"),
           ", click Create Workspace Secret. In Cloudflare, open your Worker \u2192 Settings \u2192 Variables and Secrets, add an encrypted secret named exactly ",
-          code("RECALL_WORKSPACE_VERIFICATION_SECRET"),
+          copyCode("RECALL_WORKSPACE_VERIFICATION_SECRET"),
           ", paste the Recall value, and redeploy the Worker. Run Setup Doctor again; Live transcript security should say the public endpoint accepts only Recall-signed events. ",
           link("https://docs.recall.ai/docs/authenticating-requests-from-recallai", "Recall\u2019s verification guide"),
           "."
@@ -7561,6 +7661,43 @@ ${transcriptText}` }]
 				text-decoration: underline;
 				text-underline-offset: 2px;
 			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-setup-copy {
+				display: inline-flex;
+				align-items: baseline;
+				gap: 4px;
+				white-space: nowrap;
+				vertical-align: baseline;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-setup-copy code {
+				-webkit-user-select: text;
+				user-select: text;
+				cursor: text;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-setup-copy-button {
+				display: inline-flex;
+				align-items: center;
+				gap: 3px;
+				padding: 1px 5px;
+				font: inherit;
+				font-size: 0.9em;
+				line-height: 1.3;
+				color: var(--tps-text-muted);
+				background: transparent;
+				border: 0;
+				border-radius: var(--tps-radius-sm, 4px);
+				cursor: pointer;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-setup-copy-button:hover,
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-setup-copy-button--copied {
+				color: var(--tps-accent);
+				background: var(--tps-accent-soft);
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-setup-copy-button:focus-visible {
+				color: var(--tps-accent);
+				background: var(--tps-accent-soft);
+				outline: 1px solid var(--tps-accent);
+				outline-offset: 1px;
+			}
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-card {
 				margin-top: var(--tps-space-4);
 				padding: var(--tps-space-4);
@@ -7597,6 +7734,12 @@ ${transcriptText}` }]
 				color: var(--tps-text-muted);
 				font-size: var(--tps-fs-hint);
 				line-height: 1.4;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-result > i {
+				flex: 0 0 14px;
+				width: 14px;
+				margin-top: 2px;
+				text-align: center;
 			}
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-result--pass i { color: var(--tps-success, #10b981); }
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-result--warn i { color: var(--tps-warning, #f59e0b); }
