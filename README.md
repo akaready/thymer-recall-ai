@@ -99,6 +99,12 @@ Then open **Setup → Setup Doctor** and click **Run setup check**. It validates
 KV binding, webhook-verification mode, Recall key/region, Claude key/model, and field bindings without
 creating a bot or generating a summary.
 
+If Setup Doctor shows **Webhook security (optional)** in compatibility mode, it is a warning rather
+than a setup failure. In Recall, open **Developers → API Keys & Secrets**, click **Create Workspace
+Secret**, then add that value to the Cloudflare Worker under **Settings → Variables and Secrets** as
+an encrypted variable named exactly `RECALL_WORKSPACE_VERIFICATION_SECRET`. Redeploy the Worker and
+run Setup Doctor again. The in-app Setup tab includes these steps and links Recall’s verification guide.
+
 ### 5. Send the notetaker
 
 Add a meeting link to a Meeting record. What the button says depends on when the meeting is:
@@ -126,7 +132,7 @@ button on an inline reference to a Meeting record in the editor.
 
 ### 6. Optional: link attendees to People
 
-In **Setup → People linking**, choose the collection that contains your Person/Contact records.
+In **Field Mapping → Attendees relation**, choose the collection that contains your Person/Contact records.
 Then bind an existing compatible multi-record relation or click **Create Attendees relation**.
 Creation is explicit and idempotent: the plugin re-checks the live schema and binds a compatible
 field instead of creating a duplicate. Changing the People collection clears the binding but never

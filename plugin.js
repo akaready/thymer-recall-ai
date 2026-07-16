@@ -3450,7 +3450,7 @@ ${report}
   __name(matchParticipantsToPeople, "matchParticipantsToPeople");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.1";
+  var PLUGIN_VERSION = "1.22.2";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -6336,8 +6336,7 @@ ${transcriptText}` }]
             this._setupSteps()
           ]
         }),
-        this._setupDoctorSection(),
-        this._peopleLinkingSection()
+        this._setupDoctorSection()
       ];
     }
     _setupDoctorSection() {
@@ -6393,7 +6392,7 @@ ${transcriptText}` }]
             if (health.kv === "bound") add("pass", "Live storage", "RECALL_TRANSCRIPTS is bound.");
             else add("fail", "Live storage", "Bind the RECALL_TRANSCRIPTS KV namespace and redeploy.");
             if (health.webhookVerification === "enforced") add("pass", "Webhook security", "Recall signatures are enforced.");
-            else add("warn", "Webhook security", "Compatibility mode is accepting unsigned events; add RECALL_WORKSPACE_VERIFICATION_SECRET when convenient.");
+            else add("warn", "Webhook security (optional)", "This is not an error. In Recall, create a Workspace Secret under Developers \u2192 API Keys & Secrets. Add it to your Cloudflare Worker as the encrypted variable RECALL_WORKSPACE_VERIFICATION_SECRET, redeploy the Worker, then run this check again. See Setup step 5 above.");
           } catch (err) {
             add("fail", "Bridge", this._errorMessage(err));
           }
@@ -6475,7 +6474,7 @@ ${transcriptText}` }]
       const canCreate = !!targetGuid && !!targetCollection && !compatible.length && !this._attendeesFieldCreateInFlight;
       const actionHint = !targetGuid ? "Choose the collection that contains your Person records." : !targetCollection ? "That collection is unavailable. Refresh the list or choose another collection." : compatible.length ? "A compatible relation already exists. Bind it above; Recall will not create a duplicate." : "Creates one multi-record Attendees relation restricted to this People collection. The schema is checked again before creation.";
       return section({
-        label: "People linking (optional)",
+        label: "Attendees relation (optional)",
         hint: "Keep every participant name as text, and attach confident matches to existing Person records. Recall never creates Person records.",
         body: [
           this._selectInput("People collection", "personCollectionGuid", collectionOptions, {
@@ -6573,7 +6572,8 @@ ${transcriptText}` }]
             this._fieldSelectInput("Summary field", "summaryFieldId", ["text"]),
             this._fieldSelectInput("Participant Names field", "participantNamesFieldId", ["text"])
           ]
-        })
+        }),
+        this._peopleLinkingSection()
       ];
     }
     _tabTranscripts(draft) {
@@ -6709,6 +6709,7 @@ ${transcriptText}` }]
     }
     _setupSteps() {
       const link = /* @__PURE__ */ __name((href, text) => h("a", { href, target: "_blank", rel: "noopener noreferrer" }, text), "link");
+      const code = /* @__PURE__ */ __name((text) => h("code", {}, text), "code");
       return h(
         "ol",
         { class: `${ROOT_CLASS}-steps` },
@@ -6737,12 +6738,24 @@ ${transcriptText}` }]
         h(
           "li",
           {},
+          h("strong", {}, "Optional \u2014 secure realtime webhooks: "),
+          "in your ",
+          link(this._recallKeyUrl(), "Recall API Keys & Secrets page"),
+          ", click Create Workspace Secret. In Cloudflare, open your Worker \u2192 Settings \u2192 Variables and Secrets, add an encrypted secret named exactly ",
+          code("RECALL_WORKSPACE_VERIFICATION_SECRET"),
+          ", paste the Recall value, and redeploy the Worker. Run Setup Doctor again; Webhook security should say signatures are enforced. ",
+          link("https://docs.recall.ai/docs/authenticating-requests-from-recallai", "Recall\u2019s verification guide"),
+          ". If you skip this, the plugin still works in compatibility mode, but the public endpoint accepts unsigned events."
+        ),
+        h(
+          "li",
+          {},
           "Add a meeting link to a Meeting record and click Join Now \u2014 the notetaker walks in straight away. If you also set a Join At time 10+ minutes out, the button becomes Schedule Bot instead and Recall sends the notetaker in on its own when the meeting starts. Either way the transcript arrives as people talk, and the summary is written once the meeting ends."
         ),
         h(
           "li",
           {},
-          "Optional: below, choose your People collection and create or bind an Attendees relation. Participant names are always kept as text; existing People are linked only on a confident match."
+          "Optional: open Field Mapping, choose your People collection, and create or bind the Attendees relation there. Participant names are always kept as text; existing People are linked only on a confident match."
         )
       );
     }
