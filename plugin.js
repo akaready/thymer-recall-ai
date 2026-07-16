@@ -3601,7 +3601,7 @@ ${report}
   __name(migrateMeetingSchema, "migrateMeetingSchema");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.8";
+  var PLUGIN_VERSION = "1.22.9";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -6764,7 +6764,7 @@ ${transcriptText}` }]
               type: "checkbox",
               name: "autoSchedule",
               label: "Send the bot automatically to scheduled meetings",
-              desc: "Schedules meetings with a Join At time at least 10 minutes away. Nearer meetings still need Join Now.",
+              desc: "Schedules meetings with a Join At time at least 10 minutes away. Otherwise, use Join Now.",
               checked: !!draft.autoSchedule,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("autoSchedule", !!event.target.checked, { rerender: true }), "onChange")
             }),
