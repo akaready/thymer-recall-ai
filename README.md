@@ -99,11 +99,15 @@ Then open **Setup → Setup Doctor** and click **Run setup check**. It validates
 KV binding, webhook-verification mode, Recall key/region, Claude key/model, and field bindings without
 creating a bot or generating a summary.
 
-If Setup Doctor shows **Webhook security (optional)** in compatibility mode, it is a warning rather
-than a setup failure. In Recall, open **Developers → API Keys & Secrets**, click **Create Workspace
-Secret**, then add that value to the Cloudflare Worker under **Settings → Variables and Secrets** as
-an encrypted variable named exactly `RECALL_WORKSPACE_VERIFICATION_SECRET`. Redeploy the Worker and
-run Setup Doctor again. The in-app Setup tab includes these steps and links Recall’s verification guide.
+Recall sends live transcript lines to the bridge’s public webhook while a meeting is running. If
+Setup Doctor shows **Live transcript security (optional)** in compatibility mode, streaming still
+works, but the endpoint cannot prove that a post came from Recall; another sender could forge
+transcript rows or spam the Worker. In Recall, open **Developers → API Keys & Secrets**, click
+**Create Workspace Secret**, then add that value to the Cloudflare Worker under **Settings →
+Variables and Secrets** as an encrypted variable named exactly
+`RECALL_WORKSPACE_VERIFICATION_SECRET`. Redeploy the Worker and run Setup Doctor again. This makes
+the Worker reject events that are not cryptographically signed by Recall; it does not enable the
+webhook itself. See [Recall’s request-verification guide](https://docs.recall.ai/docs/authenticating-requests-from-recallai).
 
 ### 5. Send the notetaker
 
@@ -150,6 +154,7 @@ confident matches to `Attendees`. Ambiguous and unmatched names stay safely in t
 | --- | --- |
 | **Bridge URL** | Address of your bridge (step 3). |
 | **Recall API key** / **Region** | Your Recall key and the region it came from — they must match. |
+| **Recall media retention** | How long future bots keep Recall’s audio/video, transcript, participant, and debug artifacts. Defaults to 7 days, inside Recall’s free storage window. |
 | **Anthropic API key** / **Claude model** | Key and model used to write the summary. |
 | **Field mapping** | Point Meeting URL / Transcript / Summary / Participant Names at existing properties instead of the plugin's defaults. Leave on auto-detect if unsure. |
 | **People collection / Attendees relation** | Optionally bind meeting participants to existing Person records. Exact matching only; Person records are never auto-created. |
@@ -158,6 +163,15 @@ confident matches to `Attendees`. Ambiguous and unmatched names stay safely in t
 | **Join chat message** | Optional message the bot posts when it joins. |
 | **Poll interval** | How often the plugin checks Recall for progress. |
 | **Summary prompt** | The instructions Claude follows when summarizing. |
+
+The retention setting is sent as `recording_config.retention` on every future bot. Seven days is the
+default because Recall does not charge for media stored for seven days or less, while still leaving a
+repair/debugging window. Expiration is permanent and does not delete the transcript or summary
+already copied into Thymer. It does not change existing bots; remove those from the Recall bot
+dashboard with **⋯ → Delete media**, or call Recall’s irreversible
+[Delete Bot Media API](https://docs.recall.ai/reference/bot_delete_media_create). Zero-data retention
+is intentionally not offered because this plugin needs Recall’s finalized post-call artifact to
+guarantee the complete transcript, summary, citations, and attendee roster.
 
 There is no Save button — edits apply and persist immediately (API keys save when you leave the
 field). The scope pill in the panel header shows whether preferences follow the workspace

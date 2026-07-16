@@ -3313,6 +3313,50 @@ ${report}
   }
   __name(formatMeetingDiagnosticsReport, "formatMeetingDiagnosticsReport");
 
+  // recall-storage.js
+  var RECORDING_RETENTION_OPTIONS = Object.freeze([
+    ["168", "7 days \u2014 no storage charges (recommended)"],
+    ["72", "3 days \u2014 no storage charges"],
+    ["24", "24 hours \u2014 shortest repair window"],
+    ["720", "30 days \u2014 billed after day 7"],
+    ["forever", "Forever \u2014 billed after day 7"],
+    ["account", "Recall account default \u2014 may retain forever"]
+  ]);
+  var VALUES = new Set(RECORDING_RETENTION_OPTIONS.map(([value]) => value));
+  function normalizeRecordingRetention(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    return VALUES.has(normalized) ? normalized : "168";
+  }
+  __name(normalizeRecordingRetention, "normalizeRecordingRetention");
+  function recordingRetentionConfig(value) {
+    const normalized = normalizeRecordingRetention(value);
+    if (normalized === "account") return void 0;
+    if (normalized === "forever") return { type: "forever" };
+    return { type: "timed", hours: Number(normalized) };
+  }
+  __name(recordingRetentionConfig, "recordingRetentionConfig");
+  function recordingRetentionDoctorMessage(value) {
+    const normalized = normalizeRecordingRetention(value);
+    if (normalized === "account") return {
+      level: "warn",
+      message: "Future bots use the Recall account default, which may retain media forever and incur storage charges after day 7."
+    };
+    if (normalized === "forever") return {
+      level: "warn",
+      message: "Future bot media is retained forever; Recall charges for storage after day 7."
+    };
+    const hours = Number(normalized);
+    if (hours > 168) return {
+      level: "warn",
+      message: `Future bot media is retained for ${hours / 24} days; Recall charges for storage after day 7.`
+    };
+    return {
+      level: "pass",
+      message: `Future bot media expires after ${hours / 24} day${hours === 24 ? "" : "s"}, before Recall storage charges begin.`
+    };
+  }
+  __name(recordingRetentionDoctorMessage, "recordingRetentionDoctorMessage");
+
   // participant-linking.js
   function normalizeIdentity(value) {
     return String(value == null ? "" : value).normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
@@ -3450,7 +3494,7 @@ ${report}
   __name(matchParticipantsToPeople, "matchParticipantsToPeople");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.2";
+  var PLUGIN_VERSION = "1.22.3";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -3531,6 +3575,7 @@ ${report}
     sendJoinChatMessage: true,
     pollSeconds: 30,
     autoSchedule: false,
+    recordingRetention: "168",
     autoSummarize: true,
     transcriptTimestamps: "clock",
     notesLocation: "body",
@@ -3595,6 +3640,7 @@ ${report}
       sendJoinChatMessage: bool("sendJoinChatMessage"),
       pollSeconds: clampNumber(src.pollSeconds, 10, 300, DEFAULT_SETTINGS.pollSeconds),
       autoSchedule: bool("autoSchedule"),
+      recordingRetention: normalizeRecordingRetention(src.recordingRetention),
       autoSummarize: bool("autoSummarize"),
       transcriptTimestamps: src.transcriptTimestamps === "elapsed" ? "elapsed" : "clock",
       notesLocation: ["body", "property", "both"].includes(src.notesLocation) ? src.notesLocation : "body",
@@ -4634,6 +4680,8 @@ ${report}
           workspace_guid: this.getWorkspaceGuid ? this.getWorkspaceGuid() : ""
         }
       };
+      const retention = recordingRetentionConfig(this._settings.recordingRetention);
+      if (retention) payload.recording_config.retention = retention;
       if (this._bridgeUrl()) {
         payload.recording_config.realtime_endpoints = [{
           type: "webhook",
@@ -6391,12 +6439,14 @@ ${transcriptText}` }]
             else add("pass", "Bridge capabilities", "Realtime storage, connection checks, and participant artifacts are supported.");
             if (health.kv === "bound") add("pass", "Live storage", "RECALL_TRANSCRIPTS is bound.");
             else add("fail", "Live storage", "Bind the RECALL_TRANSCRIPTS KV namespace and redeploy.");
-            if (health.webhookVerification === "enforced") add("pass", "Webhook security", "Recall signatures are enforced.");
-            else add("warn", "Webhook security (optional)", "This is not an error. In Recall, create a Workspace Secret under Developers \u2192 API Keys & Secrets. Add it to your Cloudflare Worker as the encrypted variable RECALL_WORKSPACE_VERIFICATION_SECRET, redeploy the Worker, then run this check again. See Setup step 5 above.");
+            if (health.webhookVerification === "enforced") add("pass", "Live transcript security", "The public realtime endpoint accepts only transcript events signed by Recall.");
+            else add("warn", "Live transcript security (optional)", "Recall uses the public Worker webhook to send transcript lines while the meeting is running. Compatibility mode accepts unsigned posts, so another sender could forge rows or spam the endpoint. A Workspace Secret lets the Worker prove each event came from Recall before storing it; it does not turn streaming on. See Setup step 5 above.");
           } catch (err) {
             add("fail", "Bridge", this._errorMessage(err));
           }
         }
+        const retentionCheck = recordingRetentionDoctorMessage(this._settings.recordingRetention);
+        add(retentionCheck.level, "Recall media retention", retentionCheck.message);
         if (!this._settings.recallApiKey) add("fail", "Recall", "Recall API key is missing.");
         else if (health && health.ok && compareVersions(String(health.bridgeVersion || "0.0.0"), MIN_BRIDGE_VERSION) >= 0) {
           try {
@@ -6539,6 +6589,9 @@ ${transcriptText}` }]
             this._fileInput("Bot image JPEG upload", "botImageData", "botImageName"),
             this._textInput("Bot image JPEG URL", "botImageUrl", "https://example.com/notetaker.jpg"),
             this._numberInput("Poll every seconds", "pollSeconds", 10, 300),
+            this._selectInput("Recall media retention", "recordingRetention", RECORDING_RETENTION_OPTIONS, {
+              hint: "Applies to future bots. Recall media includes audio/video, transcripts, participant data, and debugging artifacts\u2014not the copy already saved in Thymer. Seven days stays inside Recall\u2019s free storage window and leaves time for Repair Meeting. Expiration is permanent. Existing media is unchanged; delete it from the Recall bot dashboard with \u22EF \u2192 Delete media."
+            }),
             optionRow({
               type: "checkbox",
               name: "autoSchedule",
@@ -6738,14 +6791,14 @@ ${transcriptText}` }]
         h(
           "li",
           {},
-          h("strong", {}, "Optional \u2014 secure realtime webhooks: "),
-          "in your ",
+          h("strong", {}, "Optional \u2014 authenticate live transcript events: "),
+          "Recall sends each live transcript line to your bridge through a webhook while the meeting is running. Because that Worker endpoint is public, the secret lets it verify that every event was signed by Recall before it stores the row; this prevents forged transcript text and endpoint spam. It does not enable streaming\u2014the webhook works in compatibility mode without it. To enforce verification, in your ",
           link(this._recallKeyUrl(), "Recall API Keys & Secrets page"),
           ", click Create Workspace Secret. In Cloudflare, open your Worker \u2192 Settings \u2192 Variables and Secrets, add an encrypted secret named exactly ",
           code("RECALL_WORKSPACE_VERIFICATION_SECRET"),
-          ", paste the Recall value, and redeploy the Worker. Run Setup Doctor again; Webhook security should say signatures are enforced. ",
+          ", paste the Recall value, and redeploy the Worker. Run Setup Doctor again; Live transcript security should say the public endpoint accepts only Recall-signed events. ",
           link("https://docs.recall.ai/docs/authenticating-requests-from-recallai", "Recall\u2019s verification guide"),
-          ". If you skip this, the plugin still works in compatibility mode, but the public endpoint accepts unsigned events."
+          "."
         ),
         h(
           "li",
