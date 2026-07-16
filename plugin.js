@@ -3599,7 +3599,7 @@ ${report}
   __name(migrateMeetingSchema, "migrateMeetingSchema");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.5";
+  var PLUGIN_VERSION = "1.22.6";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -6563,7 +6563,7 @@ ${transcriptText}` }]
     _setupDoctorSection() {
       const state = this._setupDoctorState;
       const rows = state && Array.isArray(state.results) ? state.results : [];
-      return section({
+      const doctor = section({
         label: "Setup Doctor",
         hint: "Checks the bridge, credentials, storage, and field bindings without creating a bot or generating text.",
         body: [
@@ -6572,7 +6572,8 @@ ${transcriptText}` }]
             { class: `${ROOT_CLASS}-field` },
             button({
               label: this._setupDoctorInFlight ? "Checking\u2026" : "Run setup check",
-              variant: "ghost",
+              variant: "primary",
+              size: "md",
               disabled: !!this._setupDoctorInFlight,
               onClick: /* @__PURE__ */ __name(() => void this._runSetupDoctor(), "onClick")
             }),
@@ -6588,6 +6589,13 @@ ${transcriptText}` }]
           )) : h("span", { class: `${ROOT_CLASS}-field-hint` }, "No checks run yet.")
         ]
       });
+      doctor.classList.add(`${ROOT_CLASS}-doctor-card`);
+      const label = doctor.querySelector(".tps-section-label");
+      if (label) {
+        label.classList.add(`${ROOT_CLASS}-doctor-label`);
+        label.prepend(h("i", { class: `ti ti-stethoscope ${ROOT_CLASS}-doctor-icon`, "aria-hidden": "true" }));
+      }
+      return doctor;
     }
     async _runSetupDoctor() {
       if (this._setupDoctorInFlight) return this._setupDoctorInFlight;
@@ -7422,6 +7430,23 @@ ${transcriptText}` }]
 				color: var(--tps-accent);
 				text-decoration: underline;
 				text-underline-offset: 2px;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-card {
+				margin-top: var(--tps-space-4);
+				padding: var(--tps-space-4);
+				border: 1px solid color-mix(in srgb, var(--tps-accent) 34%, var(--tps-divider));
+				border-radius: var(--tps-radius-lg);
+				background: color-mix(in srgb, var(--tps-accent) 6%, var(--tps-bg-input));
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-label {
+				display: flex;
+				align-items: center;
+				gap: var(--tps-space-2);
+				color: var(--tps-text);
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-icon {
+				color: var(--tps-accent);
+				font-size: 14px;
 			}
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-results {
 				display: grid;
