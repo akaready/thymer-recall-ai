@@ -3211,22 +3211,6 @@ ${report}
     }
   }
   __name(runCoalesced, "runCoalesced");
-  function planSummaryDestinations(notesLocation, propertyPresent, bodyState) {
-    const propertyRequired = notesLocation !== "body";
-    const bodyRequired = notesLocation !== "property";
-    const bodyProtected = bodyRequired && bodyState === "unknown";
-    const writeProperty = propertyRequired && !propertyPresent;
-    const writeBody = bodyRequired && ["missing", "incomplete", "unavailable"].includes(bodyState);
-    return {
-      propertyRequired,
-      bodyRequired,
-      bodyProtected,
-      writeProperty,
-      writeBody,
-      complete: (!propertyRequired || propertyPresent) && (!bodyRequired || bodyState === "owned" || bodyState === "legacy" || bodyProtected)
-    };
-  }
-  __name(planSummaryDestinations, "planSummaryDestinations");
 
   // transcript-quality.js
   function coalesceAdjacentTranscriptEntries(entries) {
@@ -3397,8 +3381,8 @@ ${report}
     const pricing = CLAUDE_PRICING[String(model || "").trim()];
     if (!pricing) return null;
     const promotional = model === "claude-sonnet-5" && instant(at) < SONNET_5_STANDARD_PRICE_START;
-    const inputPerMillionUsd = promotional ? pricing.introInput : pricing.input;
-    const outputPerMillionUsd = promotional ? pricing.introOutput : pricing.output;
+    const inputPerMillionUsd = promotional ? pricing.introInput ?? pricing.input : pricing.input;
+    const outputPerMillionUsd = promotional ? pricing.introOutput ?? pricing.output : pricing.output;
     const adjustedInputTokens = Math.round(Math.max(0, Number(inputTokens) || 0) * pricing.tokenizerFactor);
     const adjustedOutputTokens = Math.round(Math.max(0, Number(outputTokens) || 0) * pricing.tokenizerFactor);
     const totalUsd = adjustedInputTokens / 1e6 * inputPerMillionUsd + adjustedOutputTokens / 1e6 * outputPerMillionUsd;
@@ -3473,30 +3457,19 @@ ${report}
     return names;
   }
   __name(participantNames, "participantNames");
-  function isCompatibleAttendeesField(field, personCollectionGuid) {
-    return !!field && String(field.type || "").toLowerCase() === "record" && field.many === true && String(field.filter_colguid || "") === String(personCollectionGuid || "");
+  function isAttendeesRelationField(field) {
+    return !!field && field.active !== false && String(field.type || "").toLowerCase() === "record" && field.many === true;
   }
-  __name(isCompatibleAttendeesField, "isCompatibleAttendeesField");
-  function findCompatibleAttendeesField(fields, personCollectionGuid, currentFieldId = "") {
-    const compatible = (Array.isArray(fields) ? fields : []).filter((field) => field && field.active !== false && isCompatibleAttendeesField(field, personCollectionGuid));
-    const current = compatible.find((field) => String(field.id) === String(currentFieldId || ""));
-    if (current) return current;
-    const labelled = compatible.find((field) => normalizeIdentity(field.label) === "attendees");
-    return labelled || (compatible.length === 1 ? compatible[0] : null);
+  __name(isAttendeesRelationField, "isAttendeesRelationField");
+  function findAttendeesRelationField(fields) {
+    const relations = (Array.isArray(fields) ? fields : []).filter(isAttendeesRelationField);
+    return relations.find((field) => String(field.id || "") === "attendees") || relations.find((field) => String(field.label || "").trim().toLowerCase() === "attendees") || null;
   }
-  __name(findCompatibleAttendeesField, "findCompatibleAttendeesField");
-  function attendeesFieldIdFor(fields, personCollectionGuid) {
-    const list2 = Array.isArray(fields) ? fields : [];
-    const canonical = list2.find((field) => String(field && field.id || "") === "attendees");
-    if (!canonical || isCompatibleAttendeesField(canonical, personCollectionGuid)) return "attendees";
-    let hash = 2166136261;
-    for (const char of String(personCollectionGuid || "")) {
-      hash ^= char.charCodeAt(0);
-      hash = Math.imul(hash, 16777619);
-    }
-    return `attendees_${(hash >>> 0).toString(36)}`;
+  __name(findAttendeesRelationField, "findAttendeesRelationField");
+  function attendeesTargetCollectionGuid(field) {
+    return isAttendeesRelationField(field) ? String(field.filter_colguid || "").trim() : "";
   }
-  __name(attendeesFieldIdFor, "attendeesFieldIdFor");
+  __name(attendeesTargetCollectionGuid, "attendeesTargetCollectionGuid");
   function mergeAttendeeGuids(existing, matched) {
     const out = [];
     for (const value of [...Array.isArray(existing) ? existing : [], ...Array.isArray(matched) ? matched : []]) {
@@ -3567,8 +3540,66 @@ ${report}
   }
   __name(matchParticipantsToPeople, "matchParticipantsToPeople");
 
+  // meeting-schema.js
+  var ATTENDEES_FIELD_DEFINITION = Object.freeze({
+    id: "attendees",
+    label: "Attendees",
+    type: "record",
+    icon: "ti-users",
+    many: true,
+    read_only: false,
+    active: true
+  });
+  function migrateMeetingSchema(configuration) {
+    const conf = JSON.parse(JSON.stringify(configuration && typeof configuration === "object" ? configuration : {}));
+    conf.fields = Array.isArray(conf.fields) ? conf.fields : [];
+    let changed = false;
+    const retired = /* @__PURE__ */ new Set(["transcript", "summary"]);
+    for (const field of conf.fields) {
+      if (field && retired.has(String(field.id || "")) && field.active !== false) {
+        field.active = false;
+        changed = true;
+      }
+    }
+    const withoutRetired = /* @__PURE__ */ __name((ids) => {
+      if (!Array.isArray(ids)) return ids;
+      const next = ids.filter((id) => !retired.has(String(id || "")));
+      if (next.length !== ids.length) changed = true;
+      return next;
+    }, "withoutRetired");
+    if (Array.isArray(conf.page_field_ids)) conf.page_field_ids = withoutRetired(conf.page_field_ids);
+    for (const view of Array.isArray(conf.views) ? conf.views : []) {
+      if (Array.isArray(view && view.field_ids)) view.field_ids = withoutRetired(view.field_ids);
+    }
+    let attendees = findAttendeesRelationField(conf.fields);
+    const canonicalOccupied = conf.fields.some((field) => String(field && field.id || "") === ATTENDEES_FIELD_DEFINITION.id);
+    if (!attendees && !canonicalOccupied) {
+      attendees = { ...ATTENDEES_FIELD_DEFINITION };
+      conf.fields.push(attendees);
+      changed = true;
+    }
+    if (attendees) {
+      const id = String(attendees.id || "");
+      conf.page_field_ids = Array.isArray(conf.page_field_ids) ? conf.page_field_ids : [];
+      if (id && !conf.page_field_ids.includes(id)) {
+        conf.page_field_ids.push(id);
+        changed = true;
+      }
+      const table = (Array.isArray(conf.views) ? conf.views : []).find((view) => String(view && view.type || "") === "table");
+      if (table) {
+        table.field_ids = Array.isArray(table.field_ids) ? table.field_ids : [];
+        if (id && !table.field_ids.includes(id)) {
+          table.field_ids.push(id);
+          changed = true;
+        }
+      }
+    }
+    return { configuration: conf, changed, attendeesFieldId: attendees ? String(attendees.id || "") : "" };
+  }
+  __name(migrateMeetingSchema, "migrateMeetingSchema");
+
   // plugin.js
-  var PLUGIN_VERSION = "1.22.4";
+  var PLUGIN_VERSION = "1.22.5";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -3581,9 +3612,8 @@ ${report}
     TITLE: "title",
     MEETING_URL: "meeting_url",
     JOIN_AT: "join_at",
-    TRANSCRIPT: "transcript",
-    SUMMARY: "summary",
     PARTICIPANT_NAMES: "participant_names",
+    ATTENDEES: "attendees",
     BOT_ID: "recall_bot_id",
     STATUS: "recall_status",
     LAST_ERROR: "last_error"
@@ -3591,9 +3621,8 @@ ${report}
   var FIELD_DEFS = Object.freeze({
     [FIELDS.MEETING_URL]: { id: FIELDS.MEETING_URL, label: "Meeting URL", type: "url", icon: "ti-link", many: false, read_only: false, active: true },
     [FIELDS.JOIN_AT]: { id: FIELDS.JOIN_AT, label: "Join At", type: "datetime", icon: "ti-calendar", many: false, read_only: false, active: true },
-    [FIELDS.TRANSCRIPT]: { id: FIELDS.TRANSCRIPT, label: "Transcript", type: "text", icon: "ti-file-text", many: false, read_only: false, active: true },
-    [FIELDS.SUMMARY]: { id: FIELDS.SUMMARY, label: "Summary", type: "text", icon: "ti-sparkles", many: false, read_only: false, active: true },
     [FIELDS.PARTICIPANT_NAMES]: { id: FIELDS.PARTICIPANT_NAMES, label: "Participant Names", type: "text", icon: "ti-users", many: false, read_only: false, active: true },
+    [FIELDS.ATTENDEES]: ATTENDEES_FIELD_DEFINITION,
     [FIELDS.BOT_ID]: { id: FIELDS.BOT_ID, label: "Bot ID", type: "text", icon: "ti-robot", many: false, read_only: false, active: true },
     [FIELDS.STATUS]: { id: FIELDS.STATUS, label: "Bot Status", type: "text", icon: "ti-activity", many: false, read_only: false, active: true },
     [FIELDS.LAST_ERROR]: { id: FIELDS.LAST_ERROR, label: "Last Error", type: "text", icon: "ti-alert-triangle", many: false, read_only: false, active: true }
@@ -3601,8 +3630,6 @@ ${report}
   var CANONICAL_FIELD_FOR_SETTING = Object.freeze({
     meetingUrlFieldId: FIELDS.MEETING_URL,
     joinAtFieldId: FIELDS.JOIN_AT,
-    transcriptFieldId: FIELDS.TRANSCRIPT,
-    summaryFieldId: FIELDS.SUMMARY,
     participantNamesFieldId: FIELDS.PARTICIPANT_NAMES
   });
   var CREATE_FIELD_OPTION = "__create__";
@@ -3636,11 +3663,8 @@ ${report}
     bridgeUrl: "",
     meetingUrlFieldId: "",
     joinAtFieldId: "",
-    transcriptFieldId: "",
-    summaryFieldId: "",
     participantNamesFieldId: "",
-    personCollectionGuid: "",
-    attendeesFieldId: "",
+    mapParticipantNamesToAttendees: false,
     botImageUrl: "",
     botImageData: "",
     botImageName: "",
@@ -3652,7 +3676,6 @@ ${report}
     recordingRetention: "168",
     autoSummarize: true,
     transcriptTimestamps: "clock",
-    notesLocation: "body",
     saveTranscript: true,
     transcriptLayout: "blocks",
     utteranceTimestamps: true,
@@ -3701,11 +3724,9 @@ ${report}
       bridgeUrl: str("bridgeUrl"),
       meetingUrlFieldId: str("meetingUrlFieldId"),
       joinAtFieldId: str("joinAtFieldId"),
-      transcriptFieldId: str("transcriptFieldId"),
-      summaryFieldId: str("summaryFieldId"),
       participantNamesFieldId: str("participantNamesFieldId"),
-      personCollectionGuid: str("personCollectionGuid"),
-      attendeesFieldId: str("attendeesFieldId"),
+      // Preserve an existing opt-in from the retired two-dropdown setup; new installs default off.
+      mapParticipantNamesToAttendees: typeof src.mapParticipantNamesToAttendees === "boolean" ? src.mapParticipantNamesToAttendees : !!(String(src.personCollectionGuid || "").trim() && String(src.attendeesFieldId || "").trim()),
       botImageUrl: str("botImageUrl"),
       botImageData: str("botImageData"),
       botImageName: str("botImageName"),
@@ -3717,7 +3738,6 @@ ${report}
       recordingRetention: normalizeRecordingRetention(src.recordingRetention),
       autoSummarize: bool("autoSummarize"),
       transcriptTimestamps: src.transcriptTimestamps === "elapsed" ? "elapsed" : "clock",
-      notesLocation: ["body", "property", "both"].includes(src.notesLocation) ? src.notesLocation : "body",
       saveTranscript: bool("saveTranscript"),
       transcriptLayout: src.transcriptLayout === "inline" ? "inline" : "blocks",
       utteranceTimestamps: bool("utteranceTimestamps"),
@@ -3880,7 +3900,10 @@ ${report}
     onLoad() {
       pingInstall("recall-ai");
       pingActive("recall-ai");
-      syncPluginVersionOnLoad(this, PLUGIN_VERSION);
+      void this._safeAsync("sync plugin version and collection schema", async () => {
+        await syncPluginVersionOnLoad(this, PLUGIN_VERSION);
+        await this._migrateCollectionSchema();
+      });
       this._disabled = readKillSwitch(this);
       this._initState();
       this._safe("load settings", () => {
@@ -3943,7 +3966,6 @@ ${report}
       this._workspaceCollections = [];
       this._workspaceCollectionsLoaded = false;
       this._workspaceCollectionsPromise = null;
-      this._attendeesFieldCreateInFlight = null;
       this._autoScheduled = /* @__PURE__ */ new Set();
       this._activeRecordGuid = "";
       this._settingsStore = createSettingsStore(this, {
@@ -4253,7 +4275,6 @@ ${report}
       if (this._diagnosticsByRecord && this._diagnosticsByRecord.clear) this._diagnosticsByRecord.clear();
       this._setupDoctorInFlight = null;
       this._workspaceCollectionsPromise = null;
-      this._attendeesFieldCreateInFlight = null;
       this._safe("strip inline buttons", () => this._stripInlineButtons());
     }
     async _openPanel() {
@@ -4834,38 +4855,27 @@ ${report}
           rows: transcriptRowCount(transcript),
           debug: transcript && transcript.debug || null
         });
-        const loc = this._settings.notesLocation;
         const transcriptCompletedBeforeRepair = COMPLETED_MEETING_STATUSES.has(previousStatus);
         const summaryCompletedBeforeRepair = COMPLETED_SUMMARY_STATUSES.has(previousStatus);
-        const transcriptBodyState = loc !== "property" ? await this._bodyOwnershipState(record, botId, "transcript_root", "tx-head", transcriptCompletedBeforeRepair) : "disabled";
-        const summaryBodyState = loc !== "property" ? await this._bodyOwnershipState(record, botId, "summary_root", "summary-body", summaryCompletedBeforeRepair) : "disabled";
-        const summaryPropertyPresent = loc !== "body" && !!this._text(record, this._mappedFieldId(FIELDS.SUMMARY));
+        const transcriptBodyState = await this._bodyOwnershipState(record, botId, "transcript_root", "tx-head", transcriptCompletedBeforeRepair);
+        const summaryBodyState = await this._bodyOwnershipState(record, botId, "summary_root", "summary-body", summaryCompletedBeforeRepair);
         if (repair && (summaryBodyState === "owned" || summaryBodyState === "incomplete") && typeof record.getLineItems === "function") {
           try {
             await this._restoreMarkedSummaryReferences(await record.getLineItems(false), botId);
           } catch {
           }
         }
-        const summaryPlan = planSummaryDestinations(loc, summaryPropertyPresent, summaryBodyState);
-        const summaryPropertyMissing = summaryPlan.writeProperty;
-        const summaryBodyMissing = summaryPlan.writeBody;
-        const summaryBodyProtected = summaryPlan.bodyProtected;
-        let hasSummary = summaryPlan.complete;
+        const summaryBodyMissing = ["missing", "incomplete", "unavailable"].includes(summaryBodyState);
+        const summaryBodyProtected = summaryBodyState === "unknown";
+        let hasSummary = ["owned", "legacy", "unknown"].includes(summaryBodyState);
         const finalTranscriptReady = !!transcriptText && !liveTranscript;
-        const deferFinalBodyForSections = ended && finalTranscriptReady && summarize && this._settings.autoSummarize && !hasSummary && !!this._settings.anthropicApiKey && !!this._settings.saveTranscript && !!this._settings.transcriptSections && summaryBodyMissing && loc !== "property";
+        const deferFinalBodyForSections = ended && finalTranscriptReady && summarize && this._settings.autoSummarize && !hasSummary && !!this._settings.anthropicApiKey && !!this._settings.saveTranscript && !!this._settings.transcriptSections && summaryBodyMissing;
         if (transcriptText) {
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._log("transcript written", { botId, characters: transcriptText.length });
           if (this._settings.saveTranscript) {
-            if (loc !== "body") {
-              const existingTranscript = this._text(record, this._mappedFieldId(FIELDS.TRANSCRIPT));
-              if (!repair || !existingTranscript) {
-                this._setMappedField(record, FIELDS.TRANSCRIPT, transcriptText);
-                repairReport.push("transcript property repaired");
-              } else repairReport.push("transcript property already present");
-            }
             const bodySafe = transcriptBodyState !== "unknown";
-            if (loc !== "property" && !deferFinalBodyForSections && bodySafe) {
+            if (!deferFinalBodyForSections && bodySafe) {
               const newestLine = await this._streamTranscriptToBody(record, entries);
               this._scrollToLiveTranscript(record, newestLine);
               repairReport.push(transcriptBodyState === "owned" || transcriptBodyState === "legacy" ? "transcript body already present" : "transcript body repaired");
@@ -4893,12 +4903,10 @@ ${report}
           await this._syncMeetingAttendees(record, botId, entries);
           if (repair) repairReport.push("attendees checked");
         }
-        const shouldGenerateSummary = summaryPropertyMissing || summaryBodyMissing;
+        const shouldGenerateSummary = summaryBodyMissing;
         if (ended && summarize && this._settings.autoSummarize && shouldGenerateSummary) {
           const summaryOk = await this._summarize(record, transcriptText, entries, {
-            deferTranscriptBody: deferFinalBodyForSections,
-            writeProperty: summaryPropertyMissing,
-            writeBody: summaryBodyMissing
+            deferTranscriptBody: deferFinalBodyForSections
           });
           if (summaryOk) {
             hasSummary = true;
@@ -4979,7 +4987,7 @@ ${report}
       if (!participants.length) participants = participantsFromTranscriptEntries(entries);
       return { participants: dedupeParticipants(participants), source };
     }
-    /** Save raw names and attach only confident matches to the explicitly bound People relation. */
+    /** Save raw names and optionally attach confident matches through the Attendees field restriction. */
     async _syncMeetingAttendees(record, botId, entries) {
       try {
         const { participants, source } = await this._fetchFinalParticipants(botId, entries);
@@ -4990,15 +4998,14 @@ ${report}
           const name = normalizeIdentity(participant && participant.name);
           return name !== botIdentity && (!!name || !!String(participant && participant.email || "").trim());
         });
-        const personCollectionGuid = String(this._settings.personCollectionGuid || "").trim();
-        const attendeesFieldId = String(this._settings.attendeesFieldId || "").trim();
-        if (!personCollectionGuid || !attendeesFieldId || !matchable.length) {
+        if (!this._settings.mapParticipantNamesToAttendees || !matchable.length) {
           this._log("participant names saved", { source, names: names.length, peopleLinking: false });
           return;
         }
-        const field = this._fieldById(attendeesFieldId);
-        if (!isCompatibleAttendeesField(field, personCollectionGuid)) {
-          this._log("people linking skipped: relation binding is missing or incompatible", { attendeesFieldId, personCollectionGuid });
+        const field = this._attendeesField();
+        const personCollectionGuid = attendeesTargetCollectionGuid(field);
+        if (!isAttendeesRelationField(field) || !personCollectionGuid) {
+          this._log("people linking skipped: Attendees must be limited to one People collection");
           return;
         }
         let peopleCollection = this._collectionByGuid(personCollectionGuid);
@@ -5012,7 +5019,7 @@ ${report}
         }
         const people = await peopleCollection.getAllRecords();
         const matched = matchParticipantsToPeople(matchable, people);
-        const prop = this._prop(record, attendeesFieldId);
+        const prop = this._prop(record, field.id);
         if (!prop || typeof prop.set !== "function") return;
         const existing = [];
         try {
@@ -5041,7 +5048,7 @@ ${report}
         this._log("participant linking failed without blocking meeting finalization", { error: this._errorMessage(err) });
       }
     }
-    async _summarize(record, transcriptText, entries, { deferTranscriptBody = false, writeProperty = true, writeBody = true } = {}) {
+    async _summarize(record, transcriptText, entries, { deferTranscriptBody = false } = {}) {
       if (!this._settings.anthropicApiKey) {
         this._setField(record, FIELDS.LAST_ERROR, "Anthropic API key is missing; transcript fetched but summary was skipped.");
         this._setField(record, FIELDS.STATUS, "summary_failed");
@@ -5054,26 +5061,22 @@ ${report}
         this._log("summary start", { characters: transcriptText.length });
         const { summary, sections, citations } = await this._createSummary(transcriptText, entries);
         if (!summary) throw new Error("Claude returned an empty summary.");
-        const loc = this._settings.notesLocation;
-        if (loc !== "body" && writeProperty) this._setMappedField(record, FIELDS.SUMMARY, summary);
-        if (loc !== "property" && writeBody) {
-          let sectionResult = { ok: false, anchors: [], turnAnchors: [] };
-          if (this._settings.saveTranscript && this._settings.transcriptSections && sections.length && Array.isArray(entries) && entries.length) {
-            sectionResult = await this._reorganizeTranscriptBySections(record, entries, sections);
-          }
-          const sectioned = !!sectionResult.ok;
-          if (deferTranscriptBody && !sectioned && this._settings.saveTranscript) {
-            await this._streamTranscriptToBody(record, entries);
-          }
-          const summaryWritten = await this._writeSummaryToBody(record, summary, citations, sectionResult.anchors, sectionResult.turnAnchors);
-          if (!summaryWritten) throw new Error("Thymer could not write the summary to the meeting body.");
+        let sectionResult = { ok: false, anchors: [], turnAnchors: [] };
+        if (this._settings.saveTranscript && this._settings.transcriptSections && sections.length && Array.isArray(entries) && entries.length) {
+          sectionResult = await this._reorganizeTranscriptBySections(record, entries, sections);
         }
+        const sectioned = !!sectionResult.ok;
+        if (deferTranscriptBody && !sectioned && this._settings.saveTranscript) {
+          await this._streamTranscriptToBody(record, entries);
+        }
+        const summaryWritten = await this._writeSummaryToBody(record, summary, citations, sectionResult.anchors, sectionResult.turnAnchors);
+        if (!summaryWritten) throw new Error("Thymer could not write the summary to the meeting body.");
         this._setField(record, FIELDS.STATUS, "summarized");
         this._updateNavButtonForRecord(record);
         this._log("summary written", { characters: summary.length, sections: sections.length });
         return true;
       } catch (err) {
-        if (deferTranscriptBody && this._settings.saveTranscript && this._settings.notesLocation !== "property") {
+        if (deferTranscriptBody && this._settings.saveTranscript) {
           await this._streamTranscriptToBody(record, entries);
         }
         this._setField(record, FIELDS.LAST_ERROR, `Summary failed: ${this._errorMessage(err)}`);
@@ -6124,15 +6127,45 @@ ${transcriptText}` }]
       const conf = this.getConfiguration ? this.getConfiguration() : {};
       return Array.isArray(conf.fields) ? conf.fields.filter((field) => field && field.active !== false) : [];
     }
+    /**
+     * New installs get Attendees from plugin.json. Existing installs need the same field added without
+     * deleting any old transcript/summary data. Those retired text properties are merely hidden and
+     * removed from views; their stored values remain recoverable in the collection configuration.
+     */
+    async _migrateCollectionSchema() {
+      const api = await resolveConfigApi(this);
+      if (!api || typeof api.saveConfiguration !== "function") return;
+      const live = api.getConfiguration?.() || this.getConfiguration?.() || {};
+      const migrated = migrateMeetingSchema(live);
+      if (!migrated.changed) return;
+      try {
+        let workspace = "default";
+        try {
+          workspace = this.getWorkspaceGuid?.() || "default";
+        } catch {
+        }
+        let collection = "collection";
+        try {
+          collection = this.collection?.getGuid?.() || "collection";
+        } catch {
+        }
+        const guardKey = `recall-ai/schema/${workspace}/${collection}/${PLUGIN_VERSION}`;
+        if (sessionStorage.getItem(guardKey) === "attempted") return;
+        sessionStorage.setItem(guardKey, "attempted");
+      } catch {
+      }
+      await api.saveConfiguration(configWithPluginVersion(migrated.configuration, {}, PLUGIN_VERSION));
+    }
     _fieldById(id) {
       if (!id) return null;
       return this._collectionFields().find((field) => String(field.id) === String(id)) || null;
     }
+    _attendeesField() {
+      return findAttendeesRelationField(this._collectionFields());
+    }
     _mappingSettingFor(field) {
       if (field === FIELDS.MEETING_URL) return "meetingUrlFieldId";
       if (field === FIELDS.JOIN_AT) return "joinAtFieldId";
-      if (field === FIELDS.TRANSCRIPT) return "transcriptFieldId";
-      if (field === FIELDS.SUMMARY) return "summaryFieldId";
       if (field === FIELDS.PARTICIPANT_NAMES) return "participantNamesFieldId";
       return "";
     }
@@ -6612,14 +6645,29 @@ ${transcriptText}` }]
             add("fail", "Claude", this._errorMessage(err));
           }
         }
-        const required = [FIELDS.MEETING_URL, FIELDS.TRANSCRIPT, FIELDS.SUMMARY, FIELDS.PARTICIPANT_NAMES];
+        const required = [FIELDS.MEETING_URL, FIELDS.PARTICIPANT_NAMES];
         const missing = required.filter((field) => !this._fieldById(this._mappedFieldId(field)));
         if (missing.length) add("fail", "Fields", `Missing or invalid: ${missing.join(", ")}.`);
-        else add("pass", "Fields", "Meeting URL, Transcript, Summary, and Participant Names are bound.");
-        const peopleGuid = String(this._settings.personCollectionGuid || "");
-        if (!peopleGuid) add("warn", "People linking", "Optional and not configured.");
-        else if (isCompatibleAttendeesField(this._fieldById(this._settings.attendeesFieldId), peopleGuid)) add("pass", "People linking", "Attendees relation is compatible.");
-        else add("fail", "People linking", "Choose or create a compatible Attendees relation.");
+        else add("pass", "Fields", "Meeting URL and Participant Names are bound; transcript and summary use the page body.");
+        const attendees = this._attendeesField();
+        if (!attendees) add("fail", "Attendees", "The automatic multi-record Attendees relation is missing or has an incompatible type.");
+        else if (!this._settings.mapParticipantNamesToAttendees) add("warn", "Attendee matching", "Optional and turned off; Attendees remains available for manual links.");
+        else {
+          const peopleGuid = attendeesTargetCollectionGuid(attendees);
+          if (!peopleGuid) add("fail", "Attendee matching", "Limit the Attendees property to your People collection in the Meetings collection property settings.");
+          else {
+            if (!this._workspaceCollectionsLoaded) await this._loadWorkspaceCollections(true);
+            const target = this._collectionByGuid(peopleGuid);
+            if (target) {
+              let name = "the selected People collection";
+              try {
+                name = target.getName?.() || name;
+              } catch {
+              }
+              add("pass", "Attendee matching", `Attendees is limited to ${name}; confident participant matches will be added.`);
+            } else add("fail", "Attendee matching", "The collection restriction on Attendees points to an unavailable collection.");
+          }
+        }
         this._setupDoctorState = { checkedAt: Date.now(), results };
         this._renderPanel();
         const failures = results.filter((item) => item.level === "fail").length;
@@ -6634,70 +6682,32 @@ ${transcriptText}` }]
         this._renderPanel();
       }
     }
-    _peopleLinkingSection() {
-      const targetGuid = String(this._draft.personCollectionGuid || "");
-      const collectionOptions = [["", this._workspaceCollectionsLoaded ? "Do not link People" : "Loading collections\u2026"]];
-      for (const collection of this._workspaceCollections || []) {
-        let guid = "";
-        let name = "";
-        try {
-          guid = collection.getGuid();
-        } catch {
-        }
-        try {
-          name = collection.getName();
-        } catch {
-        }
-        if (guid) collectionOptions.push([guid, name || guid]);
+    _attendeeMappingSection() {
+      const field = this._attendeesField();
+      const targetGuid = attendeesTargetCollectionGuid(field);
+      const target = targetGuid ? this._collectionByGuid(targetGuid) : null;
+      let targetName = "";
+      try {
+        targetName = target?.getName?.() || "";
+      } catch {
       }
-      if (targetGuid && !collectionOptions.some(([value]) => value === targetGuid)) {
-        collectionOptions.push([targetGuid, `${targetGuid} (unavailable)`]);
-      }
-      const compatible = targetGuid ? this._collectionFields().filter((field) => isCompatibleAttendeesField(field, targetGuid)) : [];
-      const fieldOptions = [["", targetGuid ? "Choose a relation property" : "Choose a People collection first"]];
-      for (const field of compatible) fieldOptions.push([field.id, `${field.label || field.id} (${field.id})`]);
-      const currentFieldId = String(this._draft.attendeesFieldId || "");
-      if (currentFieldId && !fieldOptions.some(([value]) => value === currentFieldId)) {
-        fieldOptions.push([currentFieldId, `${currentFieldId} (incompatible)`]);
-      }
-      const targetCollection = this._collectionByGuid(targetGuid);
-      const canCreate = !!targetGuid && !!targetCollection && !compatible.length && !this._attendeesFieldCreateInFlight;
-      const actionHint = !targetGuid ? "Choose the collection that contains your Person records." : !targetCollection ? "That collection is unavailable. Refresh the list or choose another collection." : compatible.length ? "A compatible relation already exists. Bind it above; Recall will not create a duplicate." : "Creates one multi-record Attendees relation restricted to this People collection. The schema is checked again before creation.";
+      const status = !field ? "Attendees is missing or is not a multi-record link property. Reload once so the plugin can repair the collection schema." : targetGuid ? `Attendees is limited to ${targetName || targetGuid}. The plugin will search only that collection.` : "Before enabling matching: open the Meetings collection settings \u2192 Properties \u2192 Attendees, limit links to one collection, and choose your People or Contacts collection.";
       return section({
-        label: "Attendees relation (optional)",
-        hint: "Keep every participant name as text, and attach confident matches to existing Person records. Recall never creates Person records.",
+        label: "Attendees",
+        hint: "The plugin creates this multi-record collection-link property automatically. You choose which People collection it is allowed to link to.",
         body: [
-          this._selectInput("People collection", "personCollectionGuid", collectionOptions, {
-            onChange: /* @__PURE__ */ __name((value) => {
-              this._updateSetting("personCollectionGuid", value);
-              this._updateSetting("attendeesFieldId", "", { rerender: true });
-            }, "onChange"),
-            hint: "Select an existing People/Contacts collection. The Meetings collection itself is excluded."
-          }),
-          this._selectInput("Attendees relation", "attendeesFieldId", fieldOptions, {
-            onChange: /* @__PURE__ */ __name((value) => this._updateSetting("attendeesFieldId", value, { rerender: true }), "onChange"),
-            hint: "Only multi-record relations restricted to the selected collection are offered."
+          optionRow({
+            type: "checkbox",
+            name: "mapParticipantNamesToAttendees",
+            label: "Map Participant Names to Attendees?",
+            desc: "After a call, add unique exact email or name matches from the restricted People collection. Existing and manual Attendees links are preserved; Person records are never created.",
+            checked: !!this._draft.mapParticipantNamesToAttendees,
+            onChange: /* @__PURE__ */ __name((event) => this._updateSetting("mapParticipantNamesToAttendees", !!event.target.checked, { rerender: true }), "onChange")
           }),
           h(
             "div",
             { class: `${ROOT_CLASS}-field` },
-            button({
-              label: this._attendeesFieldCreateInFlight ? "Creating\u2026" : "Create Attendees relation",
-              variant: "ghost",
-              disabled: !canCreate,
-              onClick: /* @__PURE__ */ __name(() => void this._createAttendeesRelationField(), "onClick")
-            }),
-            h("span", { class: `${ROOT_CLASS}-field-hint` }, actionHint)
-          ),
-          h(
-            "div",
-            { class: `${ROOT_CLASS}-field` },
-            button({
-              label: "Refresh collections",
-              variant: "ghost",
-              disabled: !!this._workspaceCollectionsPromise,
-              onClick: /* @__PURE__ */ __name(() => void this._loadWorkspaceCollections(true), "onClick")
-            })
+            h("span", { class: `${ROOT_CLASS}-field-hint` }, status)
           )
         ]
       });
@@ -6761,12 +6771,10 @@ ${transcriptText}` }]
           body: [
             this._fieldSelectInput("Meeting URL field", "meetingUrlFieldId", ["url", "text"]),
             this._fieldSelectInput("Join At field", "joinAtFieldId", ["datetime", "date"]),
-            this._fieldSelectInput("Transcript field", "transcriptFieldId", ["text"]),
-            this._fieldSelectInput("Summary field", "summaryFieldId", ["text"]),
             this._fieldSelectInput("Participant Names field", "participantNamesFieldId", ["text"])
           ]
         }),
-        this._peopleLinkingSection()
+        this._attendeeMappingSection()
       ];
     }
     _tabTranscripts(draft) {
@@ -6791,11 +6799,6 @@ ${transcriptText}` }]
               checked: draft.saveTranscript !== false,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("saveTranscript", !!event.target.checked, { rerender: true }), "onChange")
             }),
-            this._selectInput("Location", "notesLocation", [
-              ["body", "Page body"],
-              ["property", "Properties"],
-              ["both", "Both"]
-            ]),
             this._selectInput("Layout", "transcriptLayout", [
               ["blocks", "Speaker blocks (collapsible)"],
               ["inline", "Inline lines"]
@@ -6948,7 +6951,7 @@ ${transcriptText}` }]
         h(
           "li",
           {},
-          "Optional: open Field Mapping, choose your People collection, and create or bind the Attendees relation there. Participant names are always kept as text; existing People are linked only on a confident match."
+          "Optional: in the Meetings collection property settings, open Attendees and limit its links to your People or Contacts collection. Then turn on \u201CMap Participant Names to Attendees?\u201D in Field Mapping. Participant names are always kept as text; existing People are added only on a confident match."
         )
       );
     }
@@ -7123,94 +7126,6 @@ ${transcriptText}` }]
         this._toast(`Added "${def.label}"`, "Auto-detect will use it from now on.");
       } catch (err) {
         this._toast(`Could not add "${def.label}"`, this._errorMessage(err));
-      }
-    }
-    /**
-     * Explicit, idempotent setup action for the dynamic People relation. The target collection GUID
-     * lives in the field schema, so this cannot be one of the static plugin.json fields.
-     */
-    async _createAttendeesRelationField() {
-      if (this._attendeesFieldCreateInFlight) return this._attendeesFieldCreateInFlight;
-      const task = (async () => {
-        const personCollectionGuid = String(this._draft.personCollectionGuid || "").trim();
-        if (!personCollectionGuid) {
-          this._toast("Choose a People collection", "The Attendees relation needs a collection to target.");
-          return;
-        }
-        let stagedPreviousFieldId = null;
-        try {
-          let target = this._collectionByGuid(personCollectionGuid);
-          if (!target) {
-            await this._loadWorkspaceCollections(true);
-            target = this._collectionByGuid(personCollectionGuid);
-          }
-          if (!target) throw new Error("The selected People collection is no longer available.");
-          const api = await resolveConfigApi(this);
-          if (!api || typeof api.saveConfiguration !== "function") {
-            throw new Error("Thymer did not hand over a writable config handle.");
-          }
-          const live = api.getConfiguration?.() || this.getConfiguration?.() || {};
-          const conf = JSON.parse(JSON.stringify(live));
-          conf.fields = Array.isArray(conf.fields) ? conf.fields : [];
-          const existing = findCompatibleAttendeesField(conf.fields, personCollectionGuid, this._draft.attendeesFieldId);
-          if (existing) {
-            this._updateSetting("attendeesFieldId", existing.id, { rerender: true });
-            this._toast(`Bound "${existing.label || existing.id}"`, "Recall will use the existing relation; no property was created.");
-            return;
-          }
-          if (conf.fields.some((field) => isCompatibleAttendeesField(field, personCollectionGuid))) {
-            throw new Error("More than one compatible relation exists. Choose the intended property in Attendees relation.");
-          }
-          const fieldId = attendeesFieldIdFor(conf.fields, personCollectionGuid);
-          const occupied = conf.fields.find((field) => String(field && field.id || "") === fieldId);
-          if (occupied && !isCompatibleAttendeesField(occupied, personCollectionGuid)) {
-            throw new Error(`The stable property id "${fieldId}" is already used by an incompatible property.`);
-          }
-          if (occupied) {
-            this._updateSetting("attendeesFieldId", occupied.id, { rerender: true });
-            return;
-          }
-          let targetName = "";
-          try {
-            targetName = target && target.getName ? target.getName() : "";
-          } catch {
-          }
-          const canonicalOccupied = conf.fields.some((field) => String(field && field.id || "") === "attendees");
-          const label = canonicalOccupied && targetName ? `Attendees \u2014 ${targetName}` : "Attendees";
-          conf.fields.push({
-            id: fieldId,
-            label,
-            type: "record",
-            icon: "ti-users",
-            many: true,
-            read_only: false,
-            active: true,
-            filter_colguid: personCollectionGuid
-          });
-          if (Array.isArray(conf.page_field_ids) && !conf.page_field_ids.includes(fieldId)) {
-            conf.page_field_ids.push(fieldId);
-          }
-          const previousFieldId = String(this._draft.attendeesFieldId || "");
-          stagedPreviousFieldId = previousFieldId;
-          this._updateSetting("attendeesFieldId", fieldId, { rerender: true });
-          const ok = await api.saveConfiguration(conf);
-          if (ok === false) throw new Error("Thymer rejected the change.");
-          stagedPreviousFieldId = null;
-          this._toast(`Added "${label}"`, "Future meetings will attach confident Person matches here.");
-        } catch (err) {
-          if (stagedPreviousFieldId !== null) {
-            this._updateSetting("attendeesFieldId", stagedPreviousFieldId, { rerender: true });
-          }
-          this._toast("Could not create Attendees", this._errorMessage(err));
-        }
-      })();
-      this._attendeesFieldCreateInFlight = task;
-      this._renderPanel();
-      try {
-        return await task;
-      } finally {
-        if (this._attendeesFieldCreateInFlight === task) this._attendeesFieldCreateInFlight = null;
-        if (this._panelEl && document.contains(this._panelEl)) this._renderPanel();
       }
     }
     _fieldSelectInput(label, key, types) {

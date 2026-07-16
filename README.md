@@ -36,12 +36,16 @@ Enjoy! 🙏
   (sent to Recall as `join_at`). Leave it empty to send a bot immediately. There is deliberately
   only this one field: the plugin never sends a bot in early, so "when the meeting starts" and
   "when the bot joins" are the same moment.
-- `Transcript` receives the fetched Recall transcript.
-- `Summary` receives the Claude summary.
+- The transcript and Claude summary are written directly into the Meeting page body, where headings,
+  tasks, speaker blocks, and citation links render correctly. There are no Transcript or Summary text properties.
 - `Participant Names` keeps the finalized Recall roster as plain text, including unmatched people.
-- `Attendees` is an optional relation you create or bind in Setup after choosing your People collection.
-  It links existing Person records on a unique exact email or display-name match; it never creates people.
+- `Attendees` is an automatically created multi-record collection-link property. Restrict it to your
+  People/Contacts collection, then optionally map unique exact email or display-name matches into it.
+  The plugin never creates people.
 - `Recall Bot ID`, `Recall Status`, and `Last Error` track integration state.
+
+On upgrade, the old `Transcript` and `Summary` text properties are hidden and removed from the page/table
+layouts, not deleted, so any values previously stored there remain recoverable.
 
 
 
@@ -144,11 +148,11 @@ button on an inline reference to a Meeting record in the editor.
 
 ### 6. Optional: link attendees to People
 
-In **Field Mapping → Attendees relation**, choose the collection that contains your Person/Contact records.
-Then bind an existing compatible multi-record relation or click **Create Attendees relation**.
-Creation is explicit and idempotent: the plugin re-checks the live schema and binds a compatible
-field instead of creating a duplicate. Changing the People collection clears the binding but never
-retargets or deletes the old relation.
+The plugin creates the multi-record `Attendees` collection-link property automatically. In the Meetings
+collection property settings, open **Attendees**, limit its links to one collection, and choose your
+People or Contacts collection. Then open **Field Mapping** and enable **Map Participant Names to
+Attendees?** The collection restriction is the source of truth; there is no second collection picker
+inside the plugin to drift out of sync.
 
 At meeting finalization, Recall's participant artifact supplies the full roster, including people
 who never spoke. The plugin writes every display name to `Participant Names`, then attaches only
@@ -165,8 +169,8 @@ confident matches to `Attendees`. Ambiguous and unmatched names stay safely in t
 | **Recall media retention** | How long future bots keep Recall’s audio/video, transcript, participant, and debug artifacts. Defaults to 7 days, inside Recall’s free storage window. |
 | **Anthropic API key** / **Claude model** | Key and model used to write the summary. |
 | **Expected API cost** | One-hour planning estimate for Recall plus every Claude model, with the selected model highlighted and storage shown separately. |
-| **Field mapping** | Point Meeting URL / Transcript / Summary / Participant Names at existing properties instead of the plugin's defaults. Leave on auto-detect if unsure. |
-| **People collection / Attendees relation** | Optionally bind meeting participants to existing Person records. Exact matching only; Person records are never auto-created. |
+| **Field mapping** | Point Meeting URL, Join At, and Participant Names at existing properties instead of the plugin defaults. Transcript and summary always use the page body. |
+| **Map Participant Names to Attendees?** | Optionally attach confident matches from the collection restriction configured on the automatic Attendees property. Existing links are preserved; Person records are never created. |
 | **Bot name** | The name the notetaker shows in the meeting. |
 | **Bot image** | Optional. A public HTTPS JPEG, 16:9, ideally 1280×720 and under 1.3 MB. Sent to Recall as `automatic_video_output`. |
 | **Join chat message** | Optional message the bot posts when it joins. |
@@ -176,7 +180,7 @@ confident matches to `Attendees`. Ambiguous and unmatched names stay safely in t
 The retention setting is sent as `recording_config.retention` on every future bot. Seven days is the
 default because Recall does not charge for media stored for seven days or less, while still leaving a
 repair/debugging window. Expiration is permanent and does not delete the transcript or summary
-already copied into Thymer. It does not change existing bots; remove those from the Recall bot
+already written into the Thymer page body. It does not change existing bots; remove those from the Recall bot
 dashboard with **⋯ → Delete media**, or call Recall’s irreversible
 [Delete Bot Media API](https://docs.recall.ai/reference/bot_delete_media_create). Zero-data retention
 is intentionally not offered because this plugin needs Recall’s finalized post-call artifact to
@@ -212,7 +216,7 @@ GET recordings[].media_shortcuts.participant_events.data.participants_download_u
 
 The default interval is 30 seconds. You can also click **Repair Meeting** later on a Meeting record
 with a `Recall Bot ID`. Repair re-fetches Recall's authoritative final artifacts and fills only missing
-plugin-owned transcript entries, summary destinations, citations, and attendee links. It does not
+plugin-owned transcript entries, summary body items, citations, and attendee links. It does not
 replace an existing summary, task state, manual attendee relation, or unowned body content. Use the
 record's **Diagnostics** action to see received webhook events, parsed rows, last-event time, KV state,
 transcript artifacts, realtime endpoints, and bridge version. Diagnostics copies a support-ready,

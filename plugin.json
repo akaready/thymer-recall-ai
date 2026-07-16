@@ -38,29 +38,20 @@
 			"active": true
 		},
 		{
-			"id": "transcript",
-			"label": "Transcript",
-			"type": "text",
-			"icon": "ti-file-text",
-			"many": false,
-			"read_only": false,
-			"active": true
-		},
-		{
-			"id": "summary",
-			"label": "Summary",
-			"type": "text",
-			"icon": "ti-sparkles",
-			"many": false,
-			"read_only": false,
-			"active": true
-		},
-		{
 			"id": "participant_names",
 			"label": "Participant Names",
 			"type": "text",
 			"icon": "ti-users",
 			"many": false,
+			"read_only": false,
+			"active": true
+		},
+		{
+			"id": "attendees",
+			"label": "Attendees",
+			"type": "record",
+			"icon": "ti-users",
+			"many": true,
 			"read_only": false,
 			"active": true
 		},
@@ -110,7 +101,7 @@
 				"join_at",
 				"recall_status",
 				"recall_bot_id",
-				"summary"
+				"attendees"
 			],
 			"query": ""
 		}
@@ -119,9 +110,8 @@
 		"title",
 		"meeting_url",
 		"join_at",
-		"transcript",
-		"summary",
 		"participant_names",
+		"attendees",
 		"recall_bot_id",
 		"recall_status",
 		"last_error"
@@ -131,7 +121,7 @@
 		"views": false,
 		"sidebar": true
 	},
-	"version": "1.22.4",
+	"version": "1.22.5",
 	"__source_repo": "https://github.com/akaready/thymer-recall-ai",
 	"__source_files": {
 		"branch": "main",
