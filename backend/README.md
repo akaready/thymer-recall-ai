@@ -66,7 +66,7 @@ https://thymer-recall-bridge.your-name.workers.dev/health
 You should see a response shaped like this:
 
 ```json
-{"ok":true,"bridgeVersion":"1.22.0","capabilities":["append-only-realtime","bridge-checks","participant-artifact","signed-realtime"],"kv":"MISSING","webhookVerification":"compatibility"}
+{"ok":true,"bridgeVersion":"1.22.1","capabilities":["append-only-realtime","bridge-checks","participant-artifact","parser-diagnostics","scheduled-bot-cancel","signed-realtime"],"kv":"MISSING","webhookVerification":"compatibility"}
 ```
 
 That's it — your bridge is alive. 🎉 (Your browser may show it with a "Pretty-print"
@@ -179,7 +179,8 @@ If you'd rather use the CLI: rename `wrangler.toml.example` to `wrangler.toml`, 
 
 `POST /api/recall/bots`, `POST /api/recall/check`, `POST /api/recall/bot`,
 `POST /api/recall/diagnostics`, `POST /api/recall/transcript`, `POST /api/recall/participants`,
-`POST /api/recall/realtime`, `POST /api/anthropic/check`, `POST /api/anthropic/summary`, and
+`POST /api/recall/leave`, `POST /api/recall/cancel`, `POST /api/recall/realtime`,
+`POST /api/anthropic/check`, `POST /api/anthropic/summary`, and
 `GET /health`.
 
 The plugin sends its own Recall/Claude keys with each request and the bridge forwards them.

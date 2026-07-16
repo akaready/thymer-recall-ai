@@ -118,6 +118,9 @@ Want it fully hands-off? Turn on **Send the bot automatically to scheduled meeti
 click at all. It deliberately never auto-sends for imminent meetings, so a bot is never billed
 sitting in an empty room.
 
+Clicking a booked **Scheduled** bot cancels it through Recall's scheduled-bot delete operation; it
+does not try to use the active-call leave operation. The Meeting can be scheduled again afterward.
+
 You can also send one from the **Recall Status** column in the table view, or from the microphone
 button on an inline reference to a Meeting record in the editor.
 
@@ -183,7 +186,15 @@ with a `Recall Bot ID`. Repair re-fetches Recall's authoritative final artifacts
 plugin-owned transcript entries, summary destinations, citations, and attendee links. It does not
 replace an existing summary, task state, manual attendee relation, or unowned body content. Use the
 record's **Diagnostics** action to see received webhook events, parsed rows, last-event time, KV state,
-transcript artifacts, realtime endpoints, and bridge version.
+transcript artifacts, realtime endpoints, and bridge version. Diagnostics copies a support-ready,
+allow-listed report to the clipboard (and logs a fallback to the console) without including keys,
+meeting URLs, transcript wording, or Recall account data.
+
+Recall's `Call Ended`/`Done` state is not treated as plugin completion: the plugin keeps polling until
+the authoritative final artifact arrives. The final plugin status is **Transcribed** when automatic
+summaries are off, **Summarized** after a successful summary, or **Summary Failed** when the transcript
+was saved but summarization needs repair. Status labels are title-cased in plugin-rendered UI while
+the underlying lifecycle codes remain normalized for reliable retries.
 
 > **Kill switch note:** the toggle in the settings-panel header disables the whole plugin at runtime — including transcript polling. A meeting recorded while the plugin is disabled won't stream into Thymer until you re-enable and run **Repair Meeting**.
 

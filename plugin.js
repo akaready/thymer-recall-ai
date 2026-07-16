@@ -3246,6 +3246,73 @@ ${report}
   }
   __name(coalesceAdjacentTranscriptEntries, "coalesceAdjacentTranscriptEntries");
 
+  // meeting-lifecycle.js
+  var COMPLETED_MEETING_STATUSES = /* @__PURE__ */ new Set(["transcribed", "summarized", "summary_failed"]);
+  var COMPLETED_SUMMARY_STATUSES = /* @__PURE__ */ new Set(["summarized", "summary_failed"]);
+  var LOCAL_PROCESSING_STATUSES = /* @__PURE__ */ new Set(["processing transcript", "summarizing"]);
+  function shouldRestoreMeetingPolling(botId, rawStatus) {
+    const status = String(rawStatus || "").trim().toLowerCase();
+    return !!String(botId || "").trim() && !COMPLETED_MEETING_STATUSES.has(status);
+  }
+  __name(shouldRestoreMeetingPolling, "shouldRestoreMeetingPolling");
+  function completedMeetingStatus(options = {}) {
+    const { autoSummarize, hasSummary, summaryFailed = false } = options;
+    if (hasSummary) return "summarized";
+    if (autoSummarize && summaryFailed) return "summary_failed";
+    if (!autoSummarize) return "transcribed";
+    return "processing transcript";
+  }
+  __name(completedMeetingStatus, "completedMeetingStatus");
+  function count(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : 0;
+  }
+  __name(count, "count");
+  function valueOrUnknown(value) {
+    const text = String(value == null ? "" : value).trim();
+    return text || "unknown";
+  }
+  __name(valueOrUnknown, "valueOrUnknown");
+  function list(value) {
+    return Array.isArray(value) && value.length ? value.map(String).join(", ") : "none";
+  }
+  __name(list, "list");
+  function statusCounts(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return "none";
+    const entries = Object.entries(value).filter(([, amount]) => Number(amount) > 0).sort(([left], [right]) => left.localeCompare(right));
+    return entries.length ? entries.map(([key, amount]) => `${key}=${count(amount)}`).join(", ") : "none";
+  }
+  __name(statusCounts, "statusCounts");
+  function formatMeetingDiagnosticsReport(options = {}) {
+    const { pluginVersion, recordGuid, botId, meetingStatus, debug } = options;
+    const data = debug && typeof debug === "object" ? debug : {};
+    return [
+      "Recall.ai Meeting Diagnostics",
+      `Plugin: ${valueOrUnknown(pluginVersion)}`,
+      `Record: ${valueOrUnknown(recordGuid)}`,
+      `Bot: ${valueOrUnknown(botId)}`,
+      `Meeting status: ${valueOrUnknown(meetingStatus)}`,
+      `Bridge: ${valueOrUnknown(data.bridgeVersion)}`,
+      `KV: ${valueOrUnknown(data.kv)}`,
+      `Webhook verification: ${valueOrUnknown(data.webhookVerification)}`,
+      `Recall bot status: ${valueOrUnknown(data.botStatus)}`,
+      `Webhook events: ${count(data.realtimePosts)}`,
+      `Parsed live rows: ${count(data.liveRows)}`,
+      `Unparsed events: ${count(data.realtimeParseFailures)}`,
+      `Parse statuses: ${statusCounts(data.realtimeParseStatuses)}`,
+      `Last realtime event: ${valueOrUnknown(data.lastRealtimeEvent)}`,
+      `Last parse status: ${valueOrUnknown(data.lastRealtimeParseStatus)}`,
+      `Last event time: ${valueOrUnknown(data.liveUpdatedAt)}`,
+      `Recordings: ${count(data.recordings)}`,
+      `Transcript artifacts: ${count(data.transcriptArtifacts)}`,
+      `Transcript statuses: ${list(data.transcriptStatuses)}`,
+      `Realtime endpoints: ${count(data.realtimeEndpoints)}`,
+      `Endpoint statuses: ${list(data.realtimeEndpointStatuses)}`,
+      `Endpoint events: ${list(Array.isArray(data.realtimeEndpointEvents) ? data.realtimeEndpointEvents.flat() : [])}`
+    ].join("\n");
+  }
+  __name(formatMeetingDiagnosticsReport, "formatMeetingDiagnosticsReport");
+
   // participant-linking.js
   function normalizeIdentity(value) {
     return String(value == null ? "" : value).normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
@@ -3301,8 +3368,8 @@ ${report}
   }
   __name(findCompatibleAttendeesField, "findCompatibleAttendeesField");
   function attendeesFieldIdFor(fields, personCollectionGuid) {
-    const list = Array.isArray(fields) ? fields : [];
-    const canonical = list.find((field) => String(field && field.id || "") === "attendees");
+    const list2 = Array.isArray(fields) ? fields : [];
+    const canonical = list2.find((field) => String(field && field.id || "") === "attendees");
     if (!canonical || isCompatibleAttendeesField(canonical, personCollectionGuid)) return "attendees";
     let hash = 2166136261;
     for (const char of String(personCollectionGuid || "")) {
@@ -3383,9 +3450,15 @@ ${report}
   __name(matchParticipantsToPeople, "matchParticipantsToPeople");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.0";
-  var MIN_BRIDGE_VERSION = "1.22.0";
-  var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze(["append-only-realtime", "bridge-checks", "participant-artifact"]);
+  var PLUGIN_VERSION = "1.22.1";
+  var MIN_BRIDGE_VERSION = "1.22.1";
+  var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
+    "append-only-realtime",
+    "bridge-checks",
+    "participant-artifact",
+    "parser-diagnostics",
+    "scheduled-bot-cancel"
+  ]);
   var FIELDS = Object.freeze({
     TITLE: "title",
     MEETING_URL: "meeting_url",
@@ -3574,38 +3647,43 @@ ${report}
   ]);
   var SCHEDULED_LEAD_MS = 10 * 60 * 1e3;
   var DONE_STATUSES = /* @__PURE__ */ new Set(["done", "bot.done", "recording_done"]);
-  var FATAL_STATUSES = /* @__PURE__ */ new Set(["fatal", "bot.fatal", "call_ended_by_host", "bot_rejected"]);
+  var FATAL_STATUSES = /* @__PURE__ */ new Set(["fatal", "bot.fatal", "call_ended_by_host", "bot_rejected", "media_expired", "analysis_failed"]);
   var STATUS_LABELS = Object.freeze({
     // Recall lifecycle
     joining_call: "Joining",
-    in_waiting_room: "Waiting room",
-    in_call_not_recording: "In call",
+    in_waiting_room: "Waiting Room",
+    in_call_not_recording: "In Call",
     recording_permission_allowed: "Recording",
-    recording_permission_denied: "Permission denied",
+    recording_permission_denied: "Permission Denied",
     in_call_recording: "Recording",
-    call_ended: "Call ended",
-    recording_done: "Recording done",
+    call_ended: "Call Ended",
+    recording_done: "Recording Done",
     done: "Done",
     fatal: "Error",
+    media_expired: "Media Expired",
+    analysis_failed: "Analysis Failed",
+    call_ended_by_host: "Call Ended by Host",
+    bot_rejected: "Bot Rejected",
     // Plugin post-processing
     created: "Starting",
     "creating bot": "Starting",
-    "leaving call": "Leaving",
+    "leaving call": "Leaving Call",
+    cancelling: "Cancelling",
+    cancelled: "Cancelled",
     syncing: "Syncing",
-    "processing transcript": "Processing",
+    "processing transcript": "Processing Transcript",
     summarizing: "Summarizing",
+    transcribed: "Transcribed",
     summarized: "Summarized",
-    summary_failed: "Summary failed",
+    summary_failed: "Summary Failed",
     scheduled: "Scheduled",
     error: "Error"
   });
-  var COMPLETED_STATUSES = /* @__PURE__ */ new Set(["summarized", "summary_failed"]);
-  var LOCAL_PROCESSING_STATUSES = /* @__PURE__ */ new Set(["processing transcript", "summarizing"]);
   function statusLabel(raw) {
     const normalized = String(raw || "").toLowerCase().replace(/^bot\./, "").trim();
     if (!normalized) return "";
     if (STATUS_LABELS[normalized]) return STATUS_LABELS[normalized];
-    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+    return normalized.replace(/[._-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
   }
   __name(statusLabel, "statusLabel");
   var TELEMETRY_ENDPOINT = "https://thymer-plugins.goatcounter.com/count";
@@ -3785,11 +3863,12 @@ ${report}
         onClick: /* @__PURE__ */ __name(({ record }) => {
           this._activeRecordGuid = record && record.guid || "";
           const kind = this._recordVisualState(record).kind;
-          if (kind === "recording" || kind === "scheduled") return void this._stopBot(record);
-          if (kind === "summarizing" || kind === "processing") {
+          if (kind === "scheduled") return void this._cancelScheduledBot(record);
+          if (kind === "recording") return void this._stopBot(record);
+          if (kind === "summarizing" || kind === "processing" || kind === "cancelling") {
             return this._toast("Still working", "The meeting is over and the transcript is being processed. Nothing to do.");
           }
-          if (kind === "done") return void this._syncRecord(record, { summarize: true, repair: true });
+          if (kind === "done" || kind === "repair") return void this._syncRecord(record, { summarize: true, repair: true });
           void this._startBot(record);
         }, "onClick")
       });
@@ -3803,7 +3882,7 @@ ${report}
       this._diagnosticsButton = this.addCollectionNavigationButton({
         label: "Diagnostics",
         icon: "activity",
-        tooltip: "Show bridge, webhook, and transcript diagnostics for this meeting",
+        tooltip: "Copy bridge, webhook, parser, and transcript diagnostics for this meeting",
         onlyWhenExpanded: true,
         onClick: /* @__PURE__ */ __name(({ record }) => void this._showMeetingDiagnostics(record), "onClick")
       });
@@ -3946,8 +4025,8 @@ ${report}
       if (this._workspaceCollectionsPromise && !force) return this._workspaceCollectionsPromise;
       const task = (async () => {
         try {
-          const list = await this.data.getAllCollections();
-          this._workspaceCollections = (Array.isArray(list) ? list : []).filter((collection) => collection && collection.getGuid && collection.getGuid() !== this._selfGuid()).sort((a, b) => String(a.getName ? a.getName() : "").localeCompare(String(b.getName ? b.getName() : "")));
+          const list2 = await this.data.getAllCollections();
+          this._workspaceCollections = (Array.isArray(list2) ? list2 : []).filter((collection) => collection && collection.getGuid && collection.getGuid() !== this._selfGuid()).sort((a, b) => String(a.getName ? a.getName() : "").localeCompare(String(b.getName ? b.getName() : "")));
           this._workspaceCollectionsLoaded = true;
         } catch (err) {
           this._workspaceCollectionsLoaded = true;
@@ -4437,6 +4516,40 @@ ${report}
         this._toast("Unable to send transcriber", this._errorMessage(err));
       }
     }
+    /** Delete a future scheduled bot. Scheduled bots are not in a call, so `leave_call` is invalid. */
+    async _cancelScheduledBot(record) {
+      const botId = record ? this._text(record, FIELDS.BOT_ID) : "";
+      if (!botId) return this._toast("No scheduled bot to cancel", "This meeting has no booked bot.");
+      const previousStatus = this._text(record, FIELDS.STATUS);
+      try {
+        this._setField(record, FIELDS.STATUS, "cancelling");
+        this._updateNavButtonForRecord(record);
+        if (this._bridgeUrl()) {
+          await this._bridgeJson("/api/recall/cancel", {
+            recallApiKey: this._settings.recallApiKey,
+            recallRegion: this._settings.recallRegion,
+            botId
+          });
+        } else {
+          const response = await fetchWithBackoff(`${this._recallBaseUrl()}/api/v1/bot/${encodeURIComponent(botId)}/`, {
+            method: "DELETE",
+            headers: this._recallHeaders(false)
+          });
+          if (!response.ok) throw new Error(recallError(await response.json().catch(() => ({})), response.status));
+        }
+        this._stopPolling(botId);
+        if (record.guid) this._autoScheduled.add(record.guid);
+        this._setField(record, FIELDS.BOT_ID, "");
+        this._setField(record, FIELDS.STATUS, "cancelled");
+        this._setField(record, FIELDS.LAST_ERROR, "");
+        this._toast("Scheduled Bot Cancelled", "The notetaker will not join this meeting.");
+      } catch (err) {
+        this._setField(record, FIELDS.STATUS, previousStatus || "scheduled");
+        this._setField(record, FIELDS.LAST_ERROR, this._errorMessage(err));
+        this._toast("Could Not Cancel Scheduled Bot", this._errorMessage(err));
+      }
+      this._updateNavButtonForRecord(record);
+    }
     /**
      * Pull the notetaker out of the call. Recall keeps whatever it already recorded, so polling
      * carries on and the transcript and summary still land — this ends the bot's attendance, it does
@@ -4580,13 +4693,13 @@ ${report}
         ]);
         const previousStatus = String(this._text(record, FIELDS.STATUS) || "").toLowerCase();
         const recallStatus = latestRecallStatus(bot) || previousStatus || "syncing";
-        const keepLocalStatus = COMPLETED_STATUSES.has(previousStatus) || LOCAL_PROCESSING_STATUSES.has(previousStatus);
+        const keepLocalStatus = COMPLETED_MEETING_STATUSES.has(previousStatus) || LOCAL_PROCESSING_STATUSES.has(previousStatus);
         const status = keepLocalStatus ? previousStatus : recallStatus;
         if (status !== previousStatus) this._setField(record, FIELDS.STATUS, status);
         this._updateNavButtonForRecord(record);
         const liveTranscript = !!(transcript && transcript.live);
         const ended = !!bot && isMeetingEndedStatus(recallStatus);
-        const terminal = !!bot && isTerminalStatus(recallStatus);
+        const recallFailed = !!bot && isFatalStatus(recallStatus);
         const rawEntries = transcriptEntries(transcript);
         if (transcript && transcript.debug && record.guid) this._diagnosticsByRecord.set(record.guid, transcript.debug);
         const entries = ended && !liveTranscript ? coalesceAdjacentTranscriptEntries(rawEntries) : rawEntries;
@@ -4600,8 +4713,8 @@ ${report}
           debug: transcript && transcript.debug || null
         });
         const loc = this._settings.notesLocation;
-        const transcriptCompletedBeforeRepair = COMPLETED_STATUSES.has(previousStatus);
-        const summaryCompletedBeforeRepair = COMPLETED_STATUSES.has(previousStatus);
+        const transcriptCompletedBeforeRepair = COMPLETED_MEETING_STATUSES.has(previousStatus);
+        const summaryCompletedBeforeRepair = COMPLETED_SUMMARY_STATUSES.has(previousStatus);
         const transcriptBodyState = loc !== "property" ? await this._bodyOwnershipState(record, botId, "transcript_root", "tx-head", transcriptCompletedBeforeRepair) : "disabled";
         const summaryBodyState = loc !== "property" ? await this._bodyOwnershipState(record, botId, "summary_root", "summary-body", summaryCompletedBeforeRepair) : "disabled";
         const summaryPropertyPresent = loc !== "body" && !!this._text(record, this._mappedFieldId(FIELDS.SUMMARY));
@@ -4636,11 +4749,23 @@ ${report}
               repairReport.push(transcriptBodyState === "owned" || transcriptBodyState === "legacy" ? "transcript body already present" : "transcript body repaired");
             } else if (repair && transcriptBodyState === "unknown") repairReport.push("legacy transcript body skipped (ownership unknown)");
           }
-        } else if (terminal || transcript && transcript.debug && transcript.debug.kv === "MISSING") {
+        } else if (recallFailed || transcript && transcript.debug && transcript.debug.kv === "MISSING") {
           this._setField(record, FIELDS.LAST_ERROR, describeTranscriptState(transcript, bot));
         } else {
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._log("transcript pending", { botId, state: describeTranscriptState(transcript, bot) });
+        }
+        if (ended && !finalTranscriptReady) {
+          if (recallFailed) {
+            this._setField(record, FIELDS.STATUS, "error");
+            this._stopPolling(botId);
+            this._updateNavButtonForRecord(record);
+            if (!quiet) this._toast("Meeting Processing Failed", describeTranscriptState(transcript, bot));
+            return true;
+          }
+          this._setField(record, FIELDS.STATUS, "processing transcript");
+          this._updateNavButtonForRecord(record);
+          return false;
         }
         if (ended && finalTranscriptReady) {
           await this._syncMeetingAttendees(record, botId, entries);
@@ -4648,11 +4773,6 @@ ${report}
         }
         const shouldGenerateSummary = summaryPropertyMissing || summaryBodyMissing;
         if (ended && summarize && this._settings.autoSummarize && shouldGenerateSummary) {
-          if (!finalTranscriptReady) {
-            this._setField(record, FIELDS.STATUS, "processing transcript");
-            this._updateNavButtonForRecord(record);
-            return false;
-          }
           const summaryOk = await this._summarize(record, transcriptText, entries, {
             deferTranscriptBody: deferFinalBodyForSections,
             writeProperty: summaryPropertyMissing,
@@ -4664,12 +4784,22 @@ ${report}
           } else if (repair) repairReport.push("summary failed");
         } else if (repair && ended && hasSummary) repairReport.push(summaryBodyState === "unknown" ? "legacy summary skipped (ownership unknown)" : "summary already present");
         else if (repair && ended && summaryBodyProtected) repairReport.push("legacy summary skipped (ownership unknown)");
-        if (ended && (finalTranscriptReady || hasSummary)) {
-          this._stopPolling(botId);
+        let finalized = false;
+        if (ended && finalTranscriptReady) {
+          const currentStatus = String(this._text(record, FIELDS.STATUS) || "").toLowerCase();
+          const finalStatus = completedMeetingStatus({
+            autoSummarize: !!this._settings.autoSummarize,
+            hasSummary,
+            summaryFailed: currentStatus === "summary_failed"
+          });
+          if (currentStatus !== finalStatus) this._setField(record, FIELDS.STATUS, finalStatus);
+          finalized = COMPLETED_MEETING_STATUSES.has(finalStatus);
+          if (finalized) this._stopPolling(botId);
         }
         this._updateNavButtonForRecord(record);
-        if (!quiet) this._toast(repair ? "Meeting repair complete" : "Meeting synced", repair ? repairReport.join(" \xB7 ") || status : status);
-        return ended && (finalTranscriptReady || hasSummary);
+        const displayedStatus = statusLabel(this._text(record, FIELDS.STATUS) || status);
+        if (!quiet) this._toast(repair ? "Meeting Repair Complete" : "Meeting Synced", repair ? repairReport.join(" \xB7 ") || displayedStatus : displayedStatus);
+        return finalized;
       } catch (err) {
         const msg = this._errorMessage(err);
         this._setField(record, FIELDS.LAST_ERROR, msg);
@@ -4792,6 +4922,8 @@ ${report}
     async _summarize(record, transcriptText, entries, { deferTranscriptBody = false, writeProperty = true, writeBody = true } = {}) {
       if (!this._settings.anthropicApiKey) {
         this._setField(record, FIELDS.LAST_ERROR, "Anthropic API key is missing; transcript fetched but summary was skipped.");
+        this._setField(record, FIELDS.STATUS, "summary_failed");
+        this._updateNavButtonForRecord(record);
         return false;
       }
       try {
@@ -5219,9 +5351,9 @@ ${transcriptText}` }]
             const e = entries[index];
             if (!e) continue;
             let turnTarget = null;
-            const count = Math.max(1, Number(e.sourceCount) || 1);
-            let group = Array.from({ length: count }, (_unused, offset) => turnBySourceIndex.get(sourceOffsets[index] + offset)).filter(Boolean);
-            if (!group.length && canMoveExisting) group = turns.slice(sourceOffsets[index], sourceOffsets[index] + count);
+            const count2 = Math.max(1, Number(e.sourceCount) || 1);
+            let group = Array.from({ length: count2 }, (_unused, offset) => turnBySourceIndex.get(sourceOffsets[index] + offset)).filter(Boolean);
+            if (!group.length && canMoveExisting) group = turns.slice(sourceOffsets[index], sourceOffsets[index] + count2);
             if (group.length) {
               const primary = group[0];
               if (!primary) continue;
@@ -5230,7 +5362,7 @@ ${transcriptText}` }]
               const hasUserChildren = extraChildren.some((li) => !trackedSet.has(li.guid));
               const inline = settings.transcriptLayout === "inline";
               const primaryText = inline ? null : items.find((li) => li.parent_guid === primary.guid && (trackedSet.has(li.guid) || this._isOwnedLine(li, botId, "transcript_text")));
-              const canCompact = group.length === count && !hasUserChildren && typeof primary.setSegments === "function" && (inline || !!(primaryText && typeof primaryText.setSegments === "function")) && extras.every((turn) => typeof turn.delete === "function") && extraChildren.every((li) => typeof li.delete === "function");
+              const canCompact = group.length === count2 && !hasUserChildren && typeof primary.setSegments === "function" && (inline || !!(primaryText && typeof primaryText.setSegments === "function")) && extras.every((turn) => typeof turn.delete === "function") && extraChildren.every((li) => typeof li.delete === "function");
               if (canCompact) {
                 const line = inline ? `${formatEntryHeader(e, settings)}: ${e.text}` : formatEntryHeader(e, settings);
                 await primary.setSegments([{ type: "text", text: line }]);
@@ -5257,7 +5389,7 @@ ${transcriptText}` }]
                   movedAny = true;
                 }
                 if (!movedAny) continue;
-                if (count === 1 && group.length === 1) {
+                if (count2 === 1 && group.length === 1) {
                   await this._markOwnedLine(afterTurn, botId, "transcript_turn", { entryIndex: index });
                   if (primaryText) await this._markOwnedLine(primaryText, botId, "transcript_text", { entryIndex: index });
                   turnTarget = inline ? afterTurn : primaryText;
@@ -5738,17 +5870,35 @@ ${transcriptText}` }]
         label: "Summarizing",
         tooltip: "Generating the meeting summary"
       };
+      if (status === "cancelling") return {
+        kind: "cancelling",
+        icon: "loader-2",
+        label: "Cancelling",
+        tooltip: "Cancelling the scheduled bot"
+      };
       if (status === "processing transcript") return {
         kind: "processing",
         icon: "loader-2",
-        label: "Processing",
+        label: "Processing Transcript",
         tooltip: "Waiting for the transcript to finish"
       };
-      if (botId && (isTerminalStatus(status) || COMPLETED_STATUSES.has(status))) return {
+      if (botId && (status === "summary_failed" || status === "error" || isFatalStatus(status))) return {
+        kind: "repair",
+        icon: "alert-circle",
+        label: "Repair",
+        tooltip: status === "summary_failed" ? "Transcript saved; summary failed \u2014 click to repair" : "Meeting processing needs attention \u2014 click to repair"
+      };
+      if (botId && COMPLETED_MEETING_STATUSES.has(status)) return {
         kind: "done",
         icon: "circle-check",
         label: "Done",
-        tooltip: "Meeting transcribed and summarized"
+        tooltip: status === "transcribed" ? "Meeting transcript saved" : "Meeting transcribed and summarized"
+      };
+      if (botId && isMeetingEndedStatus(status)) return {
+        kind: "processing",
+        icon: "loader-2",
+        label: "Processing Transcript",
+        tooltip: "Waiting for Recall\u2019s authoritative transcript"
       };
       if (botId && this._joinAtMs(record) > Date.now() && !isTerminalStatus(status) && status !== "error") return {
         kind: "scheduled",
@@ -5775,7 +5925,7 @@ ${transcriptText}` }]
       for (const record of records) {
         const botId = this._text(record, FIELDS.BOT_ID);
         const status = this._text(record, FIELDS.STATUS);
-        if (botId && !isTerminalStatus(status) && !COMPLETED_STATUSES.has(String(status || "").toLowerCase())) this._ensurePolling(record, botId);
+        if (shouldRestoreMeetingPolling(botId, status)) this._ensurePolling(record, botId);
       }
     }
     _restartPollingIntervals() {
@@ -5820,20 +5970,30 @@ ${transcriptText}` }]
         });
         const debug = result && result.debug || {};
         if (record.guid) this._diagnosticsByRecord.set(record.guid, debug);
-        const parts = [
-          `Bridge ${debug.bridgeVersion || "unknown"}`,
-          `KV ${debug.kv || "unknown"}`,
-          `verification ${debug.webhookVerification || "unknown"}`,
+        const report = formatMeetingDiagnosticsReport({
+          pluginVersion: PLUGIN_VERSION,
+          recordGuid: record.guid || "",
+          botId,
+          meetingStatus: this._text(record, FIELDS.STATUS),
+          debug
+        });
+        console.info("[recall-ai] meeting diagnostics\n" + report);
+        let copied = false;
+        try {
+          const write = typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText;
+          if (write) {
+            await write.call(navigator.clipboard, report);
+            copied = true;
+          }
+        } catch {
+        }
+        const summary = [
           `webhooks ${Number(debug.realtimePosts) || 0}`,
           `rows ${Number(debug.liveRows) || 0}`,
-          `parse failures ${Number(debug.realtimeParseFailures) || 0}`,
-          `endpoints ${Number(debug.realtimeEndpoints) || 0}`,
-          `transcript artifacts ${Number(debug.transcriptArtifacts) || 0}`
-        ];
-        if (debug.liveUpdatedAt) parts.push(`last event ${new Date(debug.liveUpdatedAt).toLocaleString()}`);
-        if (Array.isArray(debug.transcriptStatuses) && debug.transcriptStatuses.length) parts.push(`transcript ${debug.transcriptStatuses.join(", ")}`);
-        if (Array.isArray(debug.realtimeEndpointStatuses) && debug.realtimeEndpointStatuses.length) parts.push(`endpoint status ${debug.realtimeEndpointStatuses.join(", ")}`);
-        this._toast("Meeting diagnostics", parts.join(" \xB7 "));
+          `unparsed ${Number(debug.realtimeParseFailures) || 0}`,
+          `last ${debug.lastRealtimeParseStatus || "unknown"}`
+        ].join(" \xB7 ");
+        this._toast(copied ? "Meeting Diagnostics Copied" : "Meeting Diagnostics", copied ? summary : `${summary} \xB7 Full report logged to the console`);
       } catch (err) {
         this._toast("Unable to load diagnostics", this._errorMessage(err));
       }
@@ -7346,19 +7506,19 @@ ${transcriptText}` }]
     return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   }
   __name(sanitizeSummaryMarkdown, "sanitizeSummaryMarkdown");
-  function sectionJsonInstruction(count) {
+  function sectionJsonInstruction(count2) {
     return [
       "Additionally, divide the transcript into a handful of topic sections in time order.",
-      `Each line below is numbered like [N], from 0 to ${count - 1}.`,
+      `Each line below is numbered like [N], from 0 to ${count2 - 1}.`,
       "At the end of every non-heading summary line, add one or two citations. Use {{cite:S:E}} when transcript line E directly supports that wording, where S is the zero-based index into your sections array. Use the broader {{cite:S}} only when the line synthesizes several turns in that topic and no single transcript line is sufficient.",
       "For multiple sources use one marker such as {{cite:1:8,2:14}}. Every E must fall inside section S. Choose only the most direct source or two, and do not put citation markers on headings.",
       "Respond with ONLY a JSON object \u2014 no code fence, no text before or after \u2014 of the form:",
       '{"summary": "<the markdown summary with {{cite:0:3}} or {{cite:0}} markers, as one JSON string>", "sections": [{"title": "<short topic label, no timestamps>", "start": <first transcript line number>, "end": <last transcript line number>}]}',
-      "Sections must be in order, must not overlap, and together must cover every line from 0 to " + (count - 1) + ". Aim for 3\u20138 sections."
+      "Sections must be in order, must not overlap, and together must cover every line from 0 to " + (count2 - 1) + ". Aim for 3\u20138 sections."
     ].join("\n");
   }
   __name(sectionJsonInstruction, "sectionJsonInstruction");
-  function parseSummaryAndSections(raw, count) {
+  function parseSummaryAndSections(raw, count2) {
     const text = String(raw || "").trim();
     const unfenced = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     let obj = null;
@@ -7378,10 +7538,10 @@ ${transcriptText}` }]
     }
     if (!obj || typeof obj !== "object") return { summary: text, sections: [] };
     const summary = typeof obj.summary === "string" && obj.summary.trim() ? obj.summary : text;
-    return { summary, sections: normalizeSections(Array.isArray(obj.sections) ? obj.sections : [], count) };
+    return { summary, sections: normalizeSections(Array.isArray(obj.sections) ? obj.sections : [], count2) };
   }
   __name(parseSummaryAndSections, "parseSummaryAndSections");
-  function normalizeSections(rawSections, count) {
+  function normalizeSections(rawSections, count2) {
     const out = [];
     for (let sourceIndex = 0; sourceIndex < rawSections.length; sourceIndex++) {
       const s = rawSections[sourceIndex];
@@ -7390,8 +7550,8 @@ ${transcriptText}` }]
       let start = Math.floor(Number(s.start));
       let end = Math.floor(Number(s.end));
       if (!title || !Number.isFinite(start) || !Number.isFinite(end)) continue;
-      start = Math.max(0, Math.min(start, count - 1));
-      end = Math.max(start, Math.min(end, count - 1));
+      start = Math.max(0, Math.min(start, count2 - 1));
+      end = Math.max(start, Math.min(end, count2 - 1));
       out.push({ title, start, end, sourceIndex });
     }
     out.sort((a, b) => a.start - b.start);
@@ -7399,14 +7559,14 @@ ${transcriptText}` }]
     let cursor = -1;
     for (const s of out) {
       if (s.start <= cursor) s.start = cursor + 1;
-      if (s.start > s.end || s.start > count - 1) continue;
+      if (s.start > s.end || s.start > count2 - 1) continue;
       clean.push(s);
       cursor = s.end;
     }
     if (clean.length) {
       clean[0].start = 0;
       for (let i = 1; i < clean.length; i++) clean[i - 1].end = clean[i].start - 1;
-      clean[clean.length - 1].end = count - 1;
+      clean[clean.length - 1].end = count2 - 1;
     }
     return clean;
   }
@@ -7479,6 +7639,11 @@ ${transcriptText}` }]
     return DONE_STATUSES.has(normalized) || FATAL_STATUSES.has(normalized) || normalized.includes("done") || normalized.includes("fatal");
   }
   __name(isTerminalStatus, "isTerminalStatus");
+  function isFatalStatus(status) {
+    const normalized = String(status || "").toLowerCase();
+    return FATAL_STATUSES.has(normalized) || normalized.includes("fatal") || normalized.includes("failed");
+  }
+  __name(isFatalStatus, "isFatalStatus");
   function isMeetingEndedStatus(status) {
     const normalized = String(status || "").toLowerCase();
     return isTerminalStatus(normalized) || normalized === "call_ended" || normalized === "processing transcript";
@@ -7581,7 +7746,9 @@ ${transcriptText}` }]
     const spinner = `<span class="ti ${ROOT_CLASS}__nav-ico ${ROOT_CLASS}__nav-spinner" aria-hidden="true"></span>`;
     if (kind === "recording") return label(`<i class="ti ti-microphone ${ROOT_CLASS}__nav-ico ${ROOT_CLASS}__nav-mic" aria-hidden="true"></i>`, "Recording");
     if (kind === "summarizing") return label(spinner, "Summarizing");
-    if (kind === "processing") return label(spinner, "Processing");
+    if (kind === "processing") return label(spinner, "Processing Transcript");
+    if (kind === "cancelling") return label(spinner, "Cancelling");
+    if (kind === "repair") return label(icon("alert-circle"), "Repair");
     if (kind === "done") return label(icon("circle-check"), "Done");
     if (kind === "scheduled") return label(icon("clock"), "Scheduled");
     if (kind === "schedulable") return label(icon("calendar"), "Schedule Bot");

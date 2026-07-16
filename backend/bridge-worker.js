@@ -6,11 +6,13 @@ const RECALL_REGIONS = Object.freeze({
 	payg: 'https://api.recall.ai',
 });
 
-const BRIDGE_VERSION = '1.22.0';
+const BRIDGE_VERSION = '1.22.1';
 const BRIDGE_CAPABILITIES = Object.freeze([
 	'append-only-realtime',
 	'bridge-checks',
 	'participant-artifact',
+	'parser-diagnostics',
+	'scheduled-bot-cancel',
 	'signed-realtime',
 ]);
 const REALTIME_TTL_SECONDS = 60 * 60 * 24 * 7;
@@ -44,6 +46,7 @@ export default {
 			if (url.pathname === '/api/recall/transcript') return await getRecallTranscript(request, env);
 			if (url.pathname === '/api/recall/participants') return await getRecallParticipants(request, env);
 			if (url.pathname === '/api/recall/leave') return await leaveRecallCall(request, env);
+			if (url.pathname === '/api/recall/cancel') return await cancelScheduledRecallBot(request, env);
 			if (url.pathname === '/api/recall/realtime') return await receiveRealtimeTranscript(request, env);
 			if (url.pathname === '/api/anthropic/check') return await checkAnthropicConnection(request, env);
 			if (url.pathname === '/api/anthropic/summary') return await createSummary(request, env);
@@ -224,8 +227,23 @@ async function leaveRecallCall(request, env) {
 	});
 	const data = await safeJson(response);
 	// Recall answers 200/202 with the bot, or 204 with nothing at all.
-	if (!response.ok) return json({ error: recallErrorMessage(data, response.status), detail: data }, response.status);
+	if (!response.ok) return json({ error: recallError(data, response.status), detail: data }, response.status);
 	return json(data && typeof data === 'object' ? data : { ok: true });
+}
+
+/** Delete a bot that Recall has scheduled but has not yet sent into the meeting. */
+async function cancelScheduledRecallBot(request, env) {
+	const body = await readJson(request);
+	const apiKey = recallApiKey(body, env);
+	if (!apiKey) return json({ error: 'Recall API key is required' }, 400);
+	if (!body.botId) return json({ error: 'botId is required' }, 400);
+	const response = await recallFetch(env, body.recallRegion, `/api/v1/bot/${encodeURIComponent(body.botId)}/`, {
+		method: 'DELETE',
+		headers: recallHeaders(apiKey, false),
+	});
+	const data = await safeJson(response);
+	if (!response.ok) return json({ error: recallError(data, response.status), detail: data }, response.status);
+	return json({ ok: true });
 }
 
 async function getRecallTranscript(request, env) {
@@ -599,11 +617,15 @@ async function liveTranscriptPayload(botId, env) {
 	// Recall delivered its webhooks to another isolate; returning that stale cache caused live_rows=0
 	// for the entire meeting even though the rows were safely sitting in KV.
 	const session = await getLiveSession(botId, env, true);
+	const lastEvent = latestRealtimeEvent(session);
 	return {
 		results: session ? session.rows : [],
 		live: true,
 		receivedPosts: session ? Number(session.receivedPosts) || 0 : 0,
 		parseFailures: session ? Number(session.parseFailures) || 0 : 0,
+		parseStatusCounts: realtimeParseStatusCounts(session),
+		lastEventName: lastEvent && lastEvent.eventName || null,
+		lastParseStatus: lastEvent && lastEvent.parseStatus || null,
 		updatedAt: session && session.updatedAt ? session.updatedAt : null,
 		bridgeVersion: BRIDGE_VERSION,
 	};
@@ -678,6 +700,24 @@ function mergeRealtimeEvent(session, event) {
 	session.receivedPosts = session.events.size;
 	session.parseFailures = ordered.filter(item => item && item.parseStatus !== 'parsed').length;
 	session.updatedAt = Math.max(...ordered.map(item => Number(item && item.receivedAt) || 0), Number(session.updatedAt) || 0) || Date.now();
+}
+
+function realtimeParseStatusCounts(session) {
+	const counts = {};
+	const events = session && session.events instanceof Map ? Array.from(session.events.values()) : [];
+	for (const event of events) {
+		const status = String(event && event.parseStatus || 'unknown');
+		counts[status] = (counts[status] || 0) + 1;
+	}
+	return counts;
+}
+
+function latestRealtimeEvent(session) {
+	const events = session && session.events instanceof Map ? Array.from(session.events.values()) : [];
+	return events.sort((left, right) => {
+		const receipt = (Number(right && right.receivedAt) || 0) - (Number(left && left.receivedAt) || 0);
+		return receipt || String(right && right.id || '').localeCompare(String(left && left.id || ''));
+	})[0] || null;
 }
 
 function compareRealtimeEvents(a, b) {
@@ -845,6 +885,9 @@ async function transcriptDebug(env, region, apiKey, bot, live) {
 		liveRows: live && Array.isArray(live.results) ? live.results.length : 0,
 		realtimePosts: live ? Number(live.receivedPosts) || 0 : 0,
 		realtimeParseFailures: live ? Number(live.parseFailures) || 0 : 0,
+		realtimeParseStatuses: live && live.parseStatusCounts || {},
+		lastRealtimeEvent: live && live.lastEventName || null,
+		lastRealtimeParseStatus: live && live.lastParseStatus || null,
 		liveUpdatedAt: live ? live.updatedAt : null,
 		bridgeVersion: BRIDGE_VERSION,
 		webhookVerification: env.RECALL_WORKSPACE_VERIFICATION_SECRET ? 'enforced' : 'compatibility',

@@ -133,6 +133,40 @@ test('create bot returns Recall 400 validation detail', async () => {
 	assert.deepEqual(json.detail, { detail: { recording_config: ['Invalid config'] } });
 });
 
+test('scheduled bot cancellation uses Recall delete endpoint', async () => {
+	let forwarded = null;
+	const response = await worker.fetch(new Request('https://bridge.test/api/recall/cancel', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ botId: 'bot_scheduled', recallApiKey: 'key', recallRegion: 'eu-central-1' }),
+	}), {
+		__fetch: async (url, options) => {
+			forwarded = { url, options };
+			return new Response(null, { status: 204 });
+		},
+	});
+
+	assert.equal(response.status, 200);
+	assert.deepEqual(await response.json(), { ok: true });
+	assert.equal(forwarded.url, 'https://eu-central-1.recall.ai/api/v1/bot/bot_scheduled/');
+	assert.equal(forwarded.options.method, 'DELETE');
+	assert.equal(forwarded.options.headers.Authorization, 'Token key');
+});
+
+test('active-call leave returns Recall errors without masking them', async () => {
+	const response = await worker.fetch(new Request('https://bridge.test/api/recall/leave', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ botId: 'bot_active', recallApiKey: 'key' }),
+	}), {
+		__fetch: async () => Response.json({ detail: 'Bot is not in a call' }, { status: 400 }),
+	});
+	const data = await response.json();
+
+	assert.equal(response.status, 400);
+	assert.equal(data.error, 'Bot is not in a call');
+});
+
 test('realtime webhook buffers transcript rows for transcript polling', async () => {
 	const payload = {
 		event: 'transcript.data',
@@ -442,10 +476,12 @@ test('health and credential checks expose only stable validation state', async (
 	});
 	const healthJson = await health.json();
 	assert.equal(healthJson.ok, true);
-	assert.equal(healthJson.bridgeVersion, '1.22.0');
+	assert.equal(healthJson.bridgeVersion, '1.22.1');
 	assert.equal(healthJson.kv, 'bound');
 	assert.equal(healthJson.webhookVerification, 'enforced');
 	assert.ok(healthJson.capabilities.includes('append-only-realtime'));
+	assert.ok(healthJson.capabilities.includes('parser-diagnostics'));
+	assert.ok(healthJson.capabilities.includes('scheduled-bot-cancel'));
 
 	const recall = await worker.fetch(new Request('https://bridge.test/api/recall/check', {
 		method: 'POST',
@@ -538,6 +574,38 @@ test('append-only realtime storage deduplicates, counts malformed events, and or
 	assert.deepEqual(json.results.map(row => row.text), ['First', 'Second']);
 	assert.equal(json.receivedPosts, 3);
 	assert.equal(json.parseFailures, 1);
+	assert.deepEqual(json.parseStatusCounts, { parsed: 2, empty_transcript: 1 });
+	assert.equal(json.lastEventName, 'transcript.data');
+	assert.ok(['parsed', 'empty_transcript'].includes(json.lastParseStatus));
+});
+
+test('meeting diagnostics expose parse-status breakdown and last accepted event', async () => {
+	const store = kvStore();
+	const env = { RECALL_TRANSCRIPTS: store };
+	for (const [id, payload] of [
+		['evt-diagnostic-parsed', realtimePayload('bot_diagnostics', 1, 'Parsed')],
+		['evt-diagnostic-empty', realtimePayload('bot_diagnostics', 2, '')],
+	]) {
+		await worker.fetch(new Request('https://bridge.test/api/recall/realtime', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json', 'webhook-id': id },
+			body: JSON.stringify(payload),
+		}), env);
+	}
+	const response = await worker.fetch(new Request('https://bridge.test/api/recall/diagnostics', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ botId: 'bot_diagnostics', recallApiKey: 'key' }),
+	}), {
+		...env,
+		__fetch: async () => Response.json({ status: { code: 'in_call_recording' }, recordings: [] }),
+	});
+	const { debug } = await response.json();
+
+	assert.equal(response.status, 200);
+	assert.deepEqual(debug.realtimeParseStatuses, { parsed: 1, empty_transcript: 1 });
+	assert.equal(debug.lastRealtimeEvent, 'transcript.data');
+	assert.ok(['parsed', 'empty_transcript'].includes(debug.lastRealtimeParseStatus));
 });
 
 test('KV migration reads legacy sessions and paginated event keys in bulk', async () => {
