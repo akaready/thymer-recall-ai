@@ -99,6 +99,14 @@ Then open **Setup → Setup Doctor** and click **Run setup check**. It validates
 KV binding, webhook-verification mode, Recall key/region, Claude key/model, and field bindings without
 creating a bot or generating a summary.
 
+The Setup tab also shows an **Expected API cost** preview before the first call. It uses public
+pay-as-you-go list prices and shows Recall recording + transcription, the Claude summary estimate and
+combined total for every selectable model, and storage separately. Estimates assume a one-hour active
+bot and a typical one-hour transcript/summary; the assumptions and direct pricing links are shown in
+the panel. Waiting-room time, credits, custom plans, transcript length, and generated output can change
+the real bill. Sonnet 5 introductory pricing switches automatically to its announced standard rate on
+September 1, 2026.
+
 Recall sends live transcript lines to the bridge’s public webhook while a meeting is running. If
 Setup Doctor shows **Live transcript security (optional)** in compatibility mode, streaming still
 works, but the endpoint cannot prove that a post came from Recall; another sender could forge
@@ -156,6 +164,7 @@ confident matches to `Attendees`. Ambiguous and unmatched names stay safely in t
 | **Recall API key** / **Region** | Your Recall key and the region it came from — they must match. |
 | **Recall media retention** | How long future bots keep Recall’s audio/video, transcript, participant, and debug artifacts. Defaults to 7 days, inside Recall’s free storage window. |
 | **Anthropic API key** / **Claude model** | Key and model used to write the summary. |
+| **Expected API cost** | One-hour planning estimate for Recall plus every Claude model, with the selected model highlighted and storage shown separately. |
 | **Field mapping** | Point Meeting URL / Transcript / Summary / Participant Names at existing properties instead of the plugin's defaults. Leave on auto-detect if unsure. |
 | **People collection / Attendees relation** | Optionally bind meeting participants to existing Person records. Exact matching only; Person records are never auto-created. |
 | **Bot name** | The name the notetaker shows in the meeting. |

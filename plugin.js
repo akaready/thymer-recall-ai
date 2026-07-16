@@ -3357,6 +3357,80 @@ ${report}
   }
   __name(recordingRetentionDoctorMessage, "recordingRetentionDoctorMessage");
 
+  // api-costs.js
+  var RECALL_PAYG_RECORDING_PER_HOUR_USD = 0.5;
+  var RECALL_TRANSCRIPTION_PER_HOUR_USD = 0.15;
+  var CLAUDE_ESTIMATE_INPUT_TOKENS = 12e3;
+  var CLAUDE_ESTIMATE_OUTPUT_TOKENS = 1500;
+  var SONNET_5_STANDARD_PRICE_START = Date.UTC(2026, 8, 1);
+  var CLAUDE_PRICING = Object.freeze({
+    "claude-haiku-4-5": Object.freeze({ input: 1, output: 5, tokenizerFactor: 1 }),
+    "claude-sonnet-4-6": Object.freeze({ input: 3, output: 15, tokenizerFactor: 1 }),
+    "claude-sonnet-5": Object.freeze({
+      input: 3,
+      output: 15,
+      introInput: 2,
+      introOutput: 10,
+      tokenizerFactor: 1.3
+    }),
+    "claude-opus-4-8": Object.freeze({ input: 5, output: 25, tokenizerFactor: 1.3 })
+  });
+  function instant(value) {
+    if (value instanceof Date) return value.getTime();
+    if (typeof value === "number") return value;
+    if (typeof value === "string") return new Date(value).getTime();
+    return Date.now();
+  }
+  __name(instant, "instant");
+  function estimateRecallCost(minutes = 60) {
+    const duration = Math.max(0, Number(minutes) || 0) / 60;
+    const recordingUsd = RECALL_PAYG_RECORDING_PER_HOUR_USD * duration;
+    const transcriptionUsd = RECALL_TRANSCRIPTION_PER_HOUR_USD * duration;
+    return {
+      recordingUsd,
+      transcriptionUsd,
+      totalUsd: recordingUsd + transcriptionUsd
+    };
+  }
+  __name(estimateRecallCost, "estimateRecallCost");
+  function estimateClaudeSummaryCost(model, { at, inputTokens = CLAUDE_ESTIMATE_INPUT_TOKENS, outputTokens = CLAUDE_ESTIMATE_OUTPUT_TOKENS } = {}) {
+    const pricing = CLAUDE_PRICING[String(model || "").trim()];
+    if (!pricing) return null;
+    const promotional = model === "claude-sonnet-5" && instant(at) < SONNET_5_STANDARD_PRICE_START;
+    const inputPerMillionUsd = promotional ? pricing.introInput : pricing.input;
+    const outputPerMillionUsd = promotional ? pricing.introOutput : pricing.output;
+    const adjustedInputTokens = Math.round(Math.max(0, Number(inputTokens) || 0) * pricing.tokenizerFactor);
+    const adjustedOutputTokens = Math.round(Math.max(0, Number(outputTokens) || 0) * pricing.tokenizerFactor);
+    const totalUsd = adjustedInputTokens / 1e6 * inputPerMillionUsd + adjustedOutputTokens / 1e6 * outputPerMillionUsd;
+    return {
+      adjustedInputTokens,
+      adjustedOutputTokens,
+      inputPerMillionUsd,
+      outputPerMillionUsd,
+      promotional,
+      totalUsd
+    };
+  }
+  __name(estimateClaudeSummaryCost, "estimateClaudeSummaryCost");
+  function formatEstimatedUsd(value) {
+    const amount = Math.max(0, Number(value) || 0);
+    return `$${amount.toFixed(2)}`;
+  }
+  __name(formatEstimatedUsd, "formatEstimatedUsd");
+  function recallStorageCostNote(retention) {
+    const value = String(retention || "168").trim().toLowerCase();
+    if (value === "forever") return "Ongoing storage: $0.05 per recorded hour for each additional 30 days after day 7.";
+    if (value === "account") return "Storage depends on the Recall account default; charges begin after day 7 when media is retained.";
+    const hours = Number(value);
+    if (Number.isFinite(hours) && hours > 168) return "Storage: up to about $0.05 per recorded hour for each additional 30 days after day 7.";
+    return "Storage: $0 with the selected retention because media expires within Recall\u2019s free 7-day window.";
+  }
+  __name(recallStorageCostNote, "recallStorageCostNote");
+  function standardSonnet5Estimate(options = {}) {
+    return estimateClaudeSummaryCost("claude-sonnet-5", { ...options, at: SONNET_5_STANDARD_PRICE_START });
+  }
+  __name(standardSonnet5Estimate, "standardSonnet5Estimate");
+
   // participant-linking.js
   function normalizeIdentity(value) {
     return String(value == null ? "" : value).normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
@@ -3494,7 +3568,7 @@ ${report}
   __name(matchParticipantsToPeople, "matchParticipantsToPeople");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.3";
+  var PLUGIN_VERSION = "1.22.4";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -6384,8 +6458,74 @@ ${transcriptText}` }]
             this._setupSteps()
           ]
         }),
+        this._costPreviewSection(),
         this._setupDoctorSection()
       ];
+    }
+    _costPreviewSection() {
+      const recall = estimateRecallCost(60);
+      const selectedModel = String(this._draft.anthropicModel || DEFAULT_SETTINGS.anthropicModel).trim();
+      const links = h(
+        "span",
+        { class: `${ROOT_CLASS}-field-hint` },
+        "Public list prices, checked July 16, 2026: ",
+        h("a", { href: "https://www.recall.ai/pricing", target: "_blank", rel: "noopener noreferrer" }, "Recall pricing"),
+        " \xB7 ",
+        h("a", { href: "https://platform.claude.com/docs/en/about-claude/pricing", target: "_blank", rel: "noopener noreferrer" }, "Claude pricing"),
+        ". Credits, waiting-room time, unusually long transcripts, adaptive thinking, and custom plans can change the actual bill."
+      );
+      return section({
+        label: "Expected API cost",
+        hint: "Planning estimates for one active meeting hour\u2014not live account billing.",
+        body: [
+          h(
+            "div",
+            { class: `${ROOT_CLASS}-field` },
+            h("span", { class: `${ROOT_CLASS}-field-label` }, "Recall.ai pay-as-you-go"),
+            h(
+              "span",
+              { class: `${ROOT_CLASS}-field-hint` },
+              `~${formatEstimatedUsd(recall.totalUsd)} per active bot-hour: ${formatEstimatedUsd(recall.recordingUsd)} recording + ${formatEstimatedUsd(recall.transcriptionUsd)} built-in transcription. Recall prorates to the second; time waiting to enter the call counts.`
+            )
+          ),
+          ...CLAUDE_MODELS.map(([model, label]) => {
+            const estimate = estimateClaudeSummaryCost(model);
+            const total = recall.totalUsd + estimate.totalUsd;
+            const rate = `$${estimate.inputPerMillionUsd}/$${estimate.outputPerMillionUsd} per million input/output tokens`;
+            let future = "";
+            if (model === "claude-sonnet-5" && estimate.promotional) {
+              const standard = standardSonnet5Estimate();
+              future = ` Introductory through August 31, 2026; then Claude ~${formatEstimatedUsd(standard.totalUsd)}.`;
+            }
+            return h(
+              "div",
+              { class: `${ROOT_CLASS}-field` },
+              h("span", { class: `${ROOT_CLASS}-field-label` }, `${label.split(" \u2014 ")[0]}${model === selectedModel ? " \u2014 selected" : ""}`),
+              h(
+                "span",
+                { class: `${ROOT_CLASS}-field-hint` },
+                `Claude ~${formatEstimatedUsd(estimate.totalUsd)} (${rate}); ~${formatEstimatedUsd(total)} including Recall.${future}`
+              )
+            );
+          }),
+          h(
+            "div",
+            { class: `${ROOT_CLASS}-field` },
+            h("span", { class: `${ROOT_CLASS}-field-label` }, "Storage"),
+            h("span", { class: `${ROOT_CLASS}-field-hint` }, recallStorageCostNote(this._draft.recordingRetention))
+          ),
+          h(
+            "div",
+            { class: `${ROOT_CLASS}-field` },
+            h(
+              "span",
+              { class: `${ROOT_CLASS}-field-hint` },
+              `Claude estimates assume about ${Math.round(CLAUDE_ESTIMATE_INPUT_TOKENS / 1e3)}k input and ${CLAUDE_ESTIMATE_OUTPUT_TOKENS.toLocaleString()} output tokens for a one-hour transcript and summary; Sonnet 5 and Opus 4.8 are adjusted for Anthropic\u2019s roughly 30% larger tokenizer.`
+            ),
+            links
+          )
+        ]
+      });
     }
     _setupDoctorSection() {
       const state = this._setupDoctorState;
@@ -6936,12 +7076,19 @@ ${transcriptText}` }]
       );
     }
     _modelSelectInput(label, key) {
-      const options = CLAUDE_MODELS.map(([value, text]) => [value, text]);
+      const options = CLAUDE_MODELS.map(([value, text]) => {
+        const estimate2 = estimateClaudeSummaryCost(value);
+        const promo = estimate2 && estimate2.promotional ? " intro" : "";
+        return [value, estimate2 ? `${text} \xB7 ~${formatEstimatedUsd(estimate2.totalUsd)}/meeting hr${promo}` : text];
+      });
       const current = String(this._draft[key] || DEFAULT_SETTINGS.anthropicModel).trim();
       if (current && !options.some(([value]) => value === current)) {
         options.push([current, `${current} (current)`]);
       }
-      return this._selectInput(label, key, options);
+      const estimate = estimateClaudeSummaryCost(current);
+      const recall = estimateRecallCost(60);
+      const hint = estimate ? this._draft.autoSummarize ? `Estimated for a one-hour meeting: Claude ~${formatEstimatedUsd(estimate.totalUsd)}; ~${formatEstimatedUsd(recall.totalUsd + estimate.totalUsd)} including Recall, before paid storage.` : `Auto summarize is off, so Claude is $0 unless a summary is generated later. With this model, a one-hour summary is estimated at ~${formatEstimatedUsd(estimate.totalUsd)}.` : "No cost estimate is available for this custom model ID.";
+      return this._selectInput(label, key, options, { hint });
     }
     /**
      * Add the canonical property to this collection, for the case the dropdown exists to solve:
