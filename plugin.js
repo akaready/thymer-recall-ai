@@ -2539,6 +2539,49 @@ ${report}
   __name(button, "button");
 
   // ../../shared/plugin-version.js
+  var CONFIG_WRITE_QUEUES_KEY = "__tpsPluginConfigWriteQueues";
+  function configWriteIdentity(plugin) {
+    let workspace = "default";
+    try {
+      workspace = plugin.getWorkspaceGuid?.() || "default";
+    } catch {
+    }
+    let guid = "";
+    try {
+      guid = plugin.getGuid?.() || plugin.collection?.getGuid?.() || "";
+    } catch {
+    }
+    let name = "plugin";
+    try {
+      name = plugin.getConfiguration?.()?.name || "plugin";
+    } catch {
+    }
+    return `${workspace}/${guid || name}`;
+  }
+  __name(configWriteIdentity, "configWriteIdentity");
+  function queuePluginConfigWrite(plugin, task) {
+    let queues;
+    try {
+      const root = (
+        /** @type {any} */
+        globalThis
+      );
+      if (!(root[CONFIG_WRITE_QUEUES_KEY] instanceof Map)) root[CONFIG_WRITE_QUEUES_KEY] = /* @__PURE__ */ new Map();
+      queues = root[CONFIG_WRITE_QUEUES_KEY];
+    } catch {
+      return Promise.resolve().then(task);
+    }
+    const key = configWriteIdentity(plugin);
+    const prior = queues.get(key) || Promise.resolve();
+    const result = prior.then(task, task);
+    const tail = result.then(() => void 0, () => void 0);
+    queues.set(key, tail);
+    void tail.then(() => {
+      if (queues.get(key) === tail) queues.delete(key);
+    });
+    return result;
+  }
+  __name(queuePluginConfigWrite, "queuePluginConfigWrite");
   function readPluginVersion(conf, fallback = "0.0.1") {
     if (!conf || typeof conf !== "object") return fallback;
     if (typeof conf.version === "string" && conf.version) return conf.version;
@@ -2593,6 +2636,10 @@ ${report}
   }
   __name(resolveConfigApi, "resolveConfigApi");
   async function syncPluginVersionOnLoad(plugin, pluginVersion, customPatch = {}) {
+    return queuePluginConfigWrite(plugin, () => syncPluginVersionOnLoadNow(plugin, pluginVersion, customPatch));
+  }
+  __name(syncPluginVersionOnLoad, "syncPluginVersionOnLoad");
+  async function syncPluginVersionOnLoadNow(plugin, pluginVersion, customPatch = {}) {
     const api = await resolveConfigApi(plugin);
     if (!api) return;
     let conf = {};
@@ -2621,7 +2668,7 @@ ${report}
     } catch {
     }
   }
-  __name(syncPluginVersionOnLoad, "syncPluginVersionOnLoad");
+  __name(syncPluginVersionOnLoadNow, "syncPluginVersionOnLoadNow");
 
   // ../../shared/plugin-kill-switch.js
   var MARKER_SYNC_HORIZON_MS = 9e4;
@@ -2688,24 +2735,37 @@ ${report}
   }
   __name(readKillSwitch, "readKillSwitch");
   async function setPluginDisabled(plugin, disabled, pluginVersion, customPatch = {}) {
+    return queuePluginConfigWrite(plugin, () => setPluginDisabledNow(plugin, disabled, pluginVersion, customPatch));
+  }
+  __name(setPluginDisabled, "setPluginDisabled");
+  async function setPluginDisabledNow(plugin, disabled, pluginVersion, customPatch) {
     const api = await resolveConfigApi(plugin);
-    if (!api) return;
+    if (!api) return false;
     let conf = {};
     try {
       conf = api.getConfiguration?.() || plugin.getConfiguration?.() || {};
     } catch {
-      return;
+      return false;
     }
-    if (typeof conf.name !== "string" || !conf.name.trim()) return;
-    if (readKillSwitch(plugin) === disabled && isPluginDisabled(conf) === disabled) return;
+    if (typeof conf.name !== "string" || !conf.name.trim()) return false;
+    const custom = conf.custom && typeof conf.custom === "object" ? (
+      /** @type {Record<string, unknown>} */
+      conf.custom
+    ) : {};
+    const resolvedPatch = typeof customPatch === "function" ? customPatch(custom) : customPatch;
+    const patch = resolvedPatch && typeof resolvedPatch === "object" ? resolvedPatch : {};
+    if (!Object.keys(patch).length && readKillSwitch(plugin) === disabled && isPluginDisabled(conf) === disabled) return true;
     writeKillSwitchMarker(plugin, disabled);
     try {
-      await api.saveConfiguration(configWithPluginVersion(conf, { ...customPatch, pluginDisabled: disabled }, pluginVersion));
+      const result = await api.saveConfiguration(configWithPluginVersion(conf, { ...patch, pluginDisabled: disabled }, pluginVersion));
+      if (result === false) throw new Error("Thymer rejected the config save.");
+      return true;
     } catch {
       clearKillSwitchMarker(plugin);
+      return false;
     }
   }
-  __name(setPluginDisabled, "setPluginDisabled");
+  __name(setPluginDisabledNow, "setPluginDisabledNow");
 
   // ../../shared/plugin-settings.js
   function createSettingsStore(plugin, {
@@ -2721,7 +2781,9 @@ ${report}
     const pickSyncedSubset = pickSynced || ((s) => s);
     let current = {};
     let dirty = false;
-    let saveInFlight = false;
+    let editRevision = 0;
+    let localUnavailable = false;
+    let writeChain = Promise.resolve();
     let flushTimer = null;
     let settleTimer = null;
     const fnv1a = /* @__PURE__ */ __name((s) => {
@@ -2732,7 +2794,7 @@ ${report}
       }
       return (h2 >>> 0).toString(36);
     }, "fnv1a");
-    const computeDeviceKey = /* @__PURE__ */ __name(() => {
+    const deviceIdentityParts = /* @__PURE__ */ __name(() => {
       try {
         const n = (
           /** @type {any} */
@@ -2741,20 +2803,44 @@ ${report}
         const ua = String(n.userAgent || "");
         const isApp = /electron/i.test(ua);
         const os = /android/i.test(ua) ? "android" : /iphone|ipad|ios/i.test(ua) ? "ios" : /linux/i.test(ua) ? "linux" : /mac|darwin/i.test(ua) ? "mac" : /win/i.test(ua) ? "win" : "x";
-        return `${isApp ? "app" : "web"}-${os}-${fnv1a(`${ua}|${n.platform || ""}|${n.language || ""}`)}`;
+        return { n, ua, isApp, os };
       } catch {
-        return "device-x";
+        return { n: {}, ua: "", isApp: false, os: "x" };
       }
-    }, "computeDeviceKey");
-    const deviceKey = computeDeviceKey();
+    }, "deviceIdentityParts");
+    const identity = deviceIdentityParts();
+    const legacyDeviceKey = `${identity.isApp ? "app" : "web"}-${identity.os}-${fnv1a(`${identity.ua}|${identity.n.platform || ""}|${identity.n.language || ""}`)}`;
+    const stableFingerprint = `${identity.isApp ? "app" : "web"}-${identity.os}-${fnv1a(`${String(identity.ua).replace(/\d+(?:[._]\d+)*/g, "#")}|${identity.n.platform || ""}|${identity.n.language || ""}`)}`;
+    const persistentDeviceKey = /* @__PURE__ */ __name(() => {
+      const storageKey = "tps-settings-device-id";
+      try {
+        const existing = localStorage.getItem(storageKey);
+        if (existing && /^device-[a-z0-9-]+$/i.test(existing)) return existing;
+        let id = "";
+        try {
+          id = `device-${crypto.randomUUID()}`;
+        } catch {
+        }
+        if (!id) id = `device-${fnv1a(`${Date.now()}|${Math.random()}|${stableFingerprint}`)}`;
+        localStorage.setItem(storageKey, id);
+        if (localStorage.getItem(storageKey) === id) return id;
+      } catch {
+      }
+      return stableFingerprint;
+    }, "persistentDeviceKey");
+    const deviceKey = persistentDeviceKey();
     const asMap = /* @__PURE__ */ __name((bag) => {
       if (bag && typeof bag === "object" && bag.byDevice && typeof bag.byDevice === "object") {
-        return { shared: bag.shared, byDevice: { ...bag.byDevice } };
+        return {
+          shared: bag.shared,
+          byDevice: { ...bag.byDevice },
+          aliases: bag.aliases && typeof bag.aliases === "object" ? { ...bag.aliases } : {}
+        };
       }
       if (bag && typeof bag === "object" && Object.keys(bag).length) {
-        return { shared: bag, byDevice: {} };
+        return { shared: bag, byDevice: {}, aliases: {} };
       }
-      return { shared: void 0, byDevice: {} };
+      return { shared: void 0, byDevice: {}, aliases: {} };
     }, "asMap");
     const readCustom = /* @__PURE__ */ __name(() => {
       try {
@@ -2768,19 +2854,30 @@ ${report}
         return {};
       }
     }, "readCustom");
+    const resolveDeviceSlotKey = /* @__PURE__ */ __name((m) => {
+      if (Object.prototype.hasOwnProperty.call(m.byDevice, deviceKey)) return deviceKey;
+      const aliased = m.aliases[stableFingerprint];
+      if (aliased && Object.prototype.hasOwnProperty.call(m.byDevice, aliased)) return aliased;
+      if (Object.prototype.hasOwnProperty.call(m.byDevice, stableFingerprint)) return stableFingerprint;
+      if (Object.prototype.hasOwnProperty.call(m.byDevice, legacyDeviceKey)) return legacyDeviceKey;
+      return null;
+    }, "resolveDeviceSlotKey");
     const readSyncedDevice = /* @__PURE__ */ __name((custom) => {
       const m = asMap(readBag(custom));
-      if (Object.prototype.hasOwnProperty.call(m.byDevice, deviceKey)) return m.byDevice[deviceKey];
+      const slotKey = resolveDeviceSlotKey(m);
+      if (slotKey) return m.byDevice[slotKey];
       return m.shared ?? null;
     }, "readSyncedDevice");
     const prune = /* @__PURE__ */ __name((m) => {
       const out = { byDevice: m.byDevice };
       if (m.shared !== void 0) out.shared = m.shared;
+      if (Object.keys(m.aliases).length) out.aliases = m.aliases;
       return out;
     }, "prune");
     const buildDevicePatch = /* @__PURE__ */ __name((custom, subset) => {
       const m = asMap(readBag(custom));
       m.byDevice[deviceKey] = subset;
+      m.aliases[stableFingerprint] = deviceKey;
       return { [key]: prune(m) };
     }, "buildDevicePatch");
     const buildAllPatch = /* @__PURE__ */ __name((custom, subset) => {
@@ -2788,11 +2885,17 @@ ${report}
       m.shared = subset;
       for (const k of Object.keys(m.byDevice)) m.byDevice[k] = subset;
       m.byDevice[deviceKey] = subset;
+      m.aliases[stableFingerprint] = deviceKey;
       return { [key]: prune(m) };
     }, "buildAllPatch");
     const buildResetPatch = /* @__PURE__ */ __name((custom) => {
       const m = asMap(readBag(custom));
+      const resolved = resolveDeviceSlotKey(m);
+      if (resolved) delete m.byDevice[resolved];
       delete m.byDevice[deviceKey];
+      delete m.byDevice[stableFingerprint];
+      delete m.byDevice[legacyDeviceKey];
+      delete m.aliases[stableFingerprint];
       return { [key]: prune(m) };
     }, "buildResetPatch");
     const normalizedStringify = /* @__PURE__ */ __name((raw) => JSON.stringify(normalize(raw)), "normalizedStringify");
@@ -2812,9 +2915,10 @@ ${report}
       }
     }, "scope");
     const cacheKey = /* @__PURE__ */ __name(() => `${slug}/${workspaceGuid()}${scope()}/${deviceKey}/cache`, "cacheKey");
+    const legacyCacheKey = /* @__PURE__ */ __name(() => `${slug}/${workspaceGuid()}${scope()}/${legacyDeviceKey}/cache`, "legacyCacheKey");
     const readCache = /* @__PURE__ */ __name(() => {
       try {
-        const raw = localStorage.getItem(cacheKey());
+        const raw = localStorage.getItem(cacheKey()) ?? localStorage.getItem(legacyCacheKey());
         if (raw === null) return null;
         const parsed = JSON.parse(raw);
         return parsed && typeof parsed === "object" ? parsed : null;
@@ -2824,19 +2928,24 @@ ${report}
     }, "readCache");
     const writeCache = /* @__PURE__ */ __name((value) => {
       try {
-        localStorage.setItem(cacheKey(), value);
+        const keyName = cacheKey();
+        localStorage.setItem(keyName, value);
+        if (localStorage.getItem(keyName) !== value) throw new Error("localStorage read-back mismatch");
+        localUnavailable = false;
+        return true;
       } catch {
+        localUnavailable = true;
+        return false;
       }
     }, "writeCache");
     const clearCache = /* @__PURE__ */ __name(() => {
       try {
         localStorage.removeItem(cacheKey());
+        localStorage.removeItem(legacyCacheKey());
       } catch {
       }
     }, "clearCache");
-    const saveCustom = /* @__PURE__ */ __name(async (buildPatch) => {
-      if (saveInFlight) return false;
-      saveInFlight = true;
+    const saveCustomNow = /* @__PURE__ */ __name(async (buildPatch) => {
       try {
         const api = await resolveConfigApi(plugin);
         if (!api || typeof api.saveConfiguration !== "function") return false;
@@ -2849,14 +2958,22 @@ ${report}
         if (typeof conf.name !== "string" || !conf.name.trim()) return false;
         const custom = conf.custom && typeof conf.custom === "object" ? conf.custom : {};
         const patch = buildPatch(custom);
-        if (bagConverged(custom[key], patch[key])) return true;
-        await api.saveConfiguration(configWithPluginVersion(conf, patch, version));
+        const patchKeys = Object.keys(patch);
+        if (!patchKeys.length) return true;
+        const converged = patchKeys.every((patchKey) => patchKey === key ? bagConverged(custom[key], patch[key]) : JSON.stringify(custom[patchKey]) === JSON.stringify(patch[patchKey]));
+        if (converged) return true;
+        const result = await api.saveConfiguration(configWithPluginVersion(conf, patch, version));
+        if (result === false) return false;
         return true;
       } catch {
         return false;
-      } finally {
-        saveInFlight = false;
       }
+    }, "saveCustomNow");
+    const saveCustom = /* @__PURE__ */ __name((buildPatch) => {
+      const run = /* @__PURE__ */ __name(() => queuePluginConfigWrite(plugin, () => saveCustomNow(buildPatch)), "run");
+      const result = writeChain.then(run, run);
+      writeChain = result.then(() => void 0, () => void 0);
+      return result;
     }, "saveCustom");
     const bagConverged = /* @__PURE__ */ __name((a, b) => {
       const ma = asMap(a);
@@ -2866,6 +2983,7 @@ ${report}
       for (const k of keys) {
         if (normalizedStringify(ma.byDevice[k] || {}) !== normalizedStringify(mb.byDevice[k] || {})) return false;
       }
+      if (JSON.stringify(Object.entries(ma.aliases).sort()) !== JSON.stringify(Object.entries(mb.aliases).sort())) return false;
       return true;
     }, "bagConverged");
     const FLUSH_DELAY_MS = 4e3;
@@ -2877,13 +2995,15 @@ ${report}
     }, "cancelFlush");
     const flushDevice = /* @__PURE__ */ __name(async () => {
       cancelFlush();
-      if (!dirty) return;
+      if (!dirty) return true;
+      const revision = editRevision;
       const subset = pickSyncedSubset(normalize(current));
       const ok = await saveCustom((custom) => buildDevicePatch(custom, subset));
-      if (ok) {
+      if (ok && editRevision === revision) {
         dirty = false;
         clearCache();
-      }
+      } else if (dirty) scheduleFlush();
+      return ok;
     }, "flushDevice");
     const scheduleFlush = /* @__PURE__ */ __name(() => {
       cancelFlush();
@@ -2899,7 +3019,9 @@ ${report}
        * re-flushed. Read-only w.r.t. the synced config.
        */
       load() {
-        const synced = normalize(readSyncedDevice(readCustom()) || {});
+        if (dirty) return { settings: current, diverged: this.isDiverged() };
+        const custom = readCustom();
+        const synced = normalize(readSyncedDevice(custom) || {});
         const cached = readCache();
         if (cached && normalizedStringify(cached) !== JSON.stringify(synced)) {
           current = normalize(cached);
@@ -2909,6 +3031,13 @@ ${report}
           current = synced;
           dirty = false;
           if (cached) clearCache();
+          const resolved = resolveDeviceSlotKey(asMap(readBag(custom)));
+          if (resolved && resolved !== deviceKey) {
+            dirty = true;
+            editRevision += 1;
+            if (writeCache(JSON.stringify(current))) scheduleFlush();
+            else void flushDevice();
+          }
         }
         return { settings: current, diverged: this.isDiverged() };
       },
@@ -2920,9 +3049,29 @@ ${report}
         const shared = asMap(readBag(readCustom())).shared;
         return normalizedStringify(shared || {}) !== JSON.stringify(normalize(current));
       },
-      /** Retained for API compat; localStorage is no longer the durability path. */
+      /** True when the immediate recovery journal could not be verified. */
       isLocalUnavailable() {
-        return false;
+        return localUnavailable;
+      },
+      /**
+       * Lossless migration/recovery entry point. The normalized value is journaled
+       * through the store's real cache key and retried to synced config; callers
+       * never need to know or recreate that private key.
+       */
+      recover(raw) {
+        const next = normalize(raw);
+        const synced = normalize(readSyncedDevice(readCustom()) || {});
+        if (JSON.stringify(next) === JSON.stringify(synced)) return false;
+        current = next;
+        dirty = true;
+        editRevision += 1;
+        if (writeCache(JSON.stringify(current))) scheduleFlush();
+        else void flushDevice();
+        return true;
+      },
+      /** Force this device's pending settings into its durable synced slot. */
+      flush() {
+        return flushDevice();
       },
       /**
        * Apply an edit to THIS device: update memory, cache locally for instant UI,
@@ -2932,8 +3081,9 @@ ${report}
       update(patch) {
         current = normalize({ ...current, ...patch });
         dirty = true;
-        writeCache(JSON.stringify(current));
-        scheduleFlush();
+        editRevision += 1;
+        if (writeCache(JSON.stringify(current))) scheduleFlush();
+        else void flushDevice();
         return { settings: current, diverged: this.isDiverged() };
       },
       /**
@@ -2942,12 +3092,14 @@ ${report}
        * (This is the header pill's ↑ action.)
        */
       async pushToAll() {
+        cancelFlush();
+        const revision = editRevision;
         const subset = pickSyncedSubset(normalize(current));
         const ok = await saveCustom((custom) => buildAllPatch(custom, subset));
-        if (ok) {
+        if (ok && editRevision === revision) {
           dirty = false;
           clearCache();
-        }
+        } else if (dirty) scheduleFlush();
         return ok;
       },
       /**
@@ -2957,27 +3109,62 @@ ${report}
        */
       discardLocal() {
         cancelFlush();
-        dirty = false;
-        clearCache();
-        void saveCustom((custom) => buildResetPatch(custom));
         const shared = asMap(readBag(readCustom())).shared;
         current = normalize(shared || {});
+        dirty = true;
+        editRevision += 1;
+        const revision = editRevision;
+        writeCache(JSON.stringify(current));
+        void saveCustom((custom) => buildResetPatch(custom)).then((ok) => {
+          if (ok && editRevision === revision) {
+            dirty = false;
+            clearCache();
+          } else if (dirty) scheduleFlush();
+        });
         return current;
       },
       /**
-       * For folding into `setPluginDisabled(plugin, off, version, customPatch)` so a
-       * kill-switch toggle carries this device's staged settings in the SAME save
-       * (one reload, no race). Returns the device-slot patch when dirty.
+       * Persist sibling custom data and this device's pending settings in one
+       * serialized save. Data-owning plugins use this instead of manually
+       * snapshotting the settings bag from a potentially stale config instance.
        */
-      pendingCustomPatch() {
-        if (!dirty) return {};
-        const subset = pickSyncedSubset(normalize(current));
-        return buildDevicePatch(readCustom(), subset);
-      },
-      markFlushed() {
+      async saveCustomPatch(extraPatch = {}) {
         cancelFlush();
-        dirty = false;
-        clearCache();
+        const revision = editRevision;
+        const hadDirty = dirty;
+        const subset = hadDirty ? pickSyncedSubset(normalize(current)) : null;
+        const ok = await saveCustom((custom) => ({
+          ...typeof extraPatch === "function" ? extraPatch(custom) : extraPatch,
+          ...hadDirty ? buildDevicePatch(custom, subset) : {}
+        }));
+        if (ok && hadDirty && editRevision === revision) {
+          dirty = false;
+          clearCache();
+        } else if (dirty) scheduleFlush();
+        return ok;
+      },
+      /**
+       * The canonical settings-aware kill switch. Pending device settings and any
+       * sibling data patch land atomically with pluginDisabled, and recovery is
+       * cleared only after Thymer confirms the save.
+       */
+      async setDisabled(disabled, extraPatch = {}) {
+        cancelFlush();
+        const revision = editRevision;
+        const hadDirty = dirty;
+        const subset = hadDirty ? pickSyncedSubset(normalize(current)) : null;
+        const run = /* @__PURE__ */ __name(() => setPluginDisabled(plugin, disabled, version, (custom) => ({
+          ...extraPatch,
+          ...hadDirty ? buildDevicePatch(custom, subset) : {}
+        })), "run");
+        const okPromise = writeChain.then(run, run);
+        writeChain = okPromise.then(() => void 0, () => void 0);
+        const ok = await okPromise;
+        if (ok && hadDirty && editRevision === revision) {
+          dirty = false;
+          clearCache();
+        } else if (dirty) scheduleFlush();
+        return ok;
       },
       /**
        * Post-push pill settle. A successful push saves the config, which reloads
@@ -3386,7 +3573,7 @@ ${report}
   // api-costs.js
   var RECALL_PAYG_RECORDING_PER_HOUR_USD = 0.5;
   var RECALL_TRANSCRIPTION_PER_HOUR_USD = 0.15;
-  var PRICING_VERIFIED_DATE = "July 16, 2026";
+  var PRICING_VERIFIED_DATE = "July 18, 2026";
   var CLAUDE_ESTIMATE_INPUT_TOKENS = 12e3;
   var CLAUDE_ESTIMATE_OUTPUT_TOKENS = 1500;
   var SONNET_5_STANDARD_PRICE_START = Date.UTC(2026, 8, 1);
@@ -3749,7 +3936,7 @@ ${report}
   __name(formatRelativeTime, "formatRelativeTime");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.13";
+  var PLUGIN_VERSION = "1.22.14";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -4048,7 +4235,7 @@ ${report}
     onLoad() {
       pingInstall("recall-ai");
       pingActive("recall-ai");
-      void this._safeAsync("sync plugin version and collection schema", async () => {
+      this._configReady = this._safeAsync("sync plugin version and collection schema", async () => {
         await syncPluginVersionOnLoad(this, PLUGIN_VERSION);
         await this._migrateCollectionSchema();
       });
@@ -4060,7 +4247,7 @@ ${report}
         this._prefs = this._settingsStore.load().settings;
         this._recomputeSettings();
       });
-      this._safe("promote api keys", () => void this._promoteLocalKeysToSlot());
+      this._safe("promote api keys", () => void this._configReady.then(() => this._promoteLocalKeysToSlot()));
       this._safe("inject css", () => {
         this.ui.injectCSS(PANEL_CSS);
         this.ui.injectCSS(this._css());
@@ -4470,9 +4657,15 @@ ${report}
     _writeLocalSecretsEntry(patch) {
       try {
         const next = normalizeSecrets({ ...this._loadLocalSecrets(), ...patch });
-        localStorage.setItem(this._secretsStorageKey(), JSON.stringify(next));
+        const serialized = JSON.stringify(next);
+        localStorage.setItem(this._secretsStorageKey(), serialized);
+        if (localStorage.getItem(this._secretsStorageKey()) !== serialized) {
+          throw new Error("Local storage did not retain the write.");
+        }
+        return true;
       } catch (err) {
         this._toast("Unable to save on this device", this._errorMessage(err));
+        return false;
       }
     }
     /** The current user's guid — the official `getActiveUsers()[0]` SDK idiom. */
@@ -4524,22 +4717,11 @@ ${report}
     async _writeSecretsSlot(userGuid, keys) {
       if (!userGuid) return false;
       try {
-        const api = await resolveConfigApi(this);
-        if (!api || typeof api.saveConfiguration !== "function") return false;
-        let conf = {};
-        try {
-          conf = (api.getConfiguration ? api.getConfiguration() : null) || (this.getConfiguration ? this.getConfiguration() : null) || {};
-        } catch {
-          return false;
-        }
-        if (typeof conf.name !== "string" || !conf.name.trim()) return false;
-        const custom = conf.custom && typeof conf.custom === "object" ? conf.custom : {};
-        const map = custom[SECRETS_CONFIG_KEY] && typeof custom[SECRETS_CONFIG_KEY] === "object" ? custom[SECRETS_CONFIG_KEY] : {};
         const nextSlot = normalizeKeySlot(keys);
-        if (JSON.stringify(normalizeKeySlot(map[userGuid])) === JSON.stringify(nextSlot)) return true;
-        const nextMap = { ...map, [userGuid]: nextSlot };
-        await api.saveConfiguration(configWithPluginVersion(conf, { [SECRETS_CONFIG_KEY]: nextMap }, PLUGIN_VERSION));
-        return true;
+        return await this._settingsStore.saveCustomPatch((custom) => {
+          const map = custom[SECRETS_CONFIG_KEY] && typeof custom[SECRETS_CONFIG_KEY] === "object" ? custom[SECRETS_CONFIG_KEY] : {};
+          return { [SECRETS_CONFIG_KEY]: { ...map, [userGuid]: nextSlot } };
+        });
       } catch {
         return false;
       }
@@ -4609,9 +4791,9 @@ ${report}
      * One-time migration (≤1.2.0 → 1.3.0): settings used to live in a single
      * device-local blob at `recallAi/<ws>/<coll>/settings`, secrets included,
      * with nothing synced. Split it — secrets into the local-only secrets
-     * entry, prefs into the shared store's device blob (so this device comes
-     * up "This device"-diverged with its prior settings intact, losslessly) —
-     * then delete the legacy key.
+     * entry, prefs through the shared store's public recovery path (so cache-key
+     * changes cannot strand a migration), then delete the legacy key only after
+     * the durable config write is confirmed.
      */
     _migrateLegacyLocalSettings() {
       let workspace = "";
@@ -4643,17 +4825,18 @@ ${report}
           localStorage.setItem(this._secretsStorageKey(), JSON.stringify(secrets));
         }
         const prefs = normalizePrefs(legacy);
-        let synced = null;
-        try {
-          const conf = this.getConfiguration ? this.getConfiguration() : {};
-          synced = conf && conf.custom ? conf.custom[CONFIG_KEY] : null;
-        } catch {
+        const recovered = this._settingsStore.recover(prefs);
+        if (!recovered) {
+          localStorage.removeItem(legacyKey);
+          return;
         }
-        const storeKey = `recall-ai/${workspace || "default"}/${collection || "collection"}/settings`;
-        if (JSON.stringify(prefs) !== JSON.stringify(normalizePrefs(synced)) && localStorage.getItem(storeKey) === null) {
-          localStorage.setItem(storeKey, JSON.stringify(prefs));
-        }
-        localStorage.removeItem(legacyKey);
+        void Promise.resolve(this._configReady).then(() => this._settingsStore.flush()).then((ok) => {
+          if (!ok) return;
+          try {
+            localStorage.removeItem(legacyKey);
+          } catch {
+          }
+        });
       } catch {
       }
     }
@@ -6326,6 +6509,9 @@ ${transcriptText}` }]
      * removed from views; their stored values remain recoverable in the collection configuration.
      */
     async _migrateCollectionSchema() {
+      return queuePluginConfigWrite(this, () => this._migrateCollectionSchemaNow());
+    }
+    async _migrateCollectionSchemaNow() {
       const api = await resolveConfigApi(this);
       if (!api || typeof api.saveConfiguration !== "function") return;
       const live = api.getConfiguration?.() || this.getConfiguration?.() || {};
@@ -6635,7 +6821,7 @@ ${transcriptText}` }]
           killSwitch: {
             on: !this._disabled,
             onToggle: /* @__PURE__ */ __name((nextOn) => {
-              void setPluginDisabled(this, !nextOn, PLUGIN_VERSION);
+              void this._settingsStore.setDisabled(!nextOn);
             }, "onToggle")
           },
           feedback: { data: this.data }
@@ -7378,6 +7564,10 @@ ${transcriptText}` }]
      * `saveConfiguration` reloads the plugin; the panel re-mounts itself in `onLoad`.
      */
     async _createCollectionField(canonicalId) {
+      return queuePluginConfigWrite(this, () => this._createCollectionFieldNow(canonicalId));
+    }
+    /** @param {string} canonicalId */
+    async _createCollectionFieldNow(canonicalId) {
       const def = FIELD_DEFS[canonicalId];
       if (!def) return;
       try {
