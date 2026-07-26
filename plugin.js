@@ -2151,7 +2151,9 @@ ${report}
   __name(appendChildren, "appendChildren");
   function panel({ pluginClass } = {}, children = []) {
     const cls = ["tps-panel", pluginClass].filter(Boolean).join(" ");
-    return h("div", { class: cls }, ...children);
+    const root = h("div", { class: cls }, ...children);
+    restoreSectionState(root, pluginClass || "");
+    return root;
   }
   __name(panel, "panel");
   function pluginHeader({
@@ -2440,7 +2442,46 @@ ${report}
     });
   }
   __name(pluginHeaderFromConfig, "pluginHeaderFromConfig");
-  function section({ label, hint, collapsible, defaultOpen = true, open, onToggle, summary, body = [] }) {
+  var SECTION_STATE = (() => {
+    const g = (
+      /** @type {Record<string, any>} */
+      /** @type {unknown} */
+      globalThis
+    );
+    if (!g.__tpsSectionState) g.__tpsSectionState = /* @__PURE__ */ new Map();
+    return (
+      /** @type {Map<string, boolean>} */
+      g.__tpsSectionState
+    );
+  })();
+  function sectionStateKey(el2, key) {
+    const scope = (
+      /** @type {HTMLElement} */
+      el2.dataset.sectionScope || ""
+    );
+    return scope + "::" + key;
+  }
+  __name(sectionStateKey, "sectionStateKey");
+  function restoreSectionState(root, scope) {
+    const nodes = root.querySelectorAll(".tps-section--collapsible[data-section-key]");
+    for (const node of nodes) {
+      const el2 = (
+        /** @type {HTMLElement} */
+        node
+      );
+      el2.dataset.sectionScope = scope;
+      const key = el2.dataset.sectionKey || "";
+      const remembered = SECTION_STATE.get(sectionStateKey(el2, key));
+      if (remembered === void 0) continue;
+      const apply = (
+        /** @type {any} */
+        el2._tpsSetOpen
+      );
+      if (typeof apply === "function") apply(remembered, true);
+    }
+  }
+  __name(restoreSectionState, "restoreSectionState");
+  function section({ label, hint, collapsible, defaultOpen = true, open, onToggle, persistKey, summary, body = [] }) {
     const bodyChildren = Array.isArray(body) ? body : [body];
     const bodyEl = h("div", { class: "tps-section-body" }, ...bodyChildren);
     if (!collapsible) {
@@ -2455,7 +2496,9 @@ ${report}
     const initialOpen = open == null ? !!defaultOpen : !!open;
     const sectionEl = h("section", {
       class: "tps-section tps-section--collapsible",
-      dataset: { open: String(initialOpen) }
+      // `open` is the controlled form — a caller driving it owns the state, so
+      // that case opts out of the remembered-state machinery entirely.
+      dataset: open == null ? { open: String(initialOpen), sectionKey: persistKey || label } : { open: String(initialOpen) }
     });
     const chev = h("span", { class: "tps-section-chev", "aria-hidden": "true" }, "\u25B8");
     const labelEl = h("span", { class: "tps-section-label" }, label);
@@ -2468,12 +2511,16 @@ ${report}
       if (typeof content === "string") summaryEl.textContent = content;
       else summaryEl.appendChild(content);
     }, "paintSummary");
-    const setOpen = /* @__PURE__ */ __name((nextOpen) => {
+    const setOpen = /* @__PURE__ */ __name((nextOpen, restoring) => {
       sectionEl.dataset.open = String(nextOpen);
       header.setAttribute("aria-expanded", String(nextOpen));
       paintSummary(nextOpen);
+      if (!restoring && sectionEl.dataset.sectionKey != null) {
+        SECTION_STATE.set(sectionStateKey(sectionEl, sectionEl.dataset.sectionKey), nextOpen);
+      }
       if (onToggle) onToggle(nextOpen);
     }, "setOpen");
+    sectionEl._tpsSetOpen = setOpen;
     const header = h("button", {
       type: "button",
       class: "tps-section-header",
@@ -2783,6 +2830,7 @@ ${report}
     let dirty = false;
     let editRevision = 0;
     let localUnavailable = false;
+    let restoredFromMirror = false;
     let writeChain = Promise.resolve();
     let flushTimer = null;
     let settleTimer = null;
@@ -2945,6 +2993,45 @@ ${report}
       } catch {
       }
     }, "clearCache");
+    const mirrorKey = /* @__PURE__ */ __name(() => `${slug}/${workspaceGuid()}${scope()}/mirror`, "mirrorKey");
+    const readMirror = /* @__PURE__ */ __name(() => {
+      try {
+        const raw = localStorage.getItem(mirrorKey());
+        if (raw === null) return null;
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch {
+        return null;
+      }
+    }, "readMirror");
+    const writeMirror = /* @__PURE__ */ __name((bag) => {
+      try {
+        const m = asMap(bag);
+        if (m.shared === void 0 && !Object.keys(m.byDevice).length) return;
+        localStorage.setItem(mirrorKey(), JSON.stringify(prune(m)));
+      } catch {
+      }
+    }, "writeMirror");
+    const recoveryFlagKey = /* @__PURE__ */ __name(() => `tps-settings-recovered/${slug}/${workspaceGuid()}${scope()}`, "recoveryFlagKey");
+    const recoveryAttempted = /* @__PURE__ */ __name(() => {
+      try {
+        return sessionStorage.getItem(recoveryFlagKey()) === "1";
+      } catch {
+        return false;
+      }
+    }, "recoveryAttempted");
+    const markRecoveryAttempted = /* @__PURE__ */ __name(() => {
+      try {
+        sessionStorage.setItem(recoveryFlagKey(), "1");
+      } catch {
+      }
+    }, "markRecoveryAttempted");
+    const bagIsAbsent = /* @__PURE__ */ __name((custom) => {
+      const bag = readBag(custom);
+      if (!bag || typeof bag !== "object") return true;
+      const m = asMap(bag);
+      return m.shared === void 0 && !Object.keys(m.byDevice).length;
+    }, "bagIsAbsent");
     const saveCustomNow = /* @__PURE__ */ __name(async (buildPatch) => {
       try {
         const api = await resolveConfigApi(plugin);
@@ -2961,9 +3048,13 @@ ${report}
         const patchKeys = Object.keys(patch);
         if (!patchKeys.length) return true;
         const converged = patchKeys.every((patchKey) => patchKey === key ? bagConverged(custom[key], patch[key]) : JSON.stringify(custom[patchKey]) === JSON.stringify(patch[patchKey]));
-        if (converged) return true;
+        if (converged) {
+          if (patch[key] !== void 0) writeMirror(patch[key]);
+          return true;
+        }
         const result = await api.saveConfiguration(configWithPluginVersion(conf, patch, version));
         if (result === false) return false;
+        if (patch[key] !== void 0) writeMirror(patch[key]);
         return true;
       } catch {
         return false;
@@ -3020,7 +3111,16 @@ ${report}
        */
       load() {
         if (dirty) return { settings: current, diverged: this.isDiverged() };
-        const custom = readCustom();
+        let custom = readCustom();
+        if (bagIsAbsent(custom)) {
+          const mirrored = readMirror();
+          if (mirrored && !recoveryAttempted()) {
+            markRecoveryAttempted();
+            restoredFromMirror = true;
+            void saveCustomNow(() => ({ [key]: prune(asMap(mirrored)) }));
+            custom = { ...custom, [key]: prune(asMap(mirrored)) };
+          }
+        }
         const synced = normalize(readSyncedDevice(custom) || {});
         const cached = readCache();
         if (cached && normalizedStringify(cached) !== JSON.stringify(synced)) {
@@ -3030,6 +3130,7 @@ ${report}
         } else {
           current = synced;
           dirty = false;
+          writeMirror(readBag(custom));
           if (cached) clearCache();
           const resolved = resolveDeviceSlotKey(asMap(readBag(custom)));
           if (resolved && resolved !== deviceKey) {
@@ -3052,6 +3153,15 @@ ${report}
       /** True when the immediate recovery journal could not be verified. */
       isLocalUnavailable() {
         return localUnavailable;
+      },
+      /**
+       * True when this load found the synced settings gone and rebuilt them from
+       * the durable local mirror. Worth surfacing to the user — a silent recovery
+       * hides that something wiped their config, and they should know to check
+       * whatever did it.
+       */
+      wasRestoredFromMirror() {
+        return restoredFromMirror;
       },
       /**
        * Lossless migration/recovery entry point. The normalized value is journaled
@@ -3936,7 +4046,7 @@ ${report}
   __name(formatRelativeTime, "formatRelativeTime");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.14";
+  var PLUGIN_VERSION = "1.22.15";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -4726,27 +4836,39 @@ ${report}
         return false;
       }
     }
-    /** Once the synced slot owns the keys, the local fallback copy goes away (image stays). */
-    _stripLocalKeyFields() {
-      const local = this._loadLocalSecrets();
-      if (!local.recallApiKey && !local.anthropicApiKey) return;
-      this._writeLocalSecretsEntry({ recallApiKey: "", anthropicApiKey: "" });
+    /**
+     * Keep a device-local copy of the API keys, mirroring whatever the synced
+     * slot now holds.
+     *
+     * This used to STRIP the local copy once the slot owned the keys, on the
+     * reasoning that one source of truth is cleaner. It is — right until
+     * something replaces `conf.custom` wholesale, at which point the slot is
+     * gone and the key is unrecoverable. Unlike a preference the user cannot
+     * reconstruct it; they have to go and re-issue a credential.
+     *
+     * So the copy stays, as a durable mirror. `_loadSecrets` only reaches for it
+     * when there is NO slot at all, so it cannot outvote a live slot — and
+     * because a CLEARED key mirrors an empty string here too, clearing still
+     * works rather than being resurrected on the next load.
+     * @param {{recallApiKey?: string, anthropicApiKey?: string}} keys
+     */
+    _mirrorKeysLocally(keys) {
+      this._writeLocalSecretsEntry({
+        recallApiKey: keys && keys.recallApiKey || "",
+        anthropicApiKey: keys && keys.anthropicApiKey || ""
+      });
     }
     /**
      * Commit point for API-key edits (key input `change`, i.e. blur/Enter —
-     * NEVER per keystroke: the save reloads the plugin). Synced slot when a
-     * user is resolvable; device-local entry otherwise or when the save fails
-     * (offline), so a typed key is never lost.
+     * NEVER per keystroke: the save reloads the plugin). Writes the synced slot
+     * when a user is resolvable, and mirrors locally either way, so a typed key
+     * survives an offline save, a failed save, and a wiped `conf.custom`.
      */
     async _commitApiKeys() {
       const keys = { recallApiKey: this._secrets.recallApiKey, anthropicApiKey: this._secrets.anthropicApiKey };
       const userGuid = this._currentUserGuid();
-      const synced = userGuid ? await this._writeSecretsSlot(userGuid, keys) : false;
-      if (synced) {
-        this._stripLocalKeyFields();
-      } else {
-        this._writeLocalSecretsEntry(keys);
-      }
+      if (userGuid) await this._writeSecretsSlot(userGuid, keys);
+      this._mirrorKeysLocally(keys);
     }
     /**
      * One-time promotion (≤1.3.0 device-local keys → per-user synced slot).
@@ -4758,13 +4880,13 @@ ${report}
     async _promoteLocalKeysToSlot() {
       const userGuid = this._currentUserGuid();
       if (!userGuid) return;
-      const local = this._loadLocalSecrets();
-      if (!local.recallApiKey && !local.anthropicApiKey) return;
       const slot = this._readSecretsSlot(userGuid);
       if (slot && (slot.recallApiKey || slot.anthropicApiKey)) {
-        this._stripLocalKeyFields();
+        this._mirrorKeysLocally(slot);
         return;
       }
+      const local = this._loadLocalSecrets();
+      if (!local.recallApiKey && !local.anthropicApiKey) return;
       try {
         let workspace = "";
         try {
@@ -4785,7 +4907,7 @@ ${report}
         recallApiKey: local.recallApiKey,
         anthropicApiKey: local.anthropicApiKey
       });
-      if (ok) this._stripLocalKeyFields();
+      if (ok) this._mirrorKeysLocally(local);
     }
     /**
      * One-time migration (≤1.2.0 → 1.3.0): settings used to live in a single
