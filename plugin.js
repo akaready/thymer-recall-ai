@@ -3574,6 +3574,39 @@ ${report}
     { role: BODY_ROLES.NOTES, headingTextKey: "notesHeadingText", headingLevelKey: "notesHeadingLevel", fallbackText: "\u{1F5D2}\uFE0F Notes", fallbackLevel: "h2" },
     { role: BODY_ROLES.TRANSCRIPT, headingTextKey: "transcriptHeadingText", headingLevelKey: "transcriptHeadingLevel", fallbackText: "\u{1F399}\uFE0F Transcript", fallbackLevel: "h2" }
   ]);
+  var DEFAULT_BODY_SECTION_ORDER = "Summary, Action items, Notes, Transcript";
+  var BODY_SECTION_ALIASES = Object.freeze({
+    summary: BODY_ROLES.SUMMARY,
+    summary_root: BODY_ROLES.SUMMARY,
+    "action items": BODY_ROLES.ACTION_ITEMS,
+    action_items: BODY_ROLES.ACTION_ITEMS,
+    action_items_root: BODY_ROLES.ACTION_ITEMS,
+    notes: BODY_ROLES.NOTES,
+    notes_root: BODY_ROLES.NOTES,
+    transcript: BODY_ROLES.TRANSCRIPT,
+    transcript_root: BODY_ROLES.TRANSCRIPT
+  });
+  function recordCollectionGuid(record) {
+    if (!record) return "";
+    try {
+      const coll = typeof record.getCollection === "function" ? record.getCollection() : record.collection;
+      if (coll && typeof coll.getGuid === "function") {
+        const guid = coll.getGuid();
+        if (guid) return String(guid);
+      }
+    } catch {
+    }
+    const raw = record.collection_guid || record.collectionGuid || "";
+    return raw ? String(raw) : "";
+  }
+  __name(recordCollectionGuid, "recordCollectionGuid");
+  function isOwnedMeetingRecord(record, collectionGuid, indexedGuids = null) {
+    if (!record || !record.guid || !collectionGuid) return false;
+    const recColl = recordCollectionGuid(record);
+    if (recColl) return recColl === String(collectionGuid);
+    return !!(indexedGuids && typeof indexedGuids.has === "function" && indexedGuids.has(record.guid));
+  }
+  __name(isOwnedMeetingRecord, "isOwnedMeetingRecord");
   function lineItemPlainText(line) {
     if (!line) return "";
     const segs = Array.isArray(line.segments) ? line.segments : [];
@@ -3596,6 +3629,99 @@ ${report}
     return String(headingText || "").replace(/\p{Extended_Pictographic}/gu, "").replace(/\uFE0F/g, "").replace(/\s+/g, " ").trim().toLowerCase();
   }
   __name(headingSearchLabel, "headingSearchLabel");
+  function parseBodySectionOrder(raw, extraAliases = {}) {
+    const parts = String(raw || "").split(",").map((part) => headingSearchLabel(part)).filter(Boolean);
+    if (parts.length !== BODY_SECTION_ORDER.length) return null;
+    const roles = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const part of parts) {
+      const role = BODY_SECTION_ALIASES[part] || extraAliases[part] || "";
+      if (!role || seen.has(role)) return null;
+      seen.add(role);
+      roles.push(role);
+    }
+    return seen.size === BODY_SECTION_ORDER.length ? roles : null;
+  }
+  __name(parseBodySectionOrder, "parseBodySectionOrder");
+  function normalizeBodySectionOrder(raw) {
+    const roles = parseBodySectionOrder(raw);
+    if (!roles) return DEFAULT_BODY_SECTION_ORDER;
+    const labels = {
+      [BODY_ROLES.SUMMARY]: "Summary",
+      [BODY_ROLES.ACTION_ITEMS]: "Action items",
+      [BODY_ROLES.NOTES]: "Notes",
+      [BODY_ROLES.TRANSCRIPT]: "Transcript"
+    };
+    return roles.map((role) => labels[role]).join(", ");
+  }
+  __name(normalizeBodySectionOrder, "normalizeBodySectionOrder");
+  function orderedBodySectionSpecs(orderRoles) {
+    const byRole = new Map(BODY_SECTION_ORDER.map((spec) => [spec.role, spec]));
+    const roles = Array.isArray(orderRoles) && orderRoles.length ? orderRoles : BODY_SECTION_ORDER.map((spec) => spec.role);
+    const ordered = [];
+    for (const role of roles) {
+      const spec = byRole.get(role);
+      if (spec) ordered.push(spec);
+    }
+    return ordered.length === BODY_SECTION_ORDER.length ? ordered : BODY_SECTION_ORDER.slice();
+  }
+  __name(orderedBodySectionSpecs, "orderedBodySectionSpecs");
+  function headingHasDescendantText(items, rootGuid) {
+    return !!notesTextFromItems(items, rootGuid);
+  }
+  __name(headingHasDescendantText, "headingHasDescendantText");
+  function lineLooksLikeSkeletonHeading(line, spec) {
+    if (!line || !spec) return false;
+    if (String(lineMeta(line, LINE_META.ROLE) || "") === spec.role) return true;
+    const text = lineItemPlainText(line);
+    return (Array.isArray(spec.texts) ? spec.texts : []).some((expected) => {
+      const want = String(expected || "").trim();
+      return !!want && text === want;
+    });
+  }
+  __name(lineLooksLikeSkeletonHeading, "lineLooksLikeSkeletonHeading");
+  function emptyLeakedSkeletonGuids(items, recordGuid, specs) {
+    const list2 = Array.isArray(items) ? items : [];
+    const rec = String(recordGuid || "");
+    if (!rec || !Array.isArray(specs) || !specs.length) return [];
+    const guids = [];
+    for (const spec of specs) {
+      const heading = list2.find((line) => String(line && line.parent_guid || "") === rec && lineLooksLikeSkeletonHeading(line, spec));
+      if (!heading || !heading.guid) continue;
+      if (headingHasDescendantText(list2, heading.guid)) continue;
+      guids.push(String(heading.guid));
+    }
+    return guids;
+  }
+  __name(emptyLeakedSkeletonGuids, "emptyLeakedSkeletonGuids");
+  function planHeadingFormatRepair(items, recordGuid, specs) {
+    const list2 = Array.isArray(items) ? items : [];
+    const rec = String(recordGuid || "");
+    const top = list2.filter((line) => line && String(line.parent_guid || "") === rec);
+    const chosen = [];
+    const relabel = [];
+    const missingRoles = [];
+    for (const spec of Array.isArray(specs) ? specs : []) {
+      const matches = top.filter((line) => lineLooksLikeSkeletonHeading(line, spec));
+      const heading = matches.find((line) => String(lineMeta(line, LINE_META.ROLE) || "") === spec.role) || matches[0] || null;
+      const expectedText = String(spec.expectedText || "").trim();
+      if (!heading || !heading.guid) {
+        missingRoles.push(spec.role);
+        chosen.push({ role: spec.role, guid: null, expectedText });
+        continue;
+      }
+      chosen.push({ role: spec.role, guid: String(heading.guid), expectedText });
+      if (expectedText && lineItemPlainText(heading) !== expectedText) {
+        relabel.push({ guid: String(heading.guid), text: expectedText });
+      }
+    }
+    const present = new Set(chosen.map((slot) => slot.guid).filter(Boolean));
+    const currentOrder = top.filter((line) => present.has(String(line.guid))).map((line) => String(line.guid));
+    const desiredOrder = chosen.map((slot) => slot.guid).filter(Boolean);
+    const needsReorder = desiredOrder.length > 1 && currentOrder.join("\0") !== desiredOrder.join("\0");
+    return { relabel, missingRoles, chosen, needsReorder };
+  }
+  __name(planHeadingFormatRepair, "planHeadingFormatRepair");
   function guessHeadingByLabel(items, recordGuid, headingText) {
     const label = headingSearchLabel(headingText);
     if (!label || !recordGuid) return null;
@@ -4414,7 +4540,7 @@ ${report}
   __name(formatRelativeTime, "formatRelativeTime");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.23.2";
+  var PLUGIN_VERSION = "1.23.3";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -4523,7 +4649,8 @@ ${report}
     actionItemsHeadingText: "\u2705 Action items",
     actionItemsHeadingLevel: "h2",
     notesHeadingText: "\u{1F5D2}\uFE0F Notes",
-    notesHeadingLevel: "h2"
+    notesHeadingLevel: "h2",
+    bodySectionOrder: DEFAULT_BODY_SECTION_ORDER
   });
   var LEGACY_SUMMARY_PROMPTS = Object.freeze([
     "Summarize this meeting transcript for a Thymer note. Include: 1) a concise overview, 2) decisions made, 3) action items with owners when mentioned, and 4) open questions. Keep the output skimmable and factual.",
@@ -4588,7 +4715,8 @@ ${report}
       actionItemsHeadingText: str("actionItemsHeadingText"),
       actionItemsHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.actionItemsHeadingLevel) ? src.actionItemsHeadingLevel : DEFAULT_SETTINGS.actionItemsHeadingLevel,
       notesHeadingText: str("notesHeadingText"),
-      notesHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.notesHeadingLevel) ? src.notesHeadingLevel : DEFAULT_SETTINGS.notesHeadingLevel
+      notesHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.notesHeadingLevel) ? src.notesHeadingLevel : DEFAULT_SETTINGS.notesHeadingLevel,
+      bodySectionOrder: normalizeBodySectionOrder(src.bodySectionOrder)
     };
   }
   __name(normalizePrefs, "normalizePrefs");
@@ -4794,6 +4922,11 @@ ${report}
       this._healCommandItem = null;
       this._healInFlight = null;
       this._healRecordInFlight = /* @__PURE__ */ new Map();
+      this._cleanupCommandItem = null;
+      this._cleanupInFlight = null;
+      this._headingRepairButton = null;
+      this._headingRepairCommandItem = null;
+      this._headingRepairInFlight = null;
       this._editorObserver = null;
       this._observedRoot = null;
       this._attachRetryTimer = null;
@@ -4885,6 +5018,23 @@ ${report}
         label: "Meetings: Heal mashed summaries",
         icon: "tools",
         onSelected: /* @__PURE__ */ __name(() => void this._healMashedSummariesBulk(), "onSelected")
+      });
+      this._headingRepairButton = this.addCollectionNavigationButton({
+        label: "Apply heading format",
+        icon: "list",
+        tooltip: "Update this meeting\u2019s four section headings to the current labels and order. Does not rewrite Notes or Transcript content.",
+        onlyWhenExpanded: true,
+        onClick: /* @__PURE__ */ __name(({ record }) => void this._applyHeadingFormatForRecord(record), "onClick")
+      });
+      this._headingRepairCommandItem = this.ui.addCommandPaletteCommand({
+        label: "Meetings: Apply heading format",
+        icon: "list",
+        onSelected: /* @__PURE__ */ __name(() => void this._applyHeadingFormatBulk(), "onSelected")
+      });
+      this._cleanupCommandItem = this.ui.addCommandPaletteCommand({
+        label: "Meetings: Remove empty leaked skeleton from this page",
+        icon: "trash",
+        onSelected: /* @__PURE__ */ __name(() => void this._cleanupEmptySkeletonFromActivePage(), "onSelected")
       });
     }
     /**
@@ -5076,25 +5226,26 @@ ${report}
       this._handlerIds.push(on("panel.navigated", () => {
         this._attachEditorObserver();
         this._updateNavButtonForActiveRecord();
-        this._ensureActiveMeetingSkeleton();
       }));
       this._handlerIds.push(on("panel.focused", () => {
         this._attachEditorObserver();
         this._updateNavButtonForActiveRecord();
-        this._ensureActiveMeetingSkeleton();
       }));
       this._handlerIds.push(on("record.created", (ev) => {
         this._scheduleRecordRefresh();
-        let ours = false;
+        const selfGuid = this._selfGuid();
+        if (!selfGuid) return;
+        let collGuid = "";
         try {
           const coll = ev && typeof ev.getCollection === "function" ? ev.getCollection() : null;
-          const collGuid = coll && typeof coll.getGuid === "function" ? coll.getGuid() : "";
-          if (collGuid && collGuid !== this._selfGuid()) return;
-          if (collGuid && collGuid === this._selfGuid()) ours = true;
+          collGuid = coll && typeof coll.getGuid === "function" ? String(coll.getGuid() || "") : "";
         } catch {
         }
         const rec = ev && typeof ev.getRecord === "function" ? ev.getRecord() : null;
-        if (rec && (ours || this._isOurRecord(rec))) void this._ensureMeetingSkeleton(rec);
+        if (!collGuid && rec) collGuid = recordCollectionGuid(rec);
+        if (!collGuid || collGuid !== selfGuid) return;
+        if (rec && rec.guid) this._recordsByGuid.set(rec.guid, rec);
+        if (rec) void this._ensureMeetingSkeleton(rec);
       }));
       this._handlerIds.push(on("record.updated", () => {
         this._scheduleRecordRefresh();
@@ -5124,6 +5275,14 @@ ${report}
         this._healCommandItem.remove();
         this._healCommandItem = null;
       }
+      if (this._headingRepairCommandItem) {
+        this._headingRepairCommandItem.remove();
+        this._headingRepairCommandItem = null;
+      }
+      if (this._cleanupCommandItem) {
+        this._cleanupCommandItem.remove();
+        this._cleanupCommandItem = null;
+      }
       try {
         if (this._navButton && this._navButton.remove) this._navButton.remove();
       } catch {
@@ -5138,6 +5297,10 @@ ${report}
       }
       try {
         if (this._healButton && this._healButton.remove) this._healButton.remove();
+      } catch {
+      }
+      try {
+        if (this._headingRepairButton && this._headingRepairButton.remove) this._headingRepairButton.remove();
       } catch {
       }
       if (this._editorObserver) this._editorObserver.disconnect();
@@ -5159,6 +5322,8 @@ ${report}
       if (this._diagnosticsByRecord && this._diagnosticsByRecord.clear) this._diagnosticsByRecord.clear();
       this._setupDoctorInFlight = null;
       this._healInFlight = null;
+      this._cleanupInFlight = null;
+      this._headingRepairInFlight = null;
       this._workspaceCollectionsPromise = null;
       this._safe("strip inline buttons", () => this._stripInlineButtons());
     }
@@ -5537,6 +5702,7 @@ ${report}
         this._setField(record, FIELDS.LAST_ERROR, "Missing meeting URL.");
         return this._toast("Missing meeting URL", "Add a meeting link, or choose the correct URL field in Plugin: Meetings.");
       }
+      await this._ensureMeetingSkeleton(record);
       try {
         this._activeRecordGuid = record.guid || this._activeRecordGuid;
         this._setField(record, FIELDS.STATUS, "creating bot");
@@ -6187,36 +6353,44 @@ ${transcriptText}` }]
       return { text, level };
     }
     _isOurRecord(record) {
-      if (!record || !record.guid) return false;
-      if (this._recordsByGuid && this._recordsByGuid.has(record.guid)) return true;
-      try {
-        return !!(this._prop(record, FIELDS.STATUS) || this._prop(record, FIELDS.BOT_ID) || this._prop(record, FIELDS.MEETING_URL));
-      } catch {
-        return false;
-      }
+      return isOwnedMeetingRecord(record, this._selfGuid(), this._recordsByGuid);
     }
-    _ensureActiveMeetingSkeleton() {
-      try {
-        const panel2 = this.ui.getActivePanel && this.ui.getActivePanel();
-        const record = panel2 && panel2.getActiveRecord ? panel2.getActiveRecord() : null;
-        if (record && this._isOurRecord(record)) void this._ensureMeetingSkeleton(record);
-      } catch {
+    _bodySectionSpecs() {
+      const extra = {};
+      for (const spec of BODY_SECTION_ORDER) {
+        const label = headingSearchLabel(this._settings && this._settings[spec.headingTextKey] || spec.fallbackText);
+        if (label) extra[label] = spec.role;
       }
+      return orderedBodySectionSpecs(parseBodySectionOrder(this._settings && this._settings.bodySectionOrder, extra));
+    }
+    _cleanupHeadingSpecs() {
+      return BODY_SECTION_ORDER.map((spec) => {
+        const current = this._headingForSpec(spec).text;
+        return { role: spec.role, texts: [...new Set([spec.fallbackText, current].filter(Boolean))] };
+      });
+    }
+    _repairHeadingSpecs() {
+      return this._bodySectionSpecs().map((spec) => {
+        const { text } = this._headingForSpec(spec);
+        return { role: spec.role, expectedText: text, texts: [...new Set([spec.fallbackText, text].filter(Boolean))] };
+      });
     }
     /**
-     * Idempotent four-section outline (Summary, Action items, Notes, Transcript) on every meeting
-     * record. Skeleton headings are stamped TEMPLATE_OWNER; a real bot later restamps by role.
+     * Seed the four-section outline on a Meetings record this plugin owns.
+     * Never writes Journal or other collections. Existing headings are left in place;
+     * only missing section headings are inserted (new meetings / first bot join / body writers).
      * @param {any} record
      */
     async _ensureMeetingSkeleton(record) {
       if (this._disabled || !record || !record.guid) return;
+      if (!this._isOurRecord(record)) return;
       if (typeof record.insertFromMarkdown !== "function" || typeof record.getLineItems !== "function") return;
       if (!this._skeletonInFlight) this._skeletonInFlight = /* @__PURE__ */ new Map();
       return runCoalesced(this._skeletonInFlight, record.guid, async () => {
         let items = await record.getLineItems(false);
         if (!Array.isArray(items)) items = [];
         let afterPrevious = null;
-        for (const spec of BODY_SECTION_ORDER) {
+        for (const spec of this._bodySectionSpecs()) {
           let heading = findOwnedRole(items, spec.role);
           if (!heading) {
             const { text } = this._headingForSpec(spec);
@@ -7154,7 +7328,7 @@ ${recovered}`;
     _healDiagnosticsSection() {
       return section({
         label: "Diagnostics",
-        hint: "Debug repair for summaries that landed as one glued blob (Planningnn### Overview, literal \\n). Does not touch Notes or Transcript.",
+        hint: "Opt-in repairs. Heal mashed summaries and Apply heading format touch Meetings records only \u2014 never Journal or other collections. Remove leaked skeleton only deletes empty default headings on the page you have open.",
         body: [
           h(
             "div",
@@ -7171,9 +7345,189 @@ ${recovered}`;
             "span",
             { class: `${ROOT_CLASS}-field-hint` },
             "Scans every meeting in this collection. Already-healthy outlines are left alone. Same action as Meetings: Heal mashed summaries in the command palette."
+          ),
+          h(
+            "div",
+            { class: `${ROOT_CLASS}-field` },
+            button({
+              label: this._headingRepairInFlight ? "Updating headings\u2026" : "Apply heading format to meetings",
+              variant: "ghost",
+              size: "md",
+              disabled: !!this._headingRepairInFlight || !!this._disabled,
+              onClick: /* @__PURE__ */ __name(() => void this._applyHeadingFormatBulk(), "onClick")
+            })
+          ),
+          h(
+            "span",
+            { class: `${ROOT_CLASS}-field-hint` },
+            "Updates the four section headings on Meetings records to the current labels and order. Moves whole section blocks (Notes stay Notes). Does not rewrite body content or re-summarize. Same action as Meetings: Apply heading format."
+          ),
+          h(
+            "div",
+            { class: `${ROOT_CLASS}-field` },
+            button({
+              label: this._cleanupInFlight ? "Removing\u2026" : "Remove empty leaked skeleton from this page",
+              variant: "ghost",
+              size: "md",
+              disabled: !!this._cleanupInFlight || !!this._disabled,
+              onClick: /* @__PURE__ */ __name(() => void this._cleanupEmptySkeletonFromActivePage(), "onClick")
+            })
+          ),
+          h(
+            "span",
+            { class: `${ROOT_CLASS}-field-hint` },
+            "Opt-in cleanup for the open page only (including Journal dailies). Removes empty \u{1F4DD} Summary / \u2705 Action items / \u{1F5D2}\uFE0F Notes / \u{1F399}\uFE0F Transcript headings with no user content under them. Headings with notes underneath are left alone."
           )
         ]
       });
+    }
+    async _cleanupEmptySkeletonFromActivePage() {
+      if (this._cleanupInFlight) return this._cleanupInFlight;
+      if (this._disabled) {
+        this._toast("Meetings is off", "Turn the plugin on to remove a leaked skeleton.");
+        return;
+      }
+      const task = (async () => {
+        const panel2 = this.ui.getActivePanel && this.ui.getActivePanel();
+        const record = panel2 && panel2.getActiveRecord ? panel2.getActiveRecord() : null;
+        if (!record || typeof record.getLineItems !== "function") {
+          this._toast("Open a page first", "This cleanup only looks at the page you have open.");
+          return;
+        }
+        const items = await record.getLineItems(false);
+        const guids = new Set(emptyLeakedSkeletonGuids(items, record.guid, this._cleanupHeadingSpecs()));
+        if (!guids.size) {
+          this._toast("No empty leaked skeleton", "This page has no empty default meeting headings to remove.");
+          return;
+        }
+        let removed = 0;
+        for (const line of items) {
+          if (!line || !guids.has(String(line.guid))) continue;
+          if (headingHasDescendantText(items, line.guid)) continue;
+          const emptyKids = items.filter((child) => child && child.parent_guid === line.guid && !lineItemPlainText(child));
+          for (const child of emptyKids) {
+            if (typeof child.delete === "function") {
+              try {
+                await child.delete();
+              } catch {
+              }
+            }
+          }
+          if (typeof line.delete !== "function") continue;
+          if (await line.delete() === false) continue;
+          removed += 1;
+        }
+        this._toast("Removed empty leaked skeleton", `${removed} empty heading${removed === 1 ? "" : "s"} removed. User content was left alone.`);
+      })();
+      this._cleanupInFlight = task;
+      try {
+        await task;
+      } finally {
+        if (this._cleanupInFlight === task) this._cleanupInFlight = null;
+      }
+    }
+    async _applyHeadingFormatForRecord(record, { quiet = false } = {}) {
+      if (this._disabled) {
+        if (!quiet) this._toast("Meetings is off", "Turn the plugin on to apply heading format.");
+        return "failed";
+      }
+      if (!this._isOurRecord(record)) {
+        if (!quiet) this._toast("Meetings records only", "Apply heading format never writes Journal or other collections.");
+        return "failed";
+      }
+      const result = await this._applyHeadingFormatRecord(record);
+      if (!quiet) {
+        if (result === "updated") this._toast("Apply heading format", "Updated this meeting\u2019s section headings.");
+        else if (result === "skipped") this._toast("Apply heading format", "Already matches current settings.");
+        else this._toast("Apply heading format", "Could not update this meeting.");
+      }
+      return result;
+    }
+    async _applyHeadingFormatBulk() {
+      if (this._headingRepairInFlight) return this._headingRepairInFlight;
+      if (this._disabled) {
+        this._toast("Meetings is off", "Turn the plugin on to apply heading format.");
+        return;
+      }
+      const task = (async () => {
+        await this._refreshRecordIndex();
+        let updated = 0;
+        let skipped = 0;
+        let failed = 0;
+        for (const record of this._recordsByGuid.values()) {
+          if (!this._isOurRecord(record)) continue;
+          const result = await this._applyHeadingFormatRecord(record);
+          if (result === "updated") updated += 1;
+          else if (result === "skipped") skipped += 1;
+          else failed += 1;
+        }
+        this._toast("Apply heading format", `${updated} updated \xB7 ${skipped} already current${failed ? ` \xB7 ${failed} failed` : ""}`);
+        if (this._panelEl && document.contains(this._panelEl)) this._renderPanel();
+      })();
+      this._headingRepairInFlight = task;
+      try {
+        await task;
+      } finally {
+        if (this._headingRepairInFlight === task) this._headingRepairInFlight = null;
+      }
+    }
+    async _applyHeadingFormatRecord(record) {
+      if (!record || !this._isOurRecord(record)) return "failed";
+      if (typeof record.getLineItems !== "function") return "failed";
+      try {
+        let items = await record.getLineItems(false);
+        if (!Array.isArray(items)) items = [];
+        const specs = this._repairHeadingSpecs();
+        let plan = planHeadingFormatRepair(items, record.guid, specs);
+        let changed = false;
+        for (const job of plan.relabel) {
+          const line = items.find((item) => item && item.guid === job.guid);
+          if (!line || typeof line.setSegments !== "function") continue;
+          if (await line.setSegments([{ type: "text", text: job.text }]) === false) continue;
+          line.segments = [{ type: "text", text: job.text }];
+          changed = true;
+        }
+        for (const spec of this._bodySectionSpecs()) {
+          items = await record.getLineItems(false);
+          if (!Array.isArray(items)) items = [];
+          plan = planHeadingFormatRepair(items, record.guid, specs);
+          const slot = plan.chosen.find((item) => item.role === spec.role);
+          if (slot && slot.guid) continue;
+          const prior = [];
+          for (const earlier of plan.chosen) {
+            if (earlier.role === spec.role) break;
+            if (earlier.guid) prior.push(earlier.guid);
+          }
+          const afterItem = prior.length ? items.find((item) => item && item.guid === prior[prior.length - 1]) || null : null;
+          const { text, level } = this._headingForSpec(spec);
+          const anchorMd = this._headingAnchorMd(text, level);
+          if (!anchorMd || typeof record.insertFromMarkdown !== "function") continue;
+          const before = new Set(items.map((item) => item.guid));
+          if (await record.insertFromMarkdown(anchorMd, null, afterItem) === false) continue;
+          items = await record.getLineItems(false);
+          const heading = items.find((item) => !before.has(item.guid)) || null;
+          if (heading) await this._markOwnedLine(heading, TEMPLATE_OWNER, spec.role);
+          changed = true;
+        }
+        items = await record.getLineItems(false);
+        if (!Array.isArray(items)) items = [];
+        plan = planHeadingFormatRepair(items, record.guid, specs);
+        if (plan.needsReorder) {
+          let after = null;
+          for (const slot of plan.chosen) {
+            if (!slot.guid) continue;
+            const heading = items.find((item) => item && item.guid === slot.guid) || null;
+            if (!heading || typeof heading.move !== "function") continue;
+            const moved = await heading.move(record, after);
+            after = moved || heading;
+            changed = true;
+          }
+        }
+        return changed ? "updated" : "skipped";
+      } catch (err) {
+        this._log("heading format repair failed", { error: this._errorMessage(err) });
+        return "failed";
+      }
     }
     /**
      * Make freshly-streamed transcript lines VISIBLE mid-meeting. Thymer only repaints the editor on
@@ -8209,6 +8563,19 @@ ${recovered}`;
               checked: enabled,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("autoSummarize", !!event.target.checked, { rerender: true }), "onChange")
             })
+          ]
+        }),
+        section({
+          label: "Body outline",
+          hint: "Order of the four headings on new meeting records. Existing meetings keep their content until you run Apply heading format in Setup \u2192 Diagnostics.",
+          body: [
+            this._textInput(
+              "Section order",
+              "bodySectionOrder",
+              DEFAULT_BODY_SECTION_ORDER,
+              false,
+              "Comma-separated. All four required: Summary, Action items, Notes, Transcript."
+            )
           ]
         }),
         ...enabled ? [
