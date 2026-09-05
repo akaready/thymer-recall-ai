@@ -30,7 +30,7 @@
 		},
 		{
 			"id": "join_at",
-			"label": "Join At",
+			"label": "Date",
 			"type": "datetime",
 			"icon": "ti-calendar",
 			"many": false,
@@ -44,7 +44,7 @@
 			"icon": "ti-users",
 			"many": false,
 			"read_only": false,
-			"active": true
+			"active": false
 		},
 		{
 			"id": "attendees",
@@ -120,7 +120,6 @@
 		"title",
 		"meeting_url",
 		"join_at",
-		"participant_names",
 		"attendees",
 		"related",
 		"recall_bot_id",
@@ -132,7 +131,7 @@
 		"views": false,
 		"sidebar": true
 	},
-	"version": "1.23.3",
+	"version": "1.23.4",
 	"__source_repo": "https://github.com/akaready/thymer-recall-ai",
 	"__source_files": {
 		"branch": "main",

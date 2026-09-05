@@ -3694,12 +3694,35 @@ ${report}
     return guids;
   }
   __name(emptyLeakedSkeletonGuids, "emptyLeakedSkeletonGuids");
+  function headingLevelToSize(level) {
+    if (level === "h1") return 1;
+    if (level === "h2") return 2;
+    if (level === "h3") return 3;
+    return null;
+  }
+  __name(headingLevelToSize, "headingLevelToSize");
+  function lineHeadingSize(line) {
+    if (!line) return null;
+    if (typeof line.getHeadingSize === "function") {
+      try {
+        const size2 = Number(line.getHeadingSize());
+        return Number.isFinite(size2) ? size2 : null;
+      } catch {
+        return null;
+      }
+    }
+    const raw = line.heading_size != null ? line.heading_size : line.headingSize;
+    const size = Number(raw);
+    return Number.isFinite(size) ? size : null;
+  }
+  __name(lineHeadingSize, "lineHeadingSize");
   function planHeadingFormatRepair(items, recordGuid, specs) {
     const list2 = Array.isArray(items) ? items : [];
     const rec = String(recordGuid || "");
     const top = list2.filter((line) => line && String(line.parent_guid || "") === rec);
     const chosen = [];
     const relabel = [];
+    const resize = [];
     const missingRoles = [];
     for (const spec of Array.isArray(specs) ? specs : []) {
       const matches = top.filter((line) => lineLooksLikeSkeletonHeading(line, spec));
@@ -3714,12 +3737,17 @@ ${report}
       if (expectedText && lineItemPlainText(heading) !== expectedText) {
         relabel.push({ guid: String(heading.guid), text: expectedText });
       }
+      const expectedSize = headingLevelToSize(spec.expectedLevel);
+      const currentSize = lineHeadingSize(heading);
+      if (expectedSize != null && Number.isFinite(currentSize) && currentSize !== expectedSize) {
+        resize.push({ guid: String(heading.guid), size: expectedSize });
+      }
     }
     const present = new Set(chosen.map((slot) => slot.guid).filter(Boolean));
     const currentOrder = top.filter((line) => present.has(String(line.guid))).map((line) => String(line.guid));
     const desiredOrder = chosen.map((slot) => slot.guid).filter(Boolean);
     const needsReorder = desiredOrder.length > 1 && currentOrder.join("\0") !== desiredOrder.join("\0");
-    return { relabel, missingRoles, chosen, needsReorder };
+    return { relabel, resize, missingRoles, chosen, needsReorder };
   }
   __name(planHeadingFormatRepair, "planHeadingFormatRepair");
   function guessHeadingByLabel(items, recordGuid, headingText) {
@@ -4353,6 +4381,41 @@ ${report}
     return { guids, matchedNames, unmatchedNames, creatableParticipants };
   }
   __name(matchParticipantsToPeople, "matchParticipantsToPeople");
+  function assignPersonEmail(record, email) {
+    const value = String(email || "").trim();
+    if (!record || !value || !value.includes("@")) return false;
+    const names = ["email", "Email", "e-mail", "E-mail"];
+    for (const name of names) {
+      try {
+        const prop = record.prop ? record.prop(name) : null;
+        if (prop && typeof prop.set === "function") {
+          prop.set(value);
+          return true;
+        }
+      } catch {
+      }
+    }
+    try {
+      const props = record.getAllProperties ? record.getAllProperties() : [];
+      for (const prop of Array.isArray(props) ? props : []) {
+        let label = "";
+        try {
+          label = String(prop.label || prop.id || prop.name || prop.getName && prop.getName() || "");
+        } catch {
+        }
+        const type = String(prop.type || "").toLowerCase();
+        if (type === "email" || /e-?mail/i.test(label)) {
+          if (typeof prop.set === "function") {
+            prop.set(value);
+            return true;
+          }
+        }
+      }
+    } catch {
+    }
+    return false;
+  }
+  __name(assignPersonEmail, "assignPersonEmail");
 
   // meeting-schema.js
   var ATTENDEES_FIELD_DEFINITION = Object.freeze({
@@ -4377,10 +4440,16 @@ ${report}
     const conf = JSON.parse(JSON.stringify(configuration && typeof configuration === "object" ? configuration : {}));
     conf.fields = Array.isArray(conf.fields) ? conf.fields : [];
     let changed = false;
-    const retired = /* @__PURE__ */ new Set(["transcript", "summary"]);
+    const retired = /* @__PURE__ */ new Set(["transcript", "summary", "participant_names"]);
     for (const field of conf.fields) {
-      if (field && retired.has(String(field.id || "")) && field.active !== false) {
+      if (!field) continue;
+      const id = String(field.id || "");
+      if (retired.has(id) && field.active !== false) {
         field.active = false;
+        changed = true;
+      }
+      if (id === "join_at" && String(field.label || "") !== "Date") {
+        field.label = "Date";
         changed = true;
       }
     }
@@ -4531,6 +4600,26 @@ ${report}
     return compactClockRange(a, b);
   }
   __name(sectionRange, "sectionRange");
+  var CITATION_STYLE_OPTIONS = Object.freeze([
+    Object.freeze(["name-time", "Name and time \u2014 Zac \xB7 9:29 AM"]),
+    Object.freeze(["name", "Name only \u2014 Zac"]),
+    Object.freeze(["time", "Time only \u2014 9:29 AM"])
+  ]);
+  var citationStyles = new Set(CITATION_STYLE_OPTIONS.map(([value]) => value));
+  function normalizeCitationStyle(value) {
+    const style = String(value || "");
+    return citationStyles.has(style) ? style : "name-time";
+  }
+  __name(normalizeCitationStyle, "normalizeCitationStyle");
+  function formatTranscriptCitationLabel(entry, settings) {
+    const speaker = String(entry && entry.speaker || "Speaker").trim() || "Speaker";
+    const stamp = entryStamp(entry, settings);
+    const style = normalizeCitationStyle(settings && settings.citationStyle);
+    if (style === "time") return stamp || speaker;
+    if (style === "name") return speaker;
+    return stamp ? `${speaker} \xB7 ${stamp}` : speaker;
+  }
+  __name(formatTranscriptCitationLabel, "formatTranscriptCitationLabel");
   function formatRelativeTime(seconds) {
     const total = Math.max(0, Math.floor(seconds));
     const minutes = Math.floor(total / 60);
@@ -4539,8 +4628,189 @@ ${report}
   }
   __name(formatRelativeTime, "formatRelativeTime");
 
+  // meeting-date.js
+  var SCHEDULED_LEAD_MS = 10 * 60 * 1e3;
+  var BOT_JOIN_LEAD_MS = 2 * 60 * 1e3;
+  function recallJoinAtIso(meetingIso, leadMs = BOT_JOIN_LEAD_MS) {
+    if (!meetingIso) return null;
+    const ms = Date.parse(meetingIso);
+    if (!Number.isFinite(ms)) return null;
+    return new Date(ms - leadMs).toISOString();
+  }
+  __name(recallJoinAtIso, "recallJoinAtIso");
+  function isSchedulableMeeting(meetingMs, now = Date.now(), scheduledLeadMs = SCHEDULED_LEAD_MS, botLeadMs = BOT_JOIN_LEAD_MS) {
+    if (meetingMs == null || !Number.isFinite(Number(meetingMs))) return false;
+    const botJoin = Number(meetingMs) - botLeadMs;
+    return botJoin - now >= scheduledLeadMs;
+  }
+  __name(isSchedulableMeeting, "isSchedulableMeeting");
+  function botJoinMs(meetingMs, botLeadMs = BOT_JOIN_LEAD_MS) {
+    if (meetingMs == null || !Number.isFinite(Number(meetingMs))) return null;
+    return Number(meetingMs) - botLeadMs;
+  }
+  __name(botJoinMs, "botJoinMs");
+
+  // participant-confirm-drafts.js
+  function draftsFromUnmatched(participants) {
+    const drafts = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const raw of Array.isArray(participants) ? participants : []) {
+      const name = String(raw && raw.name || "").trim().replace(/\s+/g, " ");
+      if (!name) continue;
+      const key = name.toLocaleLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      drafts.push({
+        recallName: name,
+        name,
+        email: String(raw && raw.email || "").trim(),
+        include: true
+      });
+    }
+    return drafts;
+  }
+  __name(draftsFromUnmatched, "draftsFromUnmatched");
+  function confirmedCreates(drafts) {
+    return (Array.isArray(drafts) ? drafts : []).filter((draft) => draft && draft.include !== false).map((draft) => ({
+      name: String(draft.name || "").trim().replace(/\s+/g, " "),
+      email: String(draft.email || "").trim()
+    })).filter((draft) => !!draft.name);
+  }
+  __name(confirmedCreates, "confirmedCreates");
+
+  // participant-confirm.js
+  var overlayEl = null;
+  var detachKey = null;
+  function closeParticipantConfirmDialog() {
+    if (detachKey) {
+      window.removeEventListener("keydown", detachKey, true);
+      detachKey = null;
+    }
+    try {
+      overlayEl?.remove();
+    } catch {
+    }
+    overlayEl = null;
+  }
+  __name(closeParticipantConfirmDialog, "closeParticipantConfirmDialog");
+  function openParticipantConfirmDialog(options) {
+    closeParticipantConfirmDialog();
+    const rootClass = options.rootClass || "plg-recall-ai";
+    const drafts = draftsFromUnmatched(options.participants);
+    if (!drafts.length) {
+      options.onSkip?.();
+      return;
+    }
+    const rows = drafts.map((draft) => {
+      const nameInput = (
+        /** @type {HTMLInputElement} */
+        h("input", {
+          type: "text",
+          class: `${rootClass}-confirm-input`,
+          value: draft.name,
+          "aria-label": `Full name for ${draft.recallName}`
+        })
+      );
+      const emailInput = (
+        /** @type {HTMLInputElement} */
+        h("input", {
+          type: "email",
+          class: `${rootClass}-confirm-input`,
+          value: draft.email,
+          placeholder: "email@example.com",
+          "aria-label": `Email for ${draft.recallName}`
+        })
+      );
+      const include = (
+        /** @type {HTMLInputElement} */
+        h("input", {
+          type: "checkbox",
+          checked: true,
+          "aria-label": `Create ${draft.recallName}`
+        })
+      );
+      nameInput.addEventListener("input", () => {
+        draft.name = nameInput.value;
+      });
+      emailInput.addEventListener("input", () => {
+        draft.email = emailInput.value;
+      });
+      include.addEventListener("change", () => {
+        draft.include = include.checked;
+      });
+      return h(
+        "div",
+        { class: `${rootClass}-confirm-row` },
+        h("label", { class: `${rootClass}-confirm-include` }, include, "Add"),
+        h(
+          "div",
+          { class: `${rootClass}-confirm-fields` },
+          h("span", { class: `${rootClass}-confirm-recall` }, draft.recallName),
+          nameInput,
+          emailInput
+        )
+      );
+    });
+    const dialog = h(
+      "div",
+      {
+        class: `${rootClass}-confirm-dialog`,
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-labelledby": `${rootClass}-confirm-title`
+      },
+      h("h2", { class: `${rootClass}-confirm-title`, id: `${rootClass}-confirm-title` }, "Confirm new people"),
+      h(
+        "p",
+        { class: `${rootClass}-confirm-lede` },
+        "These names did not match an existing Person. Confirm the full name and email, or skip anyone you do not want to add."
+      ),
+      h("div", { class: `${rootClass}-confirm-list` }, ...rows),
+      h(
+        "div",
+        { class: `${rootClass}-confirm-actions` },
+        h("button", {
+          type: "button",
+          class: `${rootClass}-confirm-skip`,
+          onClick: /* @__PURE__ */ __name(() => {
+            closeParticipantConfirmDialog();
+            options.onSkip?.();
+          }, "onClick")
+        }, "Skip all"),
+        h("button", {
+          type: "button",
+          class: `${rootClass}-confirm-save`,
+          onClick: /* @__PURE__ */ __name(() => {
+            const creates = confirmedCreates(drafts);
+            closeParticipantConfirmDialog();
+            options.onConfirm(creates);
+          }, "onClick")
+        }, "Add selected")
+      )
+    );
+    overlayEl = h("div", { class: `${rootClass}-confirm-overlay` }, dialog);
+    overlayEl.addEventListener("mousedown", (event) => {
+      if (event.target === overlayEl) {
+        closeParticipantConfirmDialog();
+        options.onSkip?.();
+      }
+    });
+    document.body.appendChild(overlayEl);
+    detachKey = /* @__PURE__ */ __name((event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeParticipantConfirmDialog();
+      options.onSkip?.();
+    }, "detachKey");
+    window.addEventListener("keydown", detachKey, true);
+    const first = overlayEl.querySelector('input[type="text"]');
+    if (first && typeof first.focus === "function") first.focus();
+  }
+  __name(openParticipantConfirmDialog, "openParticipantConfirmDialog");
+
   // plugin.js
-  var PLUGIN_VERSION = "1.23.3";
+  var PLUGIN_VERSION = "1.23.4";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -4562,8 +4832,8 @@ ${report}
   });
   var FIELD_DEFS = Object.freeze({
     [FIELDS.MEETING_URL]: { id: FIELDS.MEETING_URL, label: "Meeting URL", type: "url", icon: "ti-link", many: false, read_only: false, active: true },
-    [FIELDS.JOIN_AT]: { id: FIELDS.JOIN_AT, label: "Join At", type: "datetime", icon: "ti-calendar", many: false, read_only: false, active: true },
-    [FIELDS.PARTICIPANT_NAMES]: { id: FIELDS.PARTICIPANT_NAMES, label: "Participant Names", type: "text", icon: "ti-users", many: false, read_only: false, active: true },
+    [FIELDS.JOIN_AT]: { id: FIELDS.JOIN_AT, label: "Date", type: "datetime", icon: "ti-calendar", many: false, read_only: false, active: true },
+    [FIELDS.PARTICIPANT_NAMES]: { id: FIELDS.PARTICIPANT_NAMES, label: "Participant Names", type: "text", icon: "ti-users", many: false, read_only: false, active: false },
     [FIELDS.ATTENDEES]: ATTENDEES_FIELD_DEFINITION,
     [FIELDS.RELATED]: RELATED_FIELD_DEFINITION,
     [FIELDS.BOT_ID]: { id: FIELDS.BOT_ID, label: "Bot ID", type: "text", icon: "ti-robot", many: false, read_only: false, active: true },
@@ -4650,7 +4920,8 @@ ${report}
     actionItemsHeadingLevel: "h2",
     notesHeadingText: "\u{1F5D2}\uFE0F Notes",
     notesHeadingLevel: "h2",
-    bodySectionOrder: DEFAULT_BODY_SECTION_ORDER
+    bodySectionOrder: DEFAULT_BODY_SECTION_ORDER,
+    citationStyle: "name-time"
   });
   var LEGACY_SUMMARY_PROMPTS = Object.freeze([
     "Summarize this meeting transcript for a Thymer note. Include: 1) a concise overview, 2) decisions made, 3) action items with owners when mentioned, and 4) open questions. Keep the output skimmable and factual.",
@@ -4716,7 +4987,8 @@ ${report}
       actionItemsHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.actionItemsHeadingLevel) ? src.actionItemsHeadingLevel : DEFAULT_SETTINGS.actionItemsHeadingLevel,
       notesHeadingText: str("notesHeadingText"),
       notesHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.notesHeadingLevel) ? src.notesHeadingLevel : DEFAULT_SETTINGS.notesHeadingLevel,
-      bodySectionOrder: normalizeBodySectionOrder(src.bodySectionOrder)
+      bodySectionOrder: normalizeBodySectionOrder(src.bodySectionOrder),
+      citationStyle: normalizeCitationStyle(src.citationStyle)
     };
   }
   __name(normalizePrefs, "normalizePrefs");
@@ -4751,7 +5023,6 @@ ${report}
     ["claude-sonnet-5", "Claude Sonnet 5 \u2014 higher quality"],
     ["claude-opus-4-8", "Claude Opus 4.8 \u2014 most capable"]
   ]);
-  var SCHEDULED_LEAD_MS = 10 * 60 * 1e3;
   var DONE_STATUSES = /* @__PURE__ */ new Set(["done", "bot.done", "recording_done"]);
   var FATAL_STATUSES = /* @__PURE__ */ new Set(["fatal", "bot.fatal", "call_ended_by_host", "bot_rejected", "media_expired", "analysis_failed"]);
   var STATUS_LABELS = Object.freeze({
@@ -4918,15 +5189,11 @@ ${report}
       this._navButton = null;
       this._syncButton = null;
       this._diagnosticsButton = null;
-      this._healButton = null;
-      this._healCommandItem = null;
       this._healInFlight = null;
       this._healRecordInFlight = /* @__PURE__ */ new Map();
-      this._cleanupCommandItem = null;
       this._cleanupInFlight = null;
-      this._headingRepairButton = null;
-      this._headingRepairCommandItem = null;
       this._headingRepairInFlight = null;
+      this._attendeePrompted = /* @__PURE__ */ new Set();
       this._editorObserver = null;
       this._observedRoot = null;
       this._attachRetryTimer = null;
@@ -4990,7 +5257,7 @@ ${report}
             return this._toast("Still working", "The meeting is over and the transcript is being processed. Nothing to do.");
           }
           if (kind === "done" || kind === "repair") return void this._syncRecord(record, { summarize: true, repair: true });
-          void this._startBot(record);
+          void this._startBot(record, { immediate: true });
         }, "onClick")
       });
       this._syncButton = this.addCollectionNavigationButton({
@@ -5006,35 +5273,6 @@ ${report}
         tooltip: "Copy bridge, webhook, parser, and transcript diagnostics for this meeting",
         onlyWhenExpanded: true,
         onClick: /* @__PURE__ */ __name(({ record }) => void this._showMeetingDiagnostics(record), "onClick")
-      });
-      this._healButton = this.addCollectionNavigationButton({
-        label: "Heal mashed summaries",
-        icon: "tools",
-        tooltip: "Rewrite this meeting\u2019s mashed summary (nn### / literal \\n). Does not touch Notes or Transcript.",
-        onlyWhenExpanded: true,
-        onClick: /* @__PURE__ */ __name(({ record }) => void this._healMashedSummariesForRecord(record), "onClick")
-      });
-      this._healCommandItem = this.ui.addCommandPaletteCommand({
-        label: "Meetings: Heal mashed summaries",
-        icon: "tools",
-        onSelected: /* @__PURE__ */ __name(() => void this._healMashedSummariesBulk(), "onSelected")
-      });
-      this._headingRepairButton = this.addCollectionNavigationButton({
-        label: "Apply heading format",
-        icon: "list",
-        tooltip: "Update this meeting\u2019s four section headings to the current labels and order. Does not rewrite Notes or Transcript content.",
-        onlyWhenExpanded: true,
-        onClick: /* @__PURE__ */ __name(({ record }) => void this._applyHeadingFormatForRecord(record), "onClick")
-      });
-      this._headingRepairCommandItem = this.ui.addCommandPaletteCommand({
-        label: "Meetings: Apply heading format",
-        icon: "list",
-        onSelected: /* @__PURE__ */ __name(() => void this._applyHeadingFormatBulk(), "onSelected")
-      });
-      this._cleanupCommandItem = this.ui.addCommandPaletteCommand({
-        label: "Meetings: Remove empty leaked skeleton from this page",
-        icon: "trash",
-        onSelected: /* @__PURE__ */ __name(() => void this._cleanupEmptySkeletonFromActivePage(), "onSelected")
       });
     }
     /**
@@ -5088,13 +5326,13 @@ ${report}
     /**
      * Append the send button(s) to `container` when this record can take a bot — no bot in flight (so a
      * click can't double-book) AND it is actually a meeting (has a URL, so a mixed collection grows no
-     * dead buttons). A schedulable meeting also gets an immediate "Join now" so a future Join At never
-     * traps you. Returns true if anything was appended.
+     * dead buttons). A schedulable meeting also gets an immediate "Join now" so a future Date never
+     * traps you. Join Now always means now. Returns true if anything was appended.
      */
     _appendSendButtons(container, record, state = this._recordVisualState(record)) {
       const sendable = (state.kind === "idle" || state.kind === "schedulable") && !!this._meetingUrl(record);
       if (!sendable) return false;
-      container.appendChild(this._sendButton(record, state.icon, state.label, {}));
+      container.appendChild(this._sendButton(record, state.icon, state.label, { immediate: state.kind === "idle" }));
       if (state.kind === "schedulable") container.appendChild(this._sendButton(record, "microphone", "Join now", { immediate: true }));
       return true;
     }
@@ -5271,18 +5509,7 @@ ${report}
         this._commandItem.remove();
         this._commandItem = null;
       }
-      if (this._healCommandItem) {
-        this._healCommandItem.remove();
-        this._healCommandItem = null;
-      }
-      if (this._headingRepairCommandItem) {
-        this._headingRepairCommandItem.remove();
-        this._headingRepairCommandItem = null;
-      }
-      if (this._cleanupCommandItem) {
-        this._cleanupCommandItem.remove();
-        this._cleanupCommandItem = null;
-      }
+      closeParticipantConfirmDialog();
       try {
         if (this._navButton && this._navButton.remove) this._navButton.remove();
       } catch {
@@ -5293,14 +5520,6 @@ ${report}
       }
       try {
         if (this._diagnosticsButton && this._diagnosticsButton.remove) this._diagnosticsButton.remove();
-      } catch {
-      }
-      try {
-        if (this._healButton && this._healButton.remove) this._healButton.remove();
-      } catch {
-      }
-      try {
-        if (this._headingRepairButton && this._headingRepairButton.remove) this._headingRepairButton.remove();
       } catch {
       }
       if (this._editorObserver) this._editorObserver.disconnect();
@@ -5674,7 +5893,7 @@ ${report}
     }
     /**
      * @param {object} record
-     * @param {{immediate?: boolean}} [opts] immediate: ignore Join At and send the bot in
+     * @param {{immediate?: boolean}} [opts] immediate: ignore Date and send the bot in
      *   right now. Lets you override a scheduled meeting without clearing the field.
      */
     async _startBot(record, options = {}) {
@@ -5851,7 +6070,7 @@ ${report}
           events: ["transcript.data"]
         }];
       }
-      const joinAt = immediate ? null : this._joinAtIso(record);
+      const joinAt = immediate ? null : recallJoinAtIso(this._joinAtIso(record));
       if (joinAt) payload.join_at = joinAt;
       if (this._settings.sendJoinChatMessage && this._settings.joinChatMessage) {
         payload.chat = {
@@ -5974,10 +6193,6 @@ ${report}
           this._updateNavButtonForRecord(record);
           return false;
         }
-        if (ended && finalTranscriptReady) {
-          await this._syncMeetingAttendees(record, botId, entries);
-          if (repair) repairReport.push("attendees checked");
-        }
         const shouldGenerateSummary = summaryNeedsWrite && !summaryBodyProtected;
         if (ended && summarize && this._settings.autoSummarize && shouldGenerateSummary) {
           const summaryOk = await this._summarize(record, transcriptText, entries, {
@@ -5989,6 +6204,10 @@ ${report}
           } else if (repair) repairReport.push("summary failed");
         } else if (repair && ended && hasSummary) repairReport.push(summaryBodyState === "unknown" ? "legacy summary skipped (ownership unknown)" : "summary already present");
         else if (repair && ended && summaryBodyProtected) repairReport.push("legacy summary skipped (ownership unknown)");
+        if (ended && finalTranscriptReady) {
+          await this._syncMeetingAttendees(record, botId, entries);
+          if (repair) repairReport.push("attendees checked");
+        }
         let finalized = false;
         if (ended && finalTranscriptReady) {
           const currentStatus = String(this._text(record, FIELDS.STATUS) || "").toLowerCase();
@@ -6077,22 +6296,32 @@ ${report}
         if (rematched.guids.length) return { guid: rematched.guids[0], created: false };
         if (!rematched.creatableParticipants.length) return null;
         const guid = peopleCollection.createRecord(name);
-        return guid ? { guid, created: true } : null;
+        if (!guid) return null;
+        let person = typeof peopleCollection.getRecord === "function" ? peopleCollection.getRecord(guid) : null;
+        if (!person && typeof peopleCollection.getAllRecords === "function") {
+          const created = (await peopleCollection.getAllRecords()).find((item) => item && item.guid === guid) || null;
+          person = created;
+        }
+        if (person) assignPersonEmail(person, participant.email);
+        return { guid, created: true };
       });
     }
-    /** Save raw names and optionally attach confident matches through the Attendees field restriction. */
+    /** Match Recall participants to Attendees. Unmatched names get a confirm dialog — never auto-create. */
     async _syncMeetingAttendees(record, botId, entries) {
       try {
+        if (!this._isOurRecord(record)) return;
         const { participants, source } = await this._fetchFinalParticipants(botId, entries);
         const names = participantNames(participants, this._settings.botName || DEFAULT_SETTINGS.botName);
-        if (names.length) this._setMappedField(record, FIELDS.PARTICIPANT_NAMES, names.join("\n"));
+        if (names.length && this._fieldById(this._mappedFieldId(FIELDS.PARTICIPANT_NAMES))) {
+          this._setMappedField(record, FIELDS.PARTICIPANT_NAMES, names.join("\n"));
+        }
         const botIdentity = normalizeIdentity(this._settings.botName || DEFAULT_SETTINGS.botName);
         const matchable = participants.filter((participant) => {
           const name = normalizeIdentity(participant && participant.name);
           return name !== botIdentity && (!!name || !!String(participant && participant.email || "").trim());
         });
         if (!this._settings.mapParticipantNamesToAttendees || !matchable.length) {
-          this._log("participant names saved", { source, names: names.length, peopleLinking: false });
+          this._log("participants noted", { source, names: names.length, peopleLinking: false });
           return;
         }
         const field = this._attendeesField();
@@ -6120,46 +6349,66 @@ ${report}
         const matched = matchParticipantsToPeople(matchable, people);
         const prop = this._prop(record, field.id);
         if (!prop || typeof prop.set !== "function") return;
-        const createdGuids = [];
-        let createdCount = 0;
-        if (this._settings.createMissingPeople) {
-          for (const participant of matched.creatableParticipants) {
-            try {
-              const result = await this._createMissingPerson(peopleCollection, participant);
-              if (result && result.guid && !createdGuids.includes(result.guid)) createdGuids.push(result.guid);
-              if (result && result.created) createdCount++;
-            } catch (err) {
-              this._log("person creation skipped", { name: participant.name || "", error: this._errorMessage(err) });
-            }
-          }
-        }
-        const existing = [];
-        try {
-          for (const linked of prop.linkedRecords ? prop.linkedRecords() : []) {
-            if (linked && linked.guid && !existing.includes(linked.guid)) existing.push(linked.guid);
-          }
-        } catch {
-        }
-        try {
-          for (const value of prop.texts ? prop.texts() : []) {
-            const guid = String(value || "").trim();
-            if (guid && !existing.includes(guid)) existing.push(guid);
-          }
-        } catch {
-        }
-        const next = mergeAttendeeGuids(existing, [...matched.guids, ...createdGuids]);
+        const existing = this._attendeeGuids(prop);
+        const next = mergeAttendeeGuids(existing, matched.guids);
         if (next.length) prop.set(next);
         this._log("participants linked", {
           source,
           names: names.length,
           matched: matched.guids.length,
           unmatched: matched.unmatchedNames.length,
-          created: createdCount,
           preserved: existing.length
         });
+        const unmatched = matched.creatableParticipants.filter((participant) => String(participant && participant.name || "").trim());
+        if (unmatched.length) this._promptUnmatchedParticipants(record, botId, unmatched, peopleCollection, field);
       } catch (err) {
         this._log("participant linking failed without blocking meeting finalization", { error: this._errorMessage(err) });
       }
+    }
+    /** @param {any} prop */
+    _attendeeGuids(prop) {
+      const existing = [];
+      try {
+        for (const linked of prop.linkedRecords ? prop.linkedRecords() : []) {
+          if (linked && linked.guid && !existing.includes(linked.guid)) existing.push(linked.guid);
+        }
+      } catch {
+      }
+      try {
+        for (const value of prop.texts ? prop.texts() : []) {
+          const guid = String(value || "").trim();
+          if (guid && !existing.includes(guid)) existing.push(guid);
+        }
+      } catch {
+      }
+      return existing;
+    }
+    _promptUnmatchedParticipants(record, botId, unmatched, peopleCollection, field) {
+      const key = `${record && record.guid || ""}:${botId || ""}`;
+      if (!key || this._attendeePrompted.has(key)) return;
+      this._attendeePrompted.add(key);
+      openParticipantConfirmDialog({
+        rootClass: ROOT_CLASS,
+        participants: unmatched,
+        onConfirm: /* @__PURE__ */ __name((creates) => void this._addConfirmedPeople(record, peopleCollection, field, creates), "onConfirm")
+      });
+    }
+    async _addConfirmedPeople(record, peopleCollection, field, creates) {
+      if (!this._isOurRecord(record) || !Array.isArray(creates) || !creates.length) return;
+      const prop = this._prop(record, field && field.id);
+      if (!prop || typeof prop.set !== "function") return;
+      const createdGuids = [];
+      for (const person of creates) {
+        try {
+          const result = await this._createMissingPerson(peopleCollection, person);
+          if (result && result.guid && !createdGuids.includes(result.guid)) createdGuids.push(result.guid);
+        } catch (err) {
+          this._log("person creation skipped", { name: person.name || "", error: this._errorMessage(err) });
+        }
+      }
+      const next = mergeAttendeeGuids(this._attendeeGuids(prop), createdGuids);
+      if (next.length) prop.set(next);
+      if (createdGuids.length) this._toast("People added", `${createdGuids.length} attendee${createdGuids.length === 1 ? "" : "s"} linked.`);
     }
     async _summarize(record, transcriptText, entries, { deferTranscriptBody = false } = {}) {
       if (!this._settings.anthropicApiKey) {
@@ -6371,8 +6620,8 @@ ${transcriptText}` }]
     }
     _repairHeadingSpecs() {
       return this._bodySectionSpecs().map((spec) => {
-        const { text } = this._headingForSpec(spec);
-        return { role: spec.role, expectedText: text, texts: [...new Set([spec.fallbackText, text].filter(Boolean))] };
+        const { text, level } = this._headingForSpec(spec);
+        return { role: spec.role, expectedText: text, expectedLevel: level, texts: [...new Set([spec.fallbackText, text].filter(Boolean))] };
       });
     }
     /**
@@ -7328,7 +7577,7 @@ ${recovered}`;
     _healDiagnosticsSection() {
       return section({
         label: "Diagnostics",
-        hint: "Opt-in repairs. Heal mashed summaries and Apply heading format touch Meetings records only \u2014 never Journal or other collections. Remove leaked skeleton only deletes empty default headings on the page you have open.",
+        hint: "Opt-in repairs. These stay here \u2014 they are not in the command palette. Heal mashed summaries and Apply heading format touch Meetings records only \u2014 never Journal or other collections. Remove leaked skeleton only deletes empty default headings on the page you have open.",
         body: [
           h(
             "div",
@@ -7344,13 +7593,13 @@ ${recovered}`;
           h(
             "span",
             { class: `${ROOT_CLASS}-field-hint` },
-            "Scans every meeting in this collection. Already-healthy outlines are left alone. Same action as Meetings: Heal mashed summaries in the command palette."
+            "Scans every meeting in this collection. Already-healthy outlines are left alone."
           ),
           h(
             "div",
             { class: `${ROOT_CLASS}-field` },
             button({
-              label: this._headingRepairInFlight ? "Updating headings\u2026" : "Apply heading format to meetings",
+              label: this._headingRepairInFlight ? "Updating headings\u2026" : "Apply to existing meetings",
               variant: "ghost",
               size: "md",
               disabled: !!this._headingRepairInFlight || !!this._disabled,
@@ -7360,7 +7609,7 @@ ${recovered}`;
           h(
             "span",
             { class: `${ROOT_CLASS}-field-hint` },
-            "Updates the four section headings on Meetings records to the current labels and order. Moves whole section blocks (Notes stay Notes). Does not rewrite body content or re-summarize. Same action as Meetings: Apply heading format."
+            "Apply heading format: relabel, resize, and reorder the four section headings on Meetings records to match current settings. Inserts an empty heading for any missing section (for example Action items on older meetings). Moves whole section blocks \u2014 Notes stay Notes. Does not rewrite body content or re-summarize."
           ),
           h(
             "div",
@@ -7487,6 +7736,12 @@ ${recovered}`;
           line.segments = [{ type: "text", text: job.text }];
           changed = true;
         }
+        for (const job of plan.resize) {
+          const line = items.find((item) => item && item.guid === job.guid);
+          if (!line || typeof line.setHeadingSize !== "function") continue;
+          if (await line.setHeadingSize(job.size) === false) continue;
+          changed = true;
+        }
         for (const spec of this._bodySectionSpecs()) {
           items = await record.getLineItems(false);
           if (!Array.isArray(items)) items = [];
@@ -7506,7 +7761,13 @@ ${recovered}`;
           if (await record.insertFromMarkdown(anchorMd, null, afterItem) === false) continue;
           items = await record.getLineItems(false);
           const heading = items.find((item) => !before.has(item.guid)) || null;
-          if (heading) await this._markOwnedLine(heading, TEMPLATE_OWNER, spec.role);
+          if (heading) {
+            await this._markOwnedLine(heading, TEMPLATE_OWNER, spec.role);
+            const size = headingLevelToSize(level);
+            if (size != null && typeof heading.setHeadingSize === "function") {
+              await heading.setHeadingSize(size);
+            }
+          }
           changed = true;
         }
         items = await record.getLineItems(false);
@@ -7620,10 +7881,6 @@ ${recovered}`;
         this._diagnosticsButton && this._diagnosticsButton.setOnlyWhenExpanded(!pinVisible);
       } catch {
       }
-      try {
-        this._healButton && this._healButton.setOnlyWhenExpanded(!pinVisible);
-      } catch {
-      }
       if (!this._navButton) return;
       const target = record || this._activeRecordGuid && this._recordsByGuid.get(this._activeRecordGuid) || null;
       const state = this._recordVisualState(target);
@@ -7644,17 +7901,16 @@ ${recovered}`;
       } catch {
       }
     }
-    /** Join At as epoch ms, or null when unset/unparseable. */
+    /** Meeting Date as epoch ms, or null when unset/unparseable. */
     _joinAtMs(record) {
       const iso = this._joinAtIso(record);
       if (!iso) return null;
       const ms = Date.parse(iso);
       return Number.isFinite(ms) ? ms : null;
     }
-    /** True when Join At is far enough out that Recall treats it as a scheduled bot. */
+    /** True when Date is far enough out that (Date − 2 min) still meets Recall's scheduled-bot cliff. */
     _isScheduledDispatch(record) {
-      const ms = this._joinAtMs(record);
-      return ms != null && ms - Date.now() >= SCHEDULED_LEAD_MS;
+      return isSchedulableMeeting(this._joinAtMs(record));
     }
     _recordVisualState(record) {
       const IDLE = {
@@ -7702,7 +7958,7 @@ ${recovered}`;
         label: "Processing Transcript",
         tooltip: "Waiting for Recall\u2019s authoritative transcript"
       };
-      if (botId && this._joinAtMs(record) > Date.now() && !isTerminalStatus(status) && status !== "error") return {
+      if (botId && botJoinMs(this._joinAtMs(record)) > Date.now() && !isTerminalStatus(status) && status !== "error") return {
         kind: "scheduled",
         icon: "clock",
         label: "Scheduled",
@@ -7907,7 +8163,7 @@ ${recovered}`;
       }, 300);
     }
     /**
-     * Book a bot for any meeting whose Join At time is far enough out that Recall treats it as a
+     * Book a bot for any meeting whose Date is far enough out that Recall treats it as a
      * scheduled bot (autoSchedule, default on). Deliberately never fires for imminent/past meetings —
      * an auto-sent ad-hoc bot would walk into a room nobody is in yet and bill for it.
      */
@@ -8357,10 +8613,10 @@ ${recovered}`;
             add("fail", "Claude", this._errorMessage(err));
           }
         }
-        const required = [FIELDS.MEETING_URL, FIELDS.PARTICIPANT_NAMES];
+        const required = [FIELDS.MEETING_URL];
         const missing = required.filter((field) => !this._fieldById(this._mappedFieldId(field)));
         if (missing.length) add("fail", "Fields", `Missing or invalid: ${missing.join(", ")}.`);
-        else add("pass", "Fields", "Meeting URL and Participant Names are bound; transcript and summary use the page body.");
+        else add("pass", "Fields", "Meeting URL is bound; transcript and summary use the page body. Participants land on Attendees.");
         const attendees = this._attendeesField();
         if (!attendees) add("fail", "Attendees", "Choose a valid multi-record collection-link field in Field Mapping.");
         else if (!this._settings.mapParticipantNamesToAttendees) add("warn", "Attendee matching", "Optional and turned off; Attendees remains available for manual links.");
@@ -8377,8 +8633,7 @@ ${recovered}`;
                 name = target.getName?.() || name;
               } catch {
               }
-              const creation = this._settings.createMissingPeople ? " Missing named participants will be created." : "";
-              add("pass", "Attendee matching", `${attendeesLabel} is limited to ${name}; confident participant matches will be added.${creation}`);
+              add("pass", "Attendee matching", `${attendeesLabel} is limited to ${name}; confident matches are linked silently. Unmatched names get a confirmation dialog after the meeting.`);
             } else add("fail", "Attendee matching", `The collection restriction on ${attendeesLabel} points to an unavailable collection.`);
           }
         }
@@ -8402,20 +8657,14 @@ ${recovered}`;
         optionRow({
           type: "checkbox",
           name: "mapParticipantNamesToAttendees",
-          label: "Map Participant Names (plaintext) to Attendees (collection items)?",
+          label: "Match participants to Attendees",
+          desc: "Confident email or unique-name matches are linked silently. Unmatched people get a confirmation dialog after the meeting so you can set a full name and email before creating a Person.",
           checked: !!this._draft.mapParticipantNamesToAttendees,
           onChange: /* @__PURE__ */ __name((event) => this._updateSetting("mapParticipantNamesToAttendees", !!event.target.checked, { rerender: true }), "onChange")
         }),
         this._fieldSelectInput("Attendees field", "attendeesFieldId", ["record"], {
           filter: isAttendeesRelationField,
           emptyTypeLabel: "multi-record collection-link"
-        }),
-        optionRow({
-          type: "checkbox",
-          name: "createMissingPeople",
-          label: "Create missing People records when mapping",
-          checked: !!this._draft.createMissingPeople,
-          onChange: /* @__PURE__ */ __name((event) => this._updateSetting("createMissingPeople", !!event.target.checked, { rerender: true }), "onChange")
         })
       ];
     }
@@ -8450,7 +8699,7 @@ ${recovered}`;
               type: "checkbox",
               name: "autoSchedule",
               label: "Send the bot automatically to scheduled meetings",
-              desc: "When a Join At time is set at least 10 minutes out, book the notetaker automatically. Cancel anytime.",
+              desc: "When Date is far enough out (about 12 minutes, so the bot can join 2 minutes early), book the notetaker automatically. Cancel anytime.",
               checked: !!draft.autoSchedule,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("autoSchedule", !!event.target.checked, { rerender: true }), "onChange")
             }),
@@ -8472,8 +8721,7 @@ ${recovered}`;
           label: "Field Mapping",
           body: [
             this._fieldSelectInput("Meeting URL field", "meetingUrlFieldId", ["url", "text"]),
-            this._fieldSelectInput("Join At field", "joinAtFieldId", ["datetime", "date"]),
-            this._fieldSelectInput("Participant Names field", "participantNamesFieldId", ["text"]),
+            this._fieldSelectInput("Date field", "joinAtFieldId", ["datetime", "date"]),
             ...this._attendeeMappingControls(),
             this._fieldSelectInput("Related field", "relatedFieldId", ["record"], {
               filter: /* @__PURE__ */ __name((field) => !!field && field.active !== false && String(field.type || "").toLowerCase() === "record" && field.many === true, "filter"),
@@ -8567,7 +8815,7 @@ ${recovered}`;
         }),
         section({
           label: "Body outline",
-          hint: "Order of the four headings on new meeting records. Existing meetings keep their content until you run Apply heading format in Setup \u2192 Diagnostics.",
+          hint: "Order of the four headings on new meeting records. Existing meetings keep their content until you run Apply to existing meetings in Setup \u2192 Diagnostics.",
           body: [
             this._textInput(
               "Section order",
@@ -8588,6 +8836,13 @@ ${recovered}`;
               this._selectInput("Action items heading level", "actionItemsHeadingLevel", HEADING_LEVEL_OPTIONS),
               this._textInput("Notes heading", "notesHeadingText", "\u{1F5D2}\uFE0F Notes"),
               this._selectInput("Notes heading level", "notesHeadingLevel", HEADING_LEVEL_OPTIONS)
+            ]
+          }),
+          section({
+            label: "Citations",
+            hint: "Label on new summary citation chips. The arrow is Thymer\u2019s link chrome and cannot be removed. Existing chips keep their original label until the meeting is summarized again.",
+            body: [
+              this._selectInput("Citation label", "citationStyle", CITATION_STYLE_OPTIONS)
             ]
           }),
           section({
@@ -8722,7 +8977,7 @@ ${recovered}`;
         h(
           "li",
           {},
-          "Add a meeting link to a Meeting record and click Join Now \u2014 the notetaker walks in straight away. If you also set a Join At time 10+ minutes out, the button becomes Schedule Bot instead and Recall sends the notetaker in on its own when the meeting starts. Either way the transcript arrives as people talk, and the summary is written once the meeting ends."
+          "Add a meeting link to a Meeting record and click Join Now \u2014 the notetaker walks in straight away. If you also set a Date far enough out, the button becomes Schedule Bot instead and Recall sends the notetaker in two minutes before the meeting starts. Either way the transcript arrives as people talk, and the summary is written once the meeting ends."
         ),
         h(
           "li",
@@ -9334,6 +9589,74 @@ ${recovered}`;
 				outline: none;
 				border-color: var(--tps-accent);
 			}
+			.${ROOT_CLASS}-confirm-overlay {
+				position: fixed;
+				inset: 0;
+				z-index: 10000;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				background: color-mix(in srgb, #000 42%, transparent);
+			}
+			.${ROOT_CLASS}-confirm-dialog {
+				width: min(520px, calc(100vw - 32px));
+				max-height: calc(100vh - 48px);
+				overflow: auto;
+				padding: 20px;
+				border-radius: 12px;
+				background: var(--tps-bg, var(--bg-default, #1c1c1c));
+				color: var(--tps-text, var(--text-default, inherit));
+				border: 1px solid var(--tps-divider, rgba(127,127,127,0.18));
+				box-shadow: 0 16px 48px rgba(0,0,0,0.28);
+			}
+			.${ROOT_CLASS}-confirm-title {
+				margin: 0 0 8px;
+				font-size: 18px;
+			}
+			.${ROOT_CLASS}-confirm-lede {
+				margin: 0 0 16px;
+				color: var(--tps-text-muted, var(--text-muted, inherit));
+				font-size: 13px;
+				line-height: 1.45;
+			}
+			.${ROOT_CLASS}-confirm-list { display: grid; gap: 12px; }
+			.${ROOT_CLASS}-confirm-row {
+				display: grid;
+				grid-template-columns: auto 1fr;
+				gap: 10px;
+				align-items: start;
+			}
+			.${ROOT_CLASS}-confirm-fields { display: grid; gap: 6px; }
+			.${ROOT_CLASS}-confirm-recall {
+				font-size: 12px;
+				color: var(--tps-text-muted, var(--text-muted, inherit));
+			}
+			.${ROOT_CLASS}-confirm-input {
+				width: 100%;
+				padding: 6px 8px;
+				border-radius: 6px;
+				border: 1px solid var(--tps-divider, rgba(127,127,127,0.2));
+				background: var(--tps-bg-input, rgba(127,127,127,0.06));
+				color: inherit;
+			}
+			.${ROOT_CLASS}-confirm-actions {
+				display: flex;
+				justify-content: flex-end;
+				gap: 8px;
+				margin-top: 16px;
+			}
+			.${ROOT_CLASS}-confirm-save,
+			.${ROOT_CLASS}-confirm-skip {
+				padding: 6px 12px;
+				border-radius: 6px;
+				border: 1px solid var(--tps-divider, rgba(127,127,127,0.2));
+				background: transparent;
+				color: inherit;
+				cursor: pointer;
+			}
+			.${ROOT_CLASS}-confirm-save {
+				border-color: var(--tps-accent, currentColor);
+			}
 		`;
     }
   };
@@ -9394,12 +9717,6 @@ ${recovered}`;
     return entries;
   }
   __name(transcriptEntries, "transcriptEntries");
-  function formatTranscriptCitationLabel(entry, settings) {
-    const speaker = String(entry && entry.speaker || "Speaker").trim() || "Speaker";
-    const stamp = entryStamp(entry, settings);
-    return stamp ? `${speaker} \xB7 ${stamp}` : speaker;
-  }
-  __name(formatTranscriptCitationLabel, "formatTranscriptCitationLabel");
   function formatEntryHeader(entry, settings) {
     const stamp = settings.utteranceTimestamps ? entryStamp(entry, settings) || "" : "";
     const template = settings.turnHeaderTemplate || "[{Time}] {Speaker}";
