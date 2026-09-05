@@ -3523,6 +3523,15 @@ ${report}
     }) || null;
   }
   __name(findOwnedLine, "findOwnedLine");
+  function findOwnedRole(items, role, index = null) {
+    const wanted = String(role || "");
+    if (!wanted) return null;
+    return (Array.isArray(items) ? items : []).find((line) => {
+      if (String(lineMeta(line, LINE_META.ROLE) || "") !== wanted) return false;
+      return index == null || Number(lineMeta(line, LINE_META.ENTRY_INDEX)) === Number(index);
+    }) || null;
+  }
+  __name(findOwnedRole, "findOwnedRole");
   function ownershipProps(botId, role, extra = {}) {
     const props = {
       [LINE_META.SCHEMA]: LINE_META_SCHEMA,
@@ -3550,6 +3559,219 @@ ${report}
     }
   }
   __name(runCoalesced, "runCoalesced");
+
+  // meeting-body.js
+  var BODY_ROLES = Object.freeze({
+    SUMMARY: "summary_root",
+    ACTION_ITEMS: "action_items_root",
+    NOTES: "notes_root",
+    TRANSCRIPT: "transcript_root"
+  });
+  var TEMPLATE_OWNER = "meeting";
+  var BODY_SECTION_ORDER = Object.freeze([
+    { role: BODY_ROLES.SUMMARY, headingTextKey: "summaryHeadingText", headingLevelKey: "summaryHeadingLevel", fallbackText: "\u{1F4DD} Summary", fallbackLevel: "h2" },
+    { role: BODY_ROLES.ACTION_ITEMS, headingTextKey: "actionItemsHeadingText", headingLevelKey: "actionItemsHeadingLevel", fallbackText: "\u2705 Action items", fallbackLevel: "h2" },
+    { role: BODY_ROLES.NOTES, headingTextKey: "notesHeadingText", headingLevelKey: "notesHeadingLevel", fallbackText: "\u{1F5D2}\uFE0F Notes", fallbackLevel: "h2" },
+    { role: BODY_ROLES.TRANSCRIPT, headingTextKey: "transcriptHeadingText", headingLevelKey: "transcriptHeadingLevel", fallbackText: "\u{1F399}\uFE0F Transcript", fallbackLevel: "h2" }
+  ]);
+  function lineItemPlainText(line) {
+    if (!line) return "";
+    const segs = Array.isArray(line.segments) ? line.segments : [];
+    return segs.map(
+      /** @param {any} seg */
+      (seg) => {
+        if (!seg) return "";
+        if (typeof seg.text === "string") return seg.text;
+        if (seg.text && typeof seg.text === "object") {
+          if (typeof seg.text.title === "string" && seg.text.title.trim()) return seg.text.title;
+          if (typeof seg.text.link === "string") return seg.text.link;
+          if (typeof seg.text.text === "string") return seg.text.text;
+        }
+        return "";
+      }
+    ).join("").replace(/\s+/g, " ").trim();
+  }
+  __name(lineItemPlainText, "lineItemPlainText");
+  function headingSearchLabel(headingText) {
+    return String(headingText || "").replace(/\p{Extended_Pictographic}/gu, "").replace(/\uFE0F/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+  }
+  __name(headingSearchLabel, "headingSearchLabel");
+  function guessHeadingByLabel(items, recordGuid, headingText) {
+    const label = headingSearchLabel(headingText);
+    if (!label || !recordGuid) return null;
+    return (Array.isArray(items) ? items : []).find((line) => {
+      if (!line || String(line.parent_guid || "") !== String(recordGuid)) return false;
+      if (lineMeta(line, LINE_META.ROLE)) return false;
+      const text = lineItemPlainText(line).toLowerCase();
+      return text.includes(label);
+    }) || null;
+  }
+  __name(guessHeadingByLabel, "guessHeadingByLabel");
+  function notesTextFromItems(items, notesRootGuid) {
+    const root = String(notesRootGuid || "");
+    if (!root) return "";
+    const list2 = Array.isArray(items) ? items : [];
+    const kids = /* @__PURE__ */ new Map();
+    for (const line of list2) {
+      const parent = line && line.parent_guid ? String(line.parent_guid) : "";
+      if (!parent) continue;
+      const arr = kids.get(parent) || [];
+      arr.push(line);
+      kids.set(parent, arr);
+    }
+    const lines = [];
+    const walk = /* @__PURE__ */ __name((parentGuid) => {
+      for (const child of kids.get(parentGuid) || []) {
+        const text = lineItemPlainText(child);
+        if (text) lines.push(text);
+        if (child && child.guid) walk(String(child.guid));
+      }
+    }, "walk");
+    walk(root);
+    return lines.join("\n").trim();
+  }
+  __name(notesTextFromItems, "notesTextFromItems");
+
+  // summary-format.js
+  var SUMMARY_WRAPPER_TITLES = /* @__PURE__ */ new Set(["meeting notes", "summary", "meeting summary", "notes", "meeting recap", "recap"]);
+  function isTableSeparatorRow(line) {
+    return /\|/.test(line) && /-/.test(line) && /^[\s|:-]+$/.test(line);
+  }
+  __name(isTableSeparatorRow, "isTableSeparatorRow");
+  function tableRowCells(line) {
+    return line.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map(
+      /** @param {string} c */
+      (c) => c.trim()
+    ).filter(Boolean);
+  }
+  __name(tableRowCells, "tableRowCells");
+  function looksLikeGluedMarkdown(text) {
+    return /nn#{1,6}\s|n#{1,6}\s|nn---|n-\s/.test(text);
+  }
+  __name(looksLikeGluedMarkdown, "looksLikeGluedMarkdown");
+  function looksLikeMashedSummary(text) {
+    const s = String(text == null ? "" : text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    if (!s.trim()) return false;
+    if (s.includes("\n")) return false;
+    if (s.includes("\\n") || s.includes("\\r") || s.includes("\\t")) return true;
+    return looksLikeGluedMarkdown(s);
+  }
+  __name(looksLikeMashedSummary, "looksLikeMashedSummary");
+  function recoverSummaryMarkdown(text) {
+    let s = String(text == null ? "" : text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    if (s.includes("\n")) return s;
+    if (s.includes("\\n") || s.includes("\\r") || s.includes("\\t")) {
+      return s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\t/g, "	");
+    }
+    if (!looksLikeGluedMarkdown(s)) return s;
+    return s.replace(/nn(#{1,6}\s)/g, "\n\n$1").replace(/n(#{1,6}\s)/g, "\n$1").replace(/nn(---)/g, "\n\n$1").replace(/n(---)/g, "\n$1").replace(/n(-\s)/g, "\n$1").replace(/n(\|)/g, "\n$1").replace(/(#{1,6}\s[^\n]+)n([A-Z])/g, "$1\n$2");
+  }
+  __name(recoverSummaryMarkdown, "recoverSummaryMarkdown");
+  function sanitizeSummaryMarkdown(md) {
+    const src = String(md || "").replace(/\r\n?/g, "\n").split("\n");
+    const out = [];
+    for (let i = 0; i < src.length; i++) {
+      const line = src[i];
+      if (/^\s*([-*_])\1{2,}\s*$/.test(line)) continue;
+      if (line.includes("|") && i + 1 < src.length && isTableSeparatorRow(src[i + 1])) {
+        let j = i + 2;
+        for (; j < src.length; j++) {
+          const row = src[j];
+          if (!row.trim() || !row.includes("|")) break;
+          const cells = tableRowCells(row);
+          if (cells.length) out.push(`- ${cells.join(" \u2014 ")}`);
+        }
+        i = j - 1;
+        continue;
+      }
+      out.push(line);
+    }
+    let start = 0;
+    while (start < out.length && !out[start].trim()) start++;
+    if (start < out.length) {
+      const m = out[start].match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/) || out[start].match(/^\s*\*\*(.+?)\*\*\s*$/);
+      if (m && SUMMARY_WRAPPER_TITLES.has(m[1].trim().replace(/[:.]+$/, "").toLowerCase())) out.splice(start, 1);
+    }
+    for (let k = 0; k < out.length; k++) out[k] = out[k].replace(/^(\s{0,3})#{1,6}(?=\s)/, "$1###");
+    let inActionItems = false;
+    for (let k = 0; k < out.length; k++) {
+      const heading = out[k].match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/);
+      if (heading) {
+        inActionItems = /^action items?\b/i.test(heading[1].trim());
+        continue;
+      }
+      if (inActionItems) out[k] = out[k].replace(/^(\s*)[-*+]\s+(?!\[[ xX]\]\s)/, "$1- [ ] ");
+    }
+    return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+  __name(sanitizeSummaryMarkdown, "sanitizeSummaryMarkdown");
+  function sectionJsonInstruction(count2) {
+    return [
+      "Additionally, divide the transcript into a handful of topic sections in time order.",
+      `Each line below is numbered like [N], from 0 to ${count2 - 1}.`,
+      "At the end of every non-heading summary line, add one or two citations. Use {{cite:S:E}} when transcript line E directly supports that wording, where S is the zero-based index into your sections array. Use the broader {{cite:S}} only when the line synthesizes several turns in that topic and no single transcript line is sufficient.",
+      "For multiple sources use one marker such as {{cite:1:8,2:14}}. Every E must fall inside section S. Choose only the most direct source or two, and do not put citation markers on headings.",
+      "Put real newlines in the JSON summary string. Use JSON string escaping so each line break is a real newline in the parsed value \u2014 do not write the two characters backslash and n as visible text, and do not glue headings together.",
+      'Do NOT put Action Items inside the summary \u2014 they go in a separate "### Action Items" block that the plugin will hoist out of the summary.',
+      "Respond with ONLY a JSON object \u2014 no code fence, no text before or after \u2014 of the form:",
+      '{"summary": "<the markdown summary with {{cite:0:3}} or {{cite:0}} markers, as one JSON string>", "sections": [{"title": "<short topic label, no timestamps>", "start": <first transcript line number>, "end": <last transcript line number>}]}',
+      "Sections must be in order, must not overlap, and together must cover every line from 0 to " + (count2 - 1) + ". Aim for 3\u20138 sections."
+    ].join("\n");
+  }
+  __name(sectionJsonInstruction, "sectionJsonInstruction");
+  function parseSummaryAndSections(raw, count2) {
+    const text = String(raw || "").trim();
+    const unfenced = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    let obj = null;
+    try {
+      obj = JSON.parse(unfenced);
+    } catch {
+    }
+    if (!obj) {
+      const start = unfenced.indexOf("{");
+      const end = unfenced.lastIndexOf("}");
+      if (start >= 0 && end > start) {
+        try {
+          obj = JSON.parse(unfenced.slice(start, end + 1));
+        } catch {
+        }
+      }
+    }
+    if (!obj || typeof obj !== "object") return { summary: recoverSummaryMarkdown(text), sections: [] };
+    const summary = typeof obj.summary === "string" && obj.summary.trim() ? obj.summary : text;
+    return { summary: recoverSummaryMarkdown(summary), sections: normalizeSections(Array.isArray(obj.sections) ? obj.sections : [], count2) };
+  }
+  __name(parseSummaryAndSections, "parseSummaryAndSections");
+  function normalizeSections(rawSections, count2) {
+    const out = [];
+    for (let sourceIndex = 0; sourceIndex < rawSections.length; sourceIndex++) {
+      const s = rawSections[sourceIndex];
+      if (!s || typeof s !== "object") continue;
+      const title = String(s.title || "").trim();
+      let start = Math.floor(Number(s.start));
+      let end = Math.floor(Number(s.end));
+      if (!title || !Number.isFinite(start) || !Number.isFinite(end)) continue;
+      start = Math.max(0, Math.min(start, count2 - 1));
+      end = Math.max(start, Math.min(end, count2 - 1));
+      out.push({ title, start, end, sourceIndex });
+    }
+    out.sort((a, b) => a.start - b.start);
+    const clean = [];
+    let cursor = -1;
+    for (const s of out) {
+      if (s.start <= cursor) s.start = cursor + 1;
+      if (s.start > s.end || s.start > count2 - 1) continue;
+      clean.push(s);
+      cursor = s.end;
+    }
+    if (clean.length) {
+      clean[0].start = 0;
+      for (let i = 1; i < clean.length; i++) clean[i - 1].end = clean[i].start - 1;
+      clean[clean.length - 1].end = count2 - 1;
+    }
+    return clean;
+  }
+  __name(normalizeSections, "normalizeSections");
 
   // transcript-quality.js
   function coalesceAdjacentTranscriptEntries(entries) {
@@ -3808,6 +4030,30 @@ ${report}
     return isAttendeesRelationField(field) ? String(field.filter_colguid || "").trim() : "";
   }
   __name(attendeesTargetCollectionGuid, "attendeesTargetCollectionGuid");
+  var PEOPLE_COLLECTION_EXACT = /* @__PURE__ */ new Set(["people", "contacts", "team", "staff"]);
+  function guessPeopleCollection(collections) {
+    let best = null;
+    let bestScore = 0;
+    for (const collection of Array.isArray(collections) ? collections : []) {
+      let name = "";
+      try {
+        name = collection && collection.getName ? String(collection.getName() || "") : "";
+      } catch {
+        name = "";
+      }
+      const key = name.trim().toLowerCase();
+      if (!key) continue;
+      let score = 0;
+      if (PEOPLE_COLLECTION_EXACT.has(key)) score = 2;
+      else if ([...PEOPLE_COLLECTION_EXACT].some((token) => key.includes(token))) score = 1;
+      if (score > bestScore) {
+        bestScore = score;
+        best = collection;
+      }
+    }
+    return best;
+  }
+  __name(guessPeopleCollection, "guessPeopleCollection");
   function mergeAttendeeGuids(existing, matched) {
     const out = [];
     for (const value of [...Array.isArray(existing) ? existing : [], ...Array.isArray(matched) ? matched : []]) {
@@ -3890,6 +4136,15 @@ ${report}
     read_only: false,
     active: true
   });
+  var RELATED_FIELD_DEFINITION = Object.freeze({
+    id: "related",
+    label: "Related",
+    type: "record",
+    icon: "ti-link",
+    many: true,
+    read_only: false,
+    active: true
+  });
   function migrateMeetingSchema(configuration) {
     const conf = JSON.parse(JSON.stringify(configuration && typeof configuration === "object" ? configuration : {}));
     conf.fields = Array.isArray(conf.fields) ? conf.fields : [];
@@ -3918,23 +4173,34 @@ ${report}
       conf.fields.push(attendees);
       changed = true;
     }
-    if (attendees) {
-      const id = String(attendees.id || "");
+    let related = (Array.isArray(conf.fields) ? conf.fields : []).find((field) => String(field && field.id || "") === RELATED_FIELD_DEFINITION.id) || null;
+    if (!related) {
+      related = { ...RELATED_FIELD_DEFINITION };
+      conf.fields.push(related);
+      changed = true;
+    }
+    const ensureFieldId = /* @__PURE__ */ __name((ids, id, afterId = "") => {
+      if (!id || ids.includes(id)) return ids;
+      changed = true;
+      const at = afterId ? ids.indexOf(afterId) : -1;
+      if (at >= 0) ids.splice(at + 1, 0, id);
+      else ids.push(id);
+      return ids;
+    }, "ensureFieldId");
+    const attendeesId = attendees ? String(attendees.id || "") : "";
+    const relatedId = related ? String(related.id || "") : "";
+    if (attendeesId || relatedId) {
       conf.page_field_ids = Array.isArray(conf.page_field_ids) ? conf.page_field_ids : [];
-      if (id && !conf.page_field_ids.includes(id)) {
-        conf.page_field_ids.push(id);
-        changed = true;
-      }
+      if (attendeesId) conf.page_field_ids = ensureFieldId(conf.page_field_ids, attendeesId);
+      if (relatedId) conf.page_field_ids = ensureFieldId(conf.page_field_ids, relatedId, attendeesId);
       const table = (Array.isArray(conf.views) ? conf.views : []).find((view) => String(view && view.type || "") === "table");
       if (table) {
         table.field_ids = Array.isArray(table.field_ids) ? table.field_ids : [];
-        if (id && !table.field_ids.includes(id)) {
-          table.field_ids.push(id);
-          changed = true;
-        }
+        if (attendeesId) table.field_ids = ensureFieldId(table.field_ids, attendeesId);
+        if (relatedId) table.field_ids = ensureFieldId(table.field_ids, relatedId, attendeesId);
       }
     }
-    return { configuration: conf, changed, attendeesFieldId: attendees ? String(attendees.id || "") : "" };
+    return { configuration: conf, changed, attendeesFieldId: attendeesId, relatedFieldId: relatedId };
   }
   __name(migrateMeetingSchema, "migrateMeetingSchema");
 
@@ -4046,7 +4312,7 @@ ${report}
   __name(formatRelativeTime, "formatRelativeTime");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.22.15";
+  var PLUGIN_VERSION = "1.23.1";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -4061,6 +4327,7 @@ ${report}
     JOIN_AT: "join_at",
     PARTICIPANT_NAMES: "participant_names",
     ATTENDEES: "attendees",
+    RELATED: "related",
     BOT_ID: "recall_bot_id",
     STATUS: "recall_status",
     LAST_ERROR: "last_error"
@@ -4070,6 +4337,7 @@ ${report}
     [FIELDS.JOIN_AT]: { id: FIELDS.JOIN_AT, label: "Join At", type: "datetime", icon: "ti-calendar", many: false, read_only: false, active: true },
     [FIELDS.PARTICIPANT_NAMES]: { id: FIELDS.PARTICIPANT_NAMES, label: "Participant Names", type: "text", icon: "ti-users", many: false, read_only: false, active: true },
     [FIELDS.ATTENDEES]: ATTENDEES_FIELD_DEFINITION,
+    [FIELDS.RELATED]: RELATED_FIELD_DEFINITION,
     [FIELDS.BOT_ID]: { id: FIELDS.BOT_ID, label: "Bot ID", type: "text", icon: "ti-robot", many: false, read_only: false, active: true },
     [FIELDS.STATUS]: { id: FIELDS.STATUS, label: "Bot Status", type: "text", icon: "ti-activity", many: false, read_only: false, active: true },
     [FIELDS.LAST_ERROR]: { id: FIELDS.LAST_ERROR, label: "Last Error", type: "text", icon: "ti-alert-triangle", many: false, read_only: false, active: true }
@@ -4078,7 +4346,8 @@ ${report}
     meetingUrlFieldId: FIELDS.MEETING_URL,
     joinAtFieldId: FIELDS.JOIN_AT,
     participantNamesFieldId: FIELDS.PARTICIPANT_NAMES,
-    attendeesFieldId: FIELDS.ATTENDEES
+    attendeesFieldId: FIELDS.ATTENDEES,
+    relatedFieldId: FIELDS.RELATED
   });
   var CREATE_FIELD_OPTION = "__create__";
   var ROOT_CLASS = "plg-recall-ai";
@@ -4113,7 +4382,8 @@ ${report}
     joinAtFieldId: "",
     participantNamesFieldId: "",
     attendeesFieldId: "",
-    mapParticipantNamesToAttendees: false,
+    relatedFieldId: "",
+    mapParticipantNamesToAttendees: true,
     createMissingPeople: false,
     botImageUrl: "",
     botImageData: "",
@@ -4122,7 +4392,7 @@ ${report}
     joinChatMessage: "This meeting is being recorded and transcribed.",
     sendJoinChatMessage: true,
     pollSeconds: 30,
-    autoSchedule: false,
+    autoSchedule: true,
     recordingRetention: "168",
     autoSummarize: true,
     transcriptTimestamps: "clock",
@@ -4135,18 +4405,35 @@ ${report}
     sectionHeadingTemplate: "{Topic} | {Range}",
     sectionRangeStyle: "clock",
     summaryPrompt: [
+      "Summarize this meeting as clean Markdown for a Thymer outline note. Follow these formatting rules exactly:",
+      "- Do NOT add a title or top-level heading \u2014 the note already has Summary and Action items headings.",
+      '- Summary sections each get a "### " heading: Overview, Decisions, Open Questions. Include a section only when it has content. Do NOT put Action Items inside the summary.',
+      '- After the summary, output a separate section headed exactly "### Action Items" with one "- [ ] " checkbox each, written "<action> \u2014 <owner>" (drop "\u2014 <owner>" when no owner is named).',
+      '- Overview: one short paragraph. Decisions: one "- " bullet each. Open Questions: one "- " bullet each.',
+      "- Never use horizontal rules (--- or ***), never use Markdown tables, and do not leave blank lines inside a section.",
+      "- If HUMAN NOTES are provided, treat them as higher priority than the transcript: they are the participant's own record of what mattered. Prefer them when they conflict with or focus the spoken discussion.",
+      "Be concise and factual."
+    ].join("\n"),
+    transcriptHeadingText: "\u{1F399}\uFE0F Transcript",
+    transcriptHeadingLevel: "h2",
+    summaryHeadingText: "\u{1F4DD} Summary",
+    summaryHeadingLevel: "h2",
+    actionItemsHeadingText: "\u2705 Action items",
+    actionItemsHeadingLevel: "h2",
+    notesHeadingText: "\u{1F5D2}\uFE0F Notes",
+    notesHeadingLevel: "h2"
+  });
+  var LEGACY_SUMMARY_PROMPTS = Object.freeze([
+    "Summarize this meeting transcript for a Thymer note. Include: 1) a concise overview, 2) decisions made, 3) action items with owners when mentioned, and 4) open questions. Keep the output skimmable and factual.",
+    [
       "Summarize this meeting transcript as clean Markdown for a Thymer outline note. Follow these formatting rules exactly:",
       "- Do NOT add a title or top-level heading \u2014 the note already has a Summary heading, so start directly with the first section.",
       '- Give each section its own "### " heading: Overview, Decisions, Action Items, Open Questions. Include a section only when it has content.',
       '- Overview: one short paragraph. Decisions: one "- " bullet each. Action Items: one "- [ ] " checkbox each, written "<action> \u2014 <owner>" (drop the "\u2014 <owner>" when no owner is named). Open Questions: one "- " bullet each.',
       "- Never use horizontal rules (--- or ***), never use Markdown tables, and do not leave blank lines inside a section.",
       "Be concise and factual."
-    ].join("\n"),
-    transcriptHeadingText: "\u{1F399}\uFE0F Transcript",
-    transcriptHeadingLevel: "h3",
-    summaryHeadingText: "\u{1F4DD} Summary",
-    summaryHeadingLevel: "h3"
-  });
+    ].join("\n")
+  ]);
   var HEADING_LEVEL_OPTIONS = [
     ["h1", "Heading 1 (largest)"],
     ["h2", "Heading 2"],
@@ -4169,8 +4456,8 @@ ${report}
       joinAtFieldId: str("joinAtFieldId"),
       participantNamesFieldId: str("participantNamesFieldId"),
       attendeesFieldId: str("attendeesFieldId"),
-      // Preserve an existing opt-in from the retired two-dropdown setup; new installs default off.
-      mapParticipantNamesToAttendees: typeof src.mapParticipantNamesToAttendees === "boolean" ? src.mapParticipantNamesToAttendees : !!(String(src.personCollectionGuid || "").trim() && String(src.attendeesFieldId || "").trim()),
+      relatedFieldId: str("relatedFieldId"),
+      mapParticipantNamesToAttendees: typeof src.mapParticipantNamesToAttendees === "boolean" ? src.mapParticipantNamesToAttendees : true,
       createMissingPeople: bool("createMissingPeople"),
       botImageUrl: str("botImageUrl"),
       botImageData: str("botImageData"),
@@ -4191,11 +4478,15 @@ ${report}
       transcriptSections: bool("transcriptSections"),
       sectionHeadingTemplate: str("sectionHeadingTemplate"),
       sectionRangeStyle: normalizeSectionRangeStyle(src.sectionRangeStyle),
-      summaryPrompt: str("summaryPrompt"),
+      summaryPrompt: LEGACY_SUMMARY_PROMPTS.includes(str("summaryPrompt")) ? DEFAULT_SETTINGS.summaryPrompt : str("summaryPrompt"),
       transcriptHeadingText: str("transcriptHeadingText"),
-      transcriptHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.transcriptHeadingLevel) ? src.transcriptHeadingLevel : "h3",
+      transcriptHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.transcriptHeadingLevel) ? src.transcriptHeadingLevel : DEFAULT_SETTINGS.transcriptHeadingLevel,
       summaryHeadingText: str("summaryHeadingText"),
-      summaryHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.summaryHeadingLevel) ? src.summaryHeadingLevel : "h3"
+      summaryHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.summaryHeadingLevel) ? src.summaryHeadingLevel : DEFAULT_SETTINGS.summaryHeadingLevel,
+      actionItemsHeadingText: str("actionItemsHeadingText"),
+      actionItemsHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.actionItemsHeadingLevel) ? src.actionItemsHeadingLevel : DEFAULT_SETTINGS.actionItemsHeadingLevel,
+      notesHeadingText: str("notesHeadingText"),
+      notesHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.notesHeadingLevel) ? src.notesHeadingLevel : DEFAULT_SETTINGS.notesHeadingLevel
     };
   }
   __name(normalizePrefs, "normalizePrefs");
@@ -4397,6 +4688,10 @@ ${report}
       this._navButton = null;
       this._syncButton = null;
       this._diagnosticsButton = null;
+      this._healButton = null;
+      this._healCommandItem = null;
+      this._healInFlight = null;
+      this._healRecordInFlight = /* @__PURE__ */ new Map();
       this._editorObserver = null;
       this._observedRoot = null;
       this._attachRetryTimer = null;
@@ -4408,6 +4703,7 @@ ${report}
       this._syncInFlight = /* @__PURE__ */ new Map();
       this._botCreateInFlight = /* @__PURE__ */ new Map();
       this._personCreateInFlight = /* @__PURE__ */ new Map();
+      this._skeletonInFlight = /* @__PURE__ */ new Map();
       this._diagnosticsByRecord = /* @__PURE__ */ new Map();
       this._setupDoctorState = this._loadSetupDoctorState();
       this._setupDoctorInFlight = null;
@@ -4475,6 +4771,18 @@ ${report}
         tooltip: "Copy bridge, webhook, parser, and transcript diagnostics for this meeting",
         onlyWhenExpanded: true,
         onClick: /* @__PURE__ */ __name(({ record }) => void this._showMeetingDiagnostics(record), "onClick")
+      });
+      this._healButton = this.addCollectionNavigationButton({
+        label: "Heal mashed summaries",
+        icon: "tools",
+        tooltip: "Rewrite this meeting\u2019s mashed summary (nn### / literal \\n). Does not touch Notes or Transcript.",
+        onlyWhenExpanded: true,
+        onClick: /* @__PURE__ */ __name(({ record }) => void this._healMashedSummariesForRecord(record), "onClick")
+      });
+      this._healCommandItem = this.ui.addCommandPaletteCommand({
+        label: "Meetings: Heal mashed summaries",
+        icon: "tools",
+        onSelected: /* @__PURE__ */ __name(() => void this._healMashedSummariesBulk(), "onSelected")
       });
     }
     /**
@@ -4666,12 +4974,26 @@ ${report}
       this._handlerIds.push(on("panel.navigated", () => {
         this._attachEditorObserver();
         this._updateNavButtonForActiveRecord();
+        this._ensureActiveMeetingSkeleton();
       }));
       this._handlerIds.push(on("panel.focused", () => {
         this._attachEditorObserver();
         this._updateNavButtonForActiveRecord();
+        this._ensureActiveMeetingSkeleton();
       }));
-      this._handlerIds.push(on("record.created", () => this._scheduleRecordRefresh()));
+      this._handlerIds.push(on("record.created", (ev) => {
+        this._scheduleRecordRefresh();
+        let ours = false;
+        try {
+          const coll = ev && typeof ev.getCollection === "function" ? ev.getCollection() : null;
+          const collGuid = coll && typeof coll.getGuid === "function" ? coll.getGuid() : "";
+          if (collGuid && collGuid !== this._selfGuid()) return;
+          if (collGuid && collGuid === this._selfGuid()) ours = true;
+        } catch {
+        }
+        const rec = ev && typeof ev.getRecord === "function" ? ev.getRecord() : null;
+        if (rec && (ours || this._isOurRecord(rec))) void this._ensureMeetingSkeleton(rec);
+      }));
       this._handlerIds.push(on("record.updated", () => {
         this._scheduleRecordRefresh();
         this._updateNavButtonForActiveRecord();
@@ -4696,6 +5018,10 @@ ${report}
         this._commandItem.remove();
         this._commandItem = null;
       }
+      if (this._healCommandItem) {
+        this._healCommandItem.remove();
+        this._healCommandItem = null;
+      }
       try {
         if (this._navButton && this._navButton.remove) this._navButton.remove();
       } catch {
@@ -4706,6 +5032,10 @@ ${report}
       }
       try {
         if (this._diagnosticsButton && this._diagnosticsButton.remove) this._diagnosticsButton.remove();
+      } catch {
+      }
+      try {
+        if (this._healButton && this._healButton.remove) this._healButton.remove();
       } catch {
       }
       if (this._editorObserver) this._editorObserver.disconnect();
@@ -4722,8 +5052,11 @@ ${report}
       if (this._pollers && this._pollers.clear) this._pollers.clear();
       if (this._syncInFlight && this._syncInFlight.clear) this._syncInFlight.clear();
       if (this._botCreateInFlight && this._botCreateInFlight.clear) this._botCreateInFlight.clear();
+      if (this._skeletonInFlight && this._skeletonInFlight.clear) this._skeletonInFlight.clear();
+      if (this._healRecordInFlight && this._healRecordInFlight.clear) this._healRecordInFlight.clear();
       if (this._diagnosticsByRecord && this._diagnosticsByRecord.clear) this._diagnosticsByRecord.clear();
       this._setupDoctorInFlight = null;
+      this._healInFlight = null;
       this._workspaceCollectionsPromise = null;
       this._safe("strip inline buttons", () => this._stripInlineButtons());
     }
@@ -5323,19 +5656,27 @@ ${report}
         });
         const transcriptCompletedBeforeRepair = COMPLETED_MEETING_STATUSES.has(previousStatus);
         const summaryCompletedBeforeRepair = COMPLETED_SUMMARY_STATUSES.has(previousStatus);
-        const transcriptBodyState = await this._bodyOwnershipState(record, botId, "transcript_root", "tx-head", transcriptCompletedBeforeRepair);
-        const summaryBodyState = await this._bodyOwnershipState(record, botId, "summary_root", "summary-body", summaryCompletedBeforeRepair);
-        if (repair && (summaryBodyState === "owned" || summaryBodyState === "incomplete") && typeof record.getLineItems === "function") {
-          try {
-            await this._restoreMarkedSummaryReferences(await record.getLineItems(false), botId);
-          } catch {
+        const transcriptBodyState = await this._bodyOwnershipState(record, botId, BODY_ROLES.TRANSCRIPT, "tx-head", transcriptCompletedBeforeRepair);
+        const summaryBodyState = await this._bodyOwnershipState(record, botId, BODY_ROLES.SUMMARY, "summary-body", summaryCompletedBeforeRepair);
+        const actionItemsBodyState = await this._bodyOwnershipState(record, botId, BODY_ROLES.ACTION_ITEMS, "action-items-body", summaryCompletedBeforeRepair);
+        let mashedHealed = false;
+        if (repair && typeof record.getLineItems === "function") {
+          const mashed = await this._healMashedSummaryRecord(record, { quiet: true });
+          if (mashed === "healed") {
+            repairReport.push("mashed summary healed");
+            mashedHealed = true;
+          } else if (summaryBodyState === "owned" || summaryBodyState === "incomplete") {
+            try {
+              await this._restoreMarkedSummaryReferences(await record.getLineItems(false), botId);
+            } catch {
+            }
           }
         }
-        const summaryBodyMissing = ["missing", "incomplete", "unavailable"].includes(summaryBodyState);
-        const summaryBodyProtected = summaryBodyState === "unknown";
-        let hasSummary = ["owned", "legacy", "unknown"].includes(summaryBodyState);
+        const summaryNeedsWrite = !mashedHealed && (["missing", "incomplete", "unavailable"].includes(summaryBodyState) || ["missing", "incomplete", "unavailable"].includes(actionItemsBodyState));
+        const summaryBodyProtected = summaryBodyState === "unknown" || actionItemsBodyState === "unknown";
+        let hasSummary = mashedHealed || ["owned", "legacy", "unknown"].includes(summaryBodyState) && ["owned", "legacy", "unknown"].includes(actionItemsBodyState) && !summaryNeedsWrite;
         const finalTranscriptReady = !!transcriptText && !liveTranscript;
-        const deferFinalBodyForSections = ended && finalTranscriptReady && summarize && this._settings.autoSummarize && !hasSummary && !!this._settings.anthropicApiKey && !!this._settings.saveTranscript && !!this._settings.transcriptSections && summaryBodyMissing;
+        const deferFinalBodyForSections = ended && finalTranscriptReady && summarize && this._settings.autoSummarize && !hasSummary && !!this._settings.anthropicApiKey && !!this._settings.saveTranscript && !!this._settings.transcriptSections && summaryNeedsWrite;
         if (transcriptText) {
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._log("transcript written", { botId, characters: transcriptText.length });
@@ -5369,7 +5710,7 @@ ${report}
           await this._syncMeetingAttendees(record, botId, entries);
           if (repair) repairReport.push("attendees checked");
         }
-        const shouldGenerateSummary = summaryBodyMissing;
+        const shouldGenerateSummary = summaryNeedsWrite && !summaryBodyProtected;
         if (ended && summarize && this._settings.autoSummarize && shouldGenerateSummary) {
           const summaryOk = await this._summarize(record, transcriptText, entries, {
             deferTranscriptBody: deferFinalBodyForSections
@@ -5487,18 +5828,24 @@ ${report}
           return;
         }
         const field = this._attendeesField();
-        const personCollectionGuid = attendeesTargetCollectionGuid(field);
-        if (!isAttendeesRelationField(field) || !personCollectionGuid) {
-          this._log("people linking skipped: Attendees must be limited to one People collection");
+        if (!isAttendeesRelationField(field)) {
+          this._log("people linking skipped: Attendees must be a multi-record collection-link");
           return;
         }
-        let peopleCollection = this._collectionByGuid(personCollectionGuid);
-        if (!peopleCollection) {
-          await this._loadWorkspaceCollections(true);
+        const personCollectionGuid = attendeesTargetCollectionGuid(field);
+        let peopleCollection = null;
+        if (personCollectionGuid) {
           peopleCollection = this._collectionByGuid(personCollectionGuid);
+          if (!peopleCollection) {
+            await this._loadWorkspaceCollections(true);
+            peopleCollection = this._collectionByGuid(personCollectionGuid);
+          }
+        } else {
+          if (!this._workspaceCollectionsLoaded) await this._loadWorkspaceCollections(true);
+          peopleCollection = guessPeopleCollection(this._workspaceCollections);
         }
         if (!peopleCollection || typeof peopleCollection.getAllRecords !== "function") {
-          this._log("people linking skipped: People collection is unavailable", { personCollectionGuid });
+          this._log("people linking skipped: People collection is unavailable", { personCollectionGuid: personCollectionGuid || "auto" });
           return;
         }
         const people = await peopleCollection.getAllRecords();
@@ -5557,7 +5904,7 @@ ${report}
         this._setField(record, FIELDS.STATUS, "summarizing");
         this._updateNavButtonForRecord(record);
         this._log("summary start", { characters: transcriptText.length });
-        const { summary, sections, citations } = await this._createSummary(transcriptText, entries);
+        const { summary, sections, citations } = await this._createSummary(record, transcriptText, entries);
         if (!summary) throw new Error("Claude returned an empty summary.");
         let sectionResult = { ok: false, anchors: [], turnAnchors: [] };
         if (this._settings.saveTranscript && this._settings.transcriptSections && sections.length && Array.isArray(entries) && entries.length) {
@@ -5591,15 +5938,23 @@ ${report}
      * summary even if the JSON is malformed; bad/empty sections just fall back to the un-sectioned
      * transcript (reorganize is skipped). Returns `{ summary, sections, citations }`.
      *
+     * @param {any} record
      * @param {string} transcriptText
      * @param {Array<{speaker:string,text:string,absoluteIso:string|null,relativeSec:number|null}>} [entries]
      */
-    async _createSummary(transcriptText, entries) {
-      const basePrompt = this._settings.summaryPrompt || DEFAULT_SETTINGS.summaryPrompt;
+    async _createSummary(record, transcriptText, entries) {
+      let basePrompt = this._settings.summaryPrompt || DEFAULT_SETTINGS.summaryPrompt;
+      const notes = await this._readNotesText(record);
+      if (notes) {
+        basePrompt = `${basePrompt}
+
+HUMAN NOTES (higher priority than the transcript \u2014 treat as ground truth when they conflict; weave their substance into Overview/Decisions/Open Questions and into Action Items):
+${notes}`;
+      }
       const wantSections = !!this._settings.transcriptSections && Array.isArray(entries) && entries.length > 0;
       if (!wantSections) {
         const raw2 = await this._callClaude(basePrompt, transcriptText, 1400);
-        return { summary: sanitizeSummaryMarkdown(raw2), sections: [], citations: [] };
+        return { summary: sanitizeSummaryMarkdown(recoverSummaryMarkdown(raw2)), sections: [], citations: [] };
       }
       const prompt = `${basePrompt}
 
@@ -5661,7 +6016,7 @@ ${transcriptText}` }]
       return isOwnedLine(line, botId, role);
     }
     _findOwnedLine(items, botId, role, index = null) {
-      return findOwnedLine(items, botId, role, index);
+      return findOwnedLine(items, botId, role, index) || findOwnedRole(items, role, index);
     }
     async _markOwnedLine(line, botId, role, extra = {}) {
       if (!line || typeof line.setMetaProperties !== "function" || !botId || !role) return false;
@@ -5677,7 +6032,7 @@ ${transcriptText}` }]
     }
     async _migrateLegacyTranscriptMetadata(items, heading, botId, tracked, written) {
       if (!heading || !botId) return;
-      await this._markOwnedLine(heading, botId, "transcript_root");
+      await this._markOwnedLine(heading, botId, BODY_ROLES.TRANSCRIPT);
       const byGuid = new Map((Array.isArray(items) ? items : []).map((line) => [line.guid, line]));
       const guids = Array.isArray(tracked) ? tracked : [];
       const inline = this._settings.transcriptLayout === "inline";
@@ -5696,7 +6051,7 @@ ${transcriptText}` }]
         const items = await record.getLineItems(false);
         const owned = this._findOwnedLine(items, botId, role);
         if (owned) {
-          if (role === "summary_root" && Number(this._lineMeta(owned, LINE_META.COMPLETE)) !== 1) return "incomplete";
+          if ((role === BODY_ROLES.SUMMARY || role === BODY_ROLES.ACTION_ITEMS) && Number(this._lineMeta(owned, LINE_META.COMPLETE)) !== 1) return "incomplete";
           return "owned";
         }
       } catch {
@@ -5723,6 +6078,84 @@ ${transcriptText}` }]
       const n = level === "h1" ? 1 : level === "h2" ? 2 : level === "h3" ? 3 : 0;
       return n ? `${"#".repeat(n)} ${t}` : t;
     }
+    /** @param {{headingTextKey: string, headingLevelKey: string, fallbackText: string, fallbackLevel: string}} spec */
+    _headingForSpec(spec) {
+      const text = String(this._settings && this._settings[spec.headingTextKey] || spec.fallbackText || "").trim();
+      const level = ["h1", "h2", "h3", "none"].includes(this._settings && this._settings[spec.headingLevelKey]) ? this._settings[spec.headingLevelKey] : spec.fallbackLevel;
+      return { text, level };
+    }
+    _isOurRecord(record) {
+      if (!record || !record.guid) return false;
+      if (this._recordsByGuid && this._recordsByGuid.has(record.guid)) return true;
+      try {
+        return !!(this._prop(record, FIELDS.STATUS) || this._prop(record, FIELDS.BOT_ID) || this._prop(record, FIELDS.MEETING_URL));
+      } catch {
+        return false;
+      }
+    }
+    _ensureActiveMeetingSkeleton() {
+      try {
+        const panel2 = this.ui.getActivePanel && this.ui.getActivePanel();
+        const record = panel2 && panel2.getActiveRecord ? panel2.getActiveRecord() : null;
+        if (record && this._isOurRecord(record)) void this._ensureMeetingSkeleton(record);
+      } catch {
+      }
+    }
+    /**
+     * Idempotent four-section outline (Summary, Action items, Notes, Transcript) on every meeting
+     * record. Skeleton headings are stamped TEMPLATE_OWNER; a real bot later restamps by role.
+     * @param {any} record
+     */
+    async _ensureMeetingSkeleton(record) {
+      if (this._disabled || !record || !record.guid) return;
+      if (typeof record.insertFromMarkdown !== "function" || typeof record.getLineItems !== "function") return;
+      if (!this._skeletonInFlight) this._skeletonInFlight = /* @__PURE__ */ new Map();
+      return runCoalesced(this._skeletonInFlight, record.guid, async () => {
+        let items = await record.getLineItems(false);
+        if (!Array.isArray(items)) items = [];
+        let afterPrevious = null;
+        for (const spec of BODY_SECTION_ORDER) {
+          let heading = findOwnedRole(items, spec.role);
+          if (!heading) {
+            const { text } = this._headingForSpec(spec);
+            heading = guessHeadingByLabel(items, record.guid, text);
+          }
+          if (!heading) {
+            const { text, level } = this._headingForSpec(spec);
+            const anchorMd = this._headingAnchorMd(text, level);
+            if (!anchorMd) continue;
+            let afterItem = afterPrevious;
+            if (!afterPrevious && spec.role === BODY_ROLES.SUMMARY) {
+              const txSpec = BODY_SECTION_ORDER.find((item) => item.role === BODY_ROLES.TRANSCRIPT);
+              const txText = txSpec ? this._headingForSpec(txSpec).text : "Transcript";
+              const existingTx = findOwnedRole(items, BODY_ROLES.TRANSCRIPT) || guessHeadingByLabel(items, record.guid, txText);
+              if (existingTx) afterItem = null;
+            }
+            const before = new Set(items.map((li) => li.guid));
+            if (await record.insertFromMarkdown(anchorMd, null, afterItem) === false) continue;
+            items = await record.getLineItems(false);
+            heading = items.find((li) => !before.has(li.guid)) || null;
+            if (heading) await this._markOwnedLine(heading, TEMPLATE_OWNER, spec.role);
+          } else if (!this._lineMeta(heading, LINE_META.ROLE)) {
+            const hasKids = items.some((li) => li.parent_guid === heading.guid);
+            const extra = spec.role === BODY_ROLES.SUMMARY || spec.role === BODY_ROLES.ACTION_ITEMS ? { complete: !!hasKids } : {};
+            await this._markOwnedLine(heading, TEMPLATE_OWNER, spec.role, extra);
+          }
+          if (heading) afterPrevious = heading;
+        }
+      });
+    }
+    async _readNotesText(record) {
+      if (!record || typeof record.getLineItems !== "function") return "";
+      try {
+        const items = await record.getLineItems(false);
+        const notesRoot = findOwnedRole(items, BODY_ROLES.NOTES);
+        if (!notesRoot) return "";
+        return notesTextFromItems(items, notesRoot.guid);
+      } catch {
+        return "";
+      }
+    }
     /**
      * Stream the transcript into the record body LIVE, under a collapsible "🎙️ Transcript" heading —
      * append-only, one utterance at a time, so it grows as the meeting runs. Takes STRUCTURED entries
@@ -5738,6 +6171,7 @@ ${transcriptText}` }]
     async _streamTranscriptToBody(record, entries) {
       if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.createLineItem !== "function" || typeof record.getLineItems !== "function") return;
       if (!Array.isArray(entries) || !entries.length) return;
+      await this._ensureMeetingSkeleton(record);
       const headKey = this._bodyKey(record, "tx-head");
       const countKey = this._bodyKey(record, "tx-count");
       const trackKey = this._bodyKey(record, "tx-guids");
@@ -5749,7 +6183,7 @@ ${transcriptText}` }]
       }
       try {
         let items = await record.getLineItems(false);
-        let heading = this._findOwnedLine(items, botId, "transcript_root");
+        let heading = this._findOwnedLine(items, botId, BODY_ROLES.TRANSCRIPT);
         let headGuid = "";
         try {
           headGuid = localStorage.getItem(headKey) || "";
@@ -5762,8 +6196,8 @@ ${transcriptText}` }]
         } catch {
         }
         if (!Array.isArray(tracked)) tracked = [];
-        if (heading && !this._isOwnedLine(heading, botId, "transcript_root")) {
-          await this._migrateLegacyTranscriptMetadata(items, heading, botId, tracked, written);
+        if (heading && !this._isOwnedLine(heading, botId, BODY_ROLES.TRANSCRIPT)) {
+          await this._markOwnedLine(heading, botId, BODY_ROLES.TRANSCRIPT);
         }
         if (!heading) {
           const before = new Set(items.map((li) => li.guid));
@@ -5773,7 +6207,7 @@ ${transcriptText}` }]
           items = await record.getLineItems(false);
           heading = items.find((li) => !before.has(li.guid)) || null;
           if (!heading) return;
-          await this._markOwnedLine(heading, botId, "transcript_root");
+          await this._markOwnedLine(heading, botId, BODY_ROLES.TRANSCRIPT);
           try {
             localStorage.setItem(headKey, heading.guid);
           } catch {
@@ -5862,6 +6296,7 @@ ${transcriptText}` }]
     async _reorganizeTranscriptBySections(record, entries, sections) {
       if (!record || typeof record.insertFromMarkdown !== "function" || typeof record.createLineItem !== "function" || typeof record.getLineItems !== "function") return { ok: false, anchors: [], turnAnchors: [] };
       if (!Array.isArray(sections) || !sections.length || !Array.isArray(entries) || !entries.length) return { ok: false, anchors: [], turnAnchors: [] };
+      await this._ensureMeetingSkeleton(record);
       const headKey = this._bodyKey(record, "tx-head");
       const trackKey = this._bodyKey(record, "tx-guids");
       const countKey = this._bodyKey(record, "tx-count");
@@ -5904,7 +6339,7 @@ ${transcriptText}` }]
         } catch {
         }
         let items = await record.getLineItems(false);
-        let heading = this._findOwnedLine(items, botId, "transcript_root") || items.find((li) => li.guid === headGuid) || null;
+        let heading = this._findOwnedLine(items, botId, BODY_ROLES.TRANSCRIPT) || items.find((li) => li.guid === headGuid) || null;
         if (!heading) {
           const before = new Set(items.map((li) => li.guid));
           const anchorMd = this._headingAnchorMd(this._settings.transcriptHeadingText, this._settings.transcriptHeadingLevel);
@@ -5912,7 +6347,7 @@ ${transcriptText}` }]
           items = await record.getLineItems(false);
           heading = items.find((li) => !before.has(li.guid)) || null;
           if (!heading) return abort();
-          await this._markOwnedLine(heading, botId, "transcript_root");
+          await this._markOwnedLine(heading, botId, BODY_ROLES.TRANSCRIPT);
           try {
             localStorage.setItem(headKey, heading.guid);
           } catch {
@@ -5929,7 +6364,7 @@ ${transcriptText}` }]
           legacyWritten = parseInt(localStorage.getItem(countKey) || "0", 10) || 0;
         } catch {
         }
-        if (!this._isOwnedLine(heading, botId, "transcript_root")) {
+        if (!this._isOwnedLine(heading, botId, BODY_ROLES.TRANSCRIPT)) {
           await this._migrateLegacyTranscriptMetadata(items, heading, botId, tracked, legacyWritten);
         }
         const trackedSet = new Set(tracked);
@@ -6250,7 +6685,8 @@ ${transcriptText}` }]
         }
       }
       for (const line of Array.isArray(items) ? items : []) {
-        if (!this._isOwnedLine(line, botId, "summary_item")) continue;
+        const role = String(this._lineMeta(line, LINE_META.ROLE) || "");
+        if (role !== "summary_item" && role !== "action_item") continue;
         let citations = [];
         try {
           citations = JSON.parse(String(this._lineMeta(line, LINE_META.CITATIONS) || "[]"));
@@ -6265,14 +6701,19 @@ ${transcriptText}` }]
      * action-item checkboxes — because the body parses it, unlike the flat property. When transcript
      * section anchors exist, every cited content line receives a native Thymer reference chip.
      */
-    async _writeSummaryToBody(record, summary, citations = [], sectionAnchors = [], turnAnchors = []) {
+    async _writeSummaryToBody(record, summary, citations = [], sectionAnchors = [], turnAnchors = [], options = {}) {
       if (!record || typeof record.insertFromMarkdown !== "function" || !summary || !summary.trim()) return false;
+      const force = !!(options && options.force);
+      await this._ensureMeetingSkeleton(record);
       const flagKey = this._bodyKey(record, "summary-body");
       const botId = this._text(record, FIELDS.BOT_ID) || "current";
       const writingValue = `writing:${botId}:${Date.now()}`;
       let items = typeof record.getLineItems === "function" ? await record.getLineItems(false) : [];
-      let head = this._findOwnedLine(items, botId, "summary_root");
-      if (head && Number(this._lineMeta(head, LINE_META.COMPLETE)) === 1) {
+      let head = this._findOwnedLine(items, botId, BODY_ROLES.SUMMARY);
+      let actionHead = this._findOwnedLine(items, botId, BODY_ROLES.ACTION_ITEMS);
+      const summaryDone = !!(head && Number(this._lineMeta(head, LINE_META.COMPLETE)) === 1);
+      const actionsDone = !!(actionHead && Number(this._lineMeta(actionHead, LINE_META.COMPLETE)) === 1);
+      if (!force && summaryDone && actionsDone) {
         await this._restoreMarkedSummaryReferences(items, botId);
         try {
           localStorage.setItem(flagKey, botId);
@@ -6282,7 +6723,7 @@ ${transcriptText}` }]
       }
       try {
         const state = localStorage.getItem(flagKey) || "";
-        if (!head && state === botId) return true;
+        if (!force && !head && state === botId) return true;
         localStorage.setItem(flagKey, writingValue);
       } catch {
       }
@@ -6300,7 +6741,7 @@ ${transcriptText}` }]
             txHeadGuid = localStorage.getItem(this._bodyKey(record, "tx-head")) || "";
           } catch {
           }
-          const ownedTranscript = this._findOwnedLine(items, botId, "transcript_root");
+          const ownedTranscript = this._findOwnedLine(items, botId, BODY_ROLES.TRANSCRIPT);
           if (ownedTranscript) txHeadGuid = ownedTranscript.guid;
           const topLevel = items.filter((li) => li.parent_guid === record.guid);
           const txIdx = topLevel.findIndex((li) => li.guid === txHeadGuid);
@@ -6311,9 +6752,28 @@ ${transcriptText}` }]
           items = await record.getLineItems(false);
           head = items.find((li) => !before.has(li.guid)) || null;
           if (!head) return fail();
-          await this._markOwnedLine(head, botId, "summary_root", { complete: false });
         }
+        if (!actionHead) {
+          const spec = BODY_SECTION_ORDER.find((item) => item.role === BODY_ROLES.ACTION_ITEMS);
+          const { text, level } = spec ? this._headingForSpec(spec) : { text: "\u2705 Action items", level: "h2" };
+          const anchorMd = this._headingAnchorMd(text, level);
+          const before = new Set(items.map((li) => li.guid));
+          if (anchorMd && await record.insertFromMarkdown(anchorMd, null, head) !== false) {
+            items = await record.getLineItems(false);
+            actionHead = items.find((li) => !before.has(li.guid)) || null;
+          }
+        }
+        await this._markOwnedLine(head, botId, BODY_ROLES.SUMMARY, { complete: false });
+        if (actionHead) await this._markOwnedLine(actionHead, botId, BODY_ROLES.ACTION_ITEMS, { complete: false });
         const { preamble, groups } = groupSummaryLines(summary, citations);
+        const isActionGroup = /* @__PURE__ */ __name((heading) => /^action items?\b/i.test(String(heading || "")), "isActionGroup");
+        const summaryGroups = [];
+        const actionGroups = [];
+        for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+          const g = groups[groupIndex];
+          if (actionHead && isActionGroup(g.heading)) actionGroups.push({ ...g, groupIndex });
+          else summaryGroups.push({ ...g, groupIndex });
+        }
         const sectionAnchorById = new Map((Array.isArray(sectionAnchors) ? sectionAnchors : []).filter((anchor) => anchor && Number.isFinite(Number(anchor.sectionId)) && anchor.guid).map((anchor) => [Number(anchor.sectionId), anchor]));
         const turnAnchorByIndex = new Map((Array.isArray(turnAnchors) ? turnAnchors : []).filter((anchor) => anchor && Number.isFinite(Number(anchor.entryIndex)) && anchor.guid).map((anchor) => [Number(anchor.entryIndex), anchor]));
         const afterOf = /* @__PURE__ */ __name((parentGuid) => {
@@ -6321,10 +6781,10 @@ ${transcriptText}` }]
           return kids.length ? kids[kids.length - 1] : null;
         }, "afterOf");
         let summaryItemIndex = 0;
+        let actionItemIndex = 0;
         let writtenItems = 0;
-        const insertSummaryLine = /* @__PURE__ */ __name(async (entry, parent, after) => {
-          const itemIndex = summaryItemIndex++;
-          const existing = this._findOwnedLine(items, botId, "summary_item", itemIndex);
+        const insertOwnedLine = /* @__PURE__ */ __name(async (entry, parent, after, role, index) => {
+          const existing = this._findOwnedLine(items, botId, role, index);
           if (existing) {
             await this._appendSummaryReferences(existing, entry.citations, sectionAnchorById, turnAnchorByIndex);
             writtenItems += 1;
@@ -6335,34 +6795,40 @@ ${transcriptText}` }]
           items = await record.getLineItems(false);
           const created = items.find((item) => item.parent_guid === parent.guid && !lineBefore.has(item.guid)) || items.find((item) => !lineBefore.has(item.guid)) || null;
           if (created) {
-            await this._markOwnedLine(created, botId, "summary_item", { entryIndex: itemIndex, citations: entry.citations });
+            await this._markOwnedLine(created, botId, role, { entryIndex: index, citations: entry.citations });
             await this._appendSummaryReferences(created, entry.citations, sectionAnchorById, turnAnchorByIndex);
             writtenItems += 1;
           }
           return created || after;
-        }, "insertSummaryLine");
+        }, "insertOwnedLine");
         let afterPreamble = null;
         for (const entry of preamble) {
-          afterPreamble = await insertSummaryLine(entry, head, afterPreamble);
+          afterPreamble = await insertOwnedLine(entry, head, afterPreamble, "summary_item", summaryItemIndex++);
         }
-        for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
-          const g = groups[groupIndex];
-          let sec = (items || []).find((item) => this._isOwnedLine(item, botId, "summary_section") && Number(this._lineMeta(item, LINE_META.SECTION_ID)) === groupIndex) || null;
+        for (const g of summaryGroups) {
+          let sec = (items || []).find((item) => String(this._lineMeta(item, LINE_META.ROLE) || "") === "summary_section" && Number(this._lineMeta(item, LINE_META.SECTION_ID)) === g.groupIndex) || null;
           if (!sec) {
             const b = new Set(items.map((li) => li.guid));
             if (await record.insertFromMarkdown(`### ${this._escMd(g.heading)}`, head, afterOf(head.guid)) === false) continue;
             items = await record.getLineItems(false);
             sec = items.find((li) => li.parent_guid === head.guid && !b.has(li.guid)) || null;
-            if (sec) await this._markOwnedLine(sec, botId, "summary_section", { sectionId: groupIndex });
+            if (sec) await this._markOwnedLine(sec, botId, "summary_section", { sectionId: g.groupIndex });
           }
           if (sec && g.content.length) {
             let afterContent = null;
-            for (const entry of g.content) afterContent = await insertSummaryLine(entry, sec, afterContent);
+            for (const entry of g.content) afterContent = await insertOwnedLine(entry, sec, afterContent, "summary_item", summaryItemIndex++);
           }
         }
-        const expectedItems = preamble.length + groups.reduce((sum, group) => sum + group.content.length, 0);
+        if (actionHead) {
+          let afterAction = null;
+          for (const g of actionGroups) {
+            for (const entry of g.content) afterAction = await insertOwnedLine(entry, actionHead, afterAction, "action_item", actionItemIndex++);
+          }
+        }
+        const expectedItems = preamble.length + summaryGroups.reduce((sum, group) => sum + group.content.length, 0) + actionGroups.reduce((sum, group) => sum + group.content.length, 0);
         if (writtenItems !== expectedItems) return fail();
-        await this._markOwnedLine(head, botId, "summary_root", { complete: true });
+        await this._markOwnedLine(head, botId, BODY_ROLES.SUMMARY, { complete: true });
+        if (actionHead) await this._markOwnedLine(actionHead, botId, BODY_ROLES.ACTION_ITEMS, { complete: true });
         try {
           localStorage.setItem(flagKey, botId);
         } catch {
@@ -6374,6 +6840,234 @@ ${transcriptText}` }]
         this._log("summary body write failed", { error: this._errorMessage(err) });
         return false;
       }
+    }
+    _lineIsUnder(items, line, rootGuid) {
+      if (!line || !rootGuid || line.guid === rootGuid) return false;
+      const byGuid = new Map((Array.isArray(items) ? items : []).map((item) => [item.guid, item]));
+      let guid = line.parent_guid;
+      const seen = /* @__PURE__ */ new Set();
+      while (guid && !seen.has(guid)) {
+        if (guid === rootGuid) return true;
+        seen.add(guid);
+        const parent = byGuid.get(guid);
+        guid = parent && parent.parent_guid;
+      }
+      return false;
+    }
+    _lineDepth(items, line) {
+      const byGuid = new Map((Array.isArray(items) ? items : []).map((item) => [item.guid, item]));
+      let depth = 0;
+      let guid = line && line.parent_guid;
+      const seen = /* @__PURE__ */ new Set();
+      while (guid && !seen.has(guid)) {
+        seen.add(guid);
+        depth += 1;
+        const parent = byGuid.get(guid);
+        guid = parent && parent.parent_guid;
+      }
+      return depth;
+    }
+    _sectionRoot(items, record, role, headingTextKey, fallbackLabel) {
+      const botId = this._text(record, FIELDS.BOT_ID) || TEMPLATE_OWNER;
+      return this._findOwnedLine(items, botId, role) || guessHeadingByLabel(items, record && record.guid, this._settings && this._settings[headingTextKey] || fallbackLabel);
+    }
+    _collectMashedSummaryBlobs(items, record) {
+      const list2 = Array.isArray(items) ? items : [];
+      const recordGuid = record && record.guid || "";
+      const summaryRoot = this._sectionRoot(list2, record, BODY_ROLES.SUMMARY, "summaryHeadingText", "Summary");
+      const notesRoot = this._sectionRoot(list2, record, BODY_ROLES.NOTES, "notesHeadingText", "Notes");
+      const transcriptRoot = this._sectionRoot(list2, record, BODY_ROLES.TRANSCRIPT, "transcriptHeadingText", "Transcript");
+      const protectedRoles = /* @__PURE__ */ new Set([
+        BODY_ROLES.NOTES,
+        BODY_ROLES.TRANSCRIPT,
+        "transcript_turn",
+        "transcript_text",
+        "transcript_section"
+      ]);
+      const rewriteRoles = /* @__PURE__ */ new Set(["summary_item", "summary_section", "action_item", BODY_ROLES.SUMMARY, BODY_ROLES.ACTION_ITEMS]);
+      const blobs = [];
+      for (const line of list2) {
+        if (!line) continue;
+        const role = String(this._lineMeta(line, LINE_META.ROLE) || "");
+        if (protectedRoles.has(role)) continue;
+        if (notesRoot && (line.guid === notesRoot.guid || this._lineIsUnder(list2, line, notesRoot.guid))) continue;
+        if (transcriptRoot && (line.guid === transcriptRoot.guid || this._lineIsUnder(list2, line, transcriptRoot.guid))) continue;
+        const text = this._linePlainText(line);
+        if (!looksLikeMashedSummary(text)) continue;
+        const underSummary = !!(summaryRoot && (line.guid === summaryRoot.guid || this._lineIsUnder(list2, line, summaryRoot.guid)));
+        const topLevel = String(line.parent_guid || "") === String(recordGuid);
+        if (underSummary || rewriteRoles.has(role) || topLevel && !role) {
+          blobs.push({
+            line,
+            text,
+            isRoot: !!(summaryRoot && line.guid === summaryRoot.guid) || role === BODY_ROLES.SUMMARY
+          });
+        }
+      }
+      return blobs;
+    }
+    async _deleteHealRewriteNodes(items, blobs) {
+      const rewriteRoles = /* @__PURE__ */ new Set(["summary_item", "summary_section", "action_item"]);
+      const blobGuids = new Set((blobs || []).filter((blob) => blob && blob.line && !blob.isRoot).map((blob) => blob.line.guid));
+      const toDelete = (Array.isArray(items) ? items : []).filter((line) => {
+        const role = String(this._lineMeta(line, LINE_META.ROLE) || "");
+        if (rewriteRoles.has(role)) return true;
+        return blobGuids.has(line.guid);
+      });
+      toDelete.sort((a, b) => this._lineDepth(items, b) - this._lineDepth(items, a));
+      for (const line of toDelete) {
+        if (!line || typeof line.delete !== "function") continue;
+        const ok = await line.delete();
+        if (ok === false) {
+          this._log("heal delete failed", { guid: line.guid });
+          return false;
+        }
+      }
+      return true;
+    }
+    /**
+     * @returns {Promise<'healed'|'skipped'|'failed'>}
+     */
+    async _healMashedSummaryRecord(record, { quiet: _quiet = false } = {}) {
+      if (!record || typeof record.getLineItems !== "function" || typeof record.insertFromMarkdown !== "function") return "failed";
+      try {
+        let items = await record.getLineItems(false);
+        const blobs = this._collectMashedSummaryBlobs(items, record);
+        if (!blobs.length) return "skipped";
+        const rewriteRoles = /* @__PURE__ */ new Set(["summary_item", "summary_section", "action_item"]);
+        const ownedRewrite = items.filter((line) => rewriteRoles.has(String(this._lineMeta(line, LINE_META.ROLE) || "")));
+        const healthyOwned = ownedRewrite.filter((line) => {
+          const text = this._linePlainText(line);
+          return text && !looksLikeMashedSummary(text);
+        });
+        const recoveredParts = blobs.map((blob) => recoverSummaryMarkdown(blob.text)).filter((text) => String(text || "").trim());
+        let recovered = sanitizeSummaryMarkdown(recoveredParts.join("\n\n"));
+        if (!recovered || looksLikeMashedSummary(recovered)) return "skipped";
+        const actionOnly = blobs.length > 0 && blobs.every((blob) => String(this._lineMeta(blob.line, LINE_META.ROLE) || "") === "action_item");
+        if (actionOnly && !/^#{1,6}\s+action items?\b/im.test(recovered)) recovered = `### Action Items
+${recovered}`;
+        const cited = extractSummaryCitations(recovered, []);
+        if (healthyOwned.length && !blobs.some((blob) => blob.isRoot)) {
+          const ok = await this._healMashedBlobsInPlace(record, items, blobs);
+          return ok ? "healed" : "failed";
+        }
+        if (!await this._deleteHealRewriteNodes(items, blobs)) return "failed";
+        items = await record.getLineItems(false);
+        for (const blob of blobs) {
+          if (!blob.isRoot || !blob.line || typeof blob.line.setSegments !== "function") continue;
+          const spec = BODY_SECTION_ORDER.find((item) => item.role === BODY_ROLES.SUMMARY);
+          const text = spec ? this._headingForSpec(spec).text : "\u{1F4DD} Summary";
+          await blob.line.setSegments([{ type: "text", text }]);
+        }
+        const botId = this._text(record, FIELDS.BOT_ID) || TEMPLATE_OWNER;
+        const head = this._findOwnedLine(items, botId, BODY_ROLES.SUMMARY);
+        const actionHead = this._findOwnedLine(items, botId, BODY_ROLES.ACTION_ITEMS);
+        if (head) await this._markOwnedLine(head, botId, BODY_ROLES.SUMMARY, { complete: false });
+        if (actionHead) await this._markOwnedLine(actionHead, botId, BODY_ROLES.ACTION_ITEMS, { complete: false });
+        try {
+          localStorage.removeItem(this._bodyKey(record, "summary-body"));
+        } catch {
+        }
+        const written = await this._writeSummaryToBody(record, cited.markdown, cited.citations, [], [], { force: true });
+        if (!written) return "failed";
+        this._log("mashed summary healed", { recordGuid: record.guid || "" });
+        return "healed";
+      } catch (err) {
+        this._log("mashed summary heal failed", { recordGuid: record.guid || "", error: this._errorMessage(err) });
+        return "failed";
+      }
+    }
+    async _healMashedBlobsInPlace(record, items, blobs) {
+      const botId = this._text(record, FIELDS.BOT_ID) || TEMPLATE_OWNER;
+      for (const blob of blobs) {
+        if (!blob || blob.isRoot || !blob.line) continue;
+        const recovered = sanitizeSummaryMarkdown(recoverSummaryMarkdown(blob.text));
+        if (!recovered || looksLikeMashedSummary(recovered)) continue;
+        const parentGuid = blob.line.parent_guid;
+        const parent = (items || []).find((item) => item.guid === parentGuid) || null;
+        const siblings = (items || []).filter((item) => item.parent_guid === parentGuid);
+        const index = siblings.findIndex((item) => item.guid === blob.line.guid);
+        const after = index > 0 ? siblings[index - 1] : null;
+        const before = new Set((items || []).map((item) => item.guid));
+        const role = String(this._lineMeta(blob.line, LINE_META.ROLE) || "") === "action_item" ? "action_item" : "summary_item";
+        if (await record.insertFromMarkdown(recovered, parent, after) === false) return false;
+        if (typeof blob.line.delete === "function" && await blob.line.delete() === false) return false;
+        items = await record.getLineItems(false);
+        const created = items.filter((item) => !before.has(item.guid) && item.guid !== blob.line.guid);
+        for (const line of created) {
+          const createdRole = /^\s{0,3}#{1,6}\s/.test(this._linePlainText(line)) ? "summary_section" : role;
+          await this._markOwnedLine(line, botId, createdRole);
+        }
+      }
+      return true;
+    }
+    async _healMashedSummariesForRecord(record, { quiet = false } = {}) {
+      if (this._disabled) {
+        if (!quiet) this._toast("Meetings is off", "Turn the plugin on to heal summaries.");
+        return "failed";
+      }
+      if (!record) {
+        if (!quiet) this._toast("Open a Meeting record first", "Heal mashed summaries needs an open meeting.");
+        return "failed";
+      }
+      const result = await runCoalesced(this._healRecordInFlight, record.guid, () => this._healMashedSummaryRecord(record, { quiet: true }));
+      if (!quiet) {
+        if (result === "healed") this._toast("Heal mashed summaries", "1 meeting healed");
+        else if (result === "skipped") this._toast("Heal mashed summaries", "Already healthy \u2014 nothing to rewrite");
+        else this._toast("Heal mashed summaries", "Could not rewrite this summary");
+      }
+      return result;
+    }
+    async _healMashedSummariesBulk() {
+      if (this._healInFlight) return this._healInFlight;
+      if (this._disabled) {
+        this._toast("Meetings is off", "Turn the plugin on to heal summaries.");
+        return;
+      }
+      const task = (async () => {
+        await this._refreshRecordIndex();
+        let healed = 0;
+        let skipped = 0;
+        let failed = 0;
+        for (const record of this._recordsByGuid.values()) {
+          const result = await runCoalesced(this._healRecordInFlight, record.guid, () => this._healMashedSummaryRecord(record, { quiet: true }));
+          if (result === "healed") healed += 1;
+          else if (result === "skipped") skipped += 1;
+          else failed += 1;
+        }
+        this._toast("Heal mashed summaries", `${healed} healed \xB7 ${skipped} already healthy${failed ? ` \xB7 ${failed} failed` : ""}`);
+        if (this._panelEl && document.contains(this._panelEl)) this._renderPanel();
+      })();
+      this._healInFlight = task;
+      try {
+        await task;
+      } finally {
+        if (this._healInFlight === task) this._healInFlight = null;
+      }
+    }
+    _healDiagnosticsSection() {
+      return section({
+        label: "Diagnostics",
+        hint: "Debug repair for summaries that landed as one glued blob (Planningnn### Overview, literal \\n). Does not touch Notes or Transcript.",
+        body: [
+          h(
+            "div",
+            { class: `${ROOT_CLASS}-field` },
+            button({
+              label: this._healInFlight ? "Healing\u2026" : "Heal mashed summaries",
+              variant: "ghost",
+              size: "md",
+              disabled: !!this._healInFlight || !!this._disabled,
+              onClick: /* @__PURE__ */ __name(() => void this._healMashedSummariesBulk(), "onClick")
+            })
+          ),
+          h(
+            "span",
+            { class: `${ROOT_CLASS}-field-hint` },
+            "Scans every meeting in this collection. Already-healthy outlines are left alone. Same action as Meetings: Heal mashed summaries in the command palette."
+          )
+        ]
+      });
     }
     /**
      * Make freshly-streamed transcript lines VISIBLE mid-meeting. Thymer only repaints the editor on
@@ -6445,6 +7139,31 @@ ${transcriptText}` }]
       this._updateNavButtonForRecord(record);
     }
     _updateNavButtonForRecord(record) {
+      const pageRecord = (() => {
+        try {
+          const panel2 = this.ui.getActivePanel && this.ui.getActivePanel();
+          return panel2 && panel2.getActiveRecord ? panel2.getActiveRecord() : null;
+        } catch {
+          return null;
+        }
+      })();
+      const pinVisible = !!(pageRecord && pageRecord.guid);
+      try {
+        this._navButton && this._navButton.setOnlyWhenExpanded(!pinVisible);
+      } catch {
+      }
+      try {
+        this._syncButton && this._syncButton.setOnlyWhenExpanded(!pinVisible);
+      } catch {
+      }
+      try {
+        this._diagnosticsButton && this._diagnosticsButton.setOnlyWhenExpanded(!pinVisible);
+      } catch {
+      }
+      try {
+        this._healButton && this._healButton.setOnlyWhenExpanded(!pinVisible);
+      } catch {
+      }
       if (!this._navButton) return;
       const target = record || this._activeRecordGuid && this._recordsByGuid.get(this._activeRecordGuid) || null;
       const state = this._recordVisualState(target);
@@ -6670,6 +7389,7 @@ ${transcriptText}` }]
       if (field === FIELDS.JOIN_AT) return "joinAtFieldId";
       if (field === FIELDS.PARTICIPANT_NAMES) return "participantNamesFieldId";
       if (field === FIELDS.ATTENDEES) return "attendeesFieldId";
+      if (field === FIELDS.RELATED) return "relatedFieldId";
       return "";
     }
     _mappedFieldId(field) {
@@ -6727,10 +7447,9 @@ ${transcriptText}` }]
       }, 300);
     }
     /**
-     * Opt-in (autoSchedule, default off): book a bot for any meeting whose Join At time is far
-     * enough out that Recall treats it as a scheduled bot. Deliberately never fires for
-     * imminent/past meetings — an auto-sent ad-hoc bot would walk into a room nobody is in yet
-     * and bill for it.
+     * Book a bot for any meeting whose Join At time is far enough out that Recall treats it as a
+     * scheduled bot (autoSchedule, default on). Deliberately never fires for imminent/past meetings —
+     * an auto-sent ad-hoc bot would walk into a room nobody is in yet and bill for it.
      */
     _autoScheduleSweep() {
       if (this._disabled) return;
@@ -6997,7 +7716,8 @@ ${transcriptText}` }]
             this._setupSteps()
           ]
         }),
-        this._setupDoctorSection()
+        this._setupDoctorSection(),
+        this._healDiagnosticsSection()
       ];
     }
     _tabCosts() {
@@ -7187,7 +7907,7 @@ ${transcriptText}` }]
         else {
           const attendeesLabel = String(attendees.label || "Attendees");
           const peopleGuid = attendeesTargetCollectionGuid(attendees);
-          if (!peopleGuid) add("fail", "Attendee matching", `Limit ${attendeesLabel} to your People collection in the Meetings collection property settings.`);
+          if (!peopleGuid) add("warn", "Attendee matching", `Matching will use an auto-detected People/Contacts collection if one exists, because ${attendeesLabel} is not limited to a single collection.`);
           else {
             if (!this._workspaceCollectionsLoaded) await this._loadWorkspaceCollections(true);
             const target = this._collectionByGuid(peopleGuid);
@@ -7270,7 +7990,7 @@ ${transcriptText}` }]
               type: "checkbox",
               name: "autoSchedule",
               label: "Send the bot automatically to scheduled meetings",
-              desc: "Schedules meetings with a Join At time at least 10 minutes away. Otherwise, use Join Now.",
+              desc: "When a Join At time is set at least 10 minutes out, book the notetaker automatically. Cancel anytime.",
               checked: !!draft.autoSchedule,
               onChange: /* @__PURE__ */ __name((event) => this._updateSetting("autoSchedule", !!event.target.checked, { rerender: true }), "onChange")
             }),
@@ -7294,7 +8014,11 @@ ${transcriptText}` }]
             this._fieldSelectInput("Meeting URL field", "meetingUrlFieldId", ["url", "text"]),
             this._fieldSelectInput("Join At field", "joinAtFieldId", ["datetime", "date"]),
             this._fieldSelectInput("Participant Names field", "participantNamesFieldId", ["text"]),
-            ...this._attendeeMappingControls()
+            ...this._attendeeMappingControls(),
+            this._fieldSelectInput("Related field", "relatedFieldId", ["record"], {
+              filter: /* @__PURE__ */ __name((field) => !!field && field.active !== false && String(field.type || "").toLowerCase() === "record" && field.many === true, "filter"),
+              emptyTypeLabel: "multi-record collection-link"
+            })
           ]
         })
       ];
@@ -7383,10 +8107,14 @@ ${transcriptText}` }]
         }),
         ...enabled ? [
           section({
-            label: "Heading",
+            label: "Headings",
             body: [
-              this._textInput("Heading text", "summaryHeadingText", "\u{1F4DD} Summary"),
-              this._selectInput("Heading level", "summaryHeadingLevel", HEADING_LEVEL_OPTIONS)
+              this._textInput("Summary heading", "summaryHeadingText", "\u{1F4DD} Summary"),
+              this._selectInput("Summary heading level", "summaryHeadingLevel", HEADING_LEVEL_OPTIONS),
+              this._textInput("Action items heading", "actionItemsHeadingText", "\u2705 Action items"),
+              this._selectInput("Action items heading level", "actionItemsHeadingLevel", HEADING_LEVEL_OPTIONS),
+              this._textInput("Notes heading", "notesHeadingText", "\u{1F5D2}\uFE0F Notes"),
+              this._selectInput("Notes heading level", "notesHeadingLevel", HEADING_LEVEL_OPTIONS)
             ]
           }),
           section({
@@ -7526,7 +8254,7 @@ ${transcriptText}` }]
         h(
           "li",
           {},
-          "Optional: in Field Mapping, turn on \u201CMap Participant Names (plaintext) to Attendees (collection items)?\u201D and choose the relation to use. In the Meetings collection property settings, limit that relation to your People or Contacts collection. Existing People are added only on a confident match; \u201CCreate missing People records when mapping\u201D can add unmatched named participants."
+          "Optional: Attendees matching is on by default. Restrict the Attendees relation to your People or Contacts collection for the tightest matches, or leave it unrestricted and the plugin will auto-detect a People/Contacts collection. \u201CCreate missing People records when mapping\u201D can add unmatched named participants."
         )
       );
     }
@@ -8223,118 +8951,6 @@ ${transcriptText}` }]
 	${e.text}`).join("\n\n");
   }
   __name(entriesToText, "entriesToText");
-  var SUMMARY_WRAPPER_TITLES = /* @__PURE__ */ new Set(["meeting notes", "summary", "meeting summary", "notes", "meeting recap", "recap"]);
-  function isTableSeparatorRow(line) {
-    return /\|/.test(line) && /-/.test(line) && /^[\s|:-]+$/.test(line);
-  }
-  __name(isTableSeparatorRow, "isTableSeparatorRow");
-  function tableRowCells(line) {
-    return line.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim()).filter(Boolean);
-  }
-  __name(tableRowCells, "tableRowCells");
-  function sanitizeSummaryMarkdown(md) {
-    const src = String(md || "").replace(/\r\n?/g, "\n").split("\n");
-    const out = [];
-    for (let i = 0; i < src.length; i++) {
-      const line = src[i];
-      if (/^\s*([-*_])\1{2,}\s*$/.test(line)) continue;
-      if (line.includes("|") && i + 1 < src.length && isTableSeparatorRow(src[i + 1])) {
-        let j = i + 2;
-        for (; j < src.length; j++) {
-          const row = src[j];
-          if (!row.trim() || !row.includes("|")) break;
-          const cells = tableRowCells(row);
-          if (cells.length) out.push(`- ${cells.join(" \u2014 ")}`);
-        }
-        i = j - 1;
-        continue;
-      }
-      out.push(line);
-    }
-    let start = 0;
-    while (start < out.length && !out[start].trim()) start++;
-    if (start < out.length) {
-      const m = out[start].match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/) || out[start].match(/^\s*\*\*(.+?)\*\*\s*$/);
-      if (m && SUMMARY_WRAPPER_TITLES.has(m[1].trim().replace(/[:.]+$/, "").toLowerCase())) out.splice(start, 1);
-    }
-    for (let k = 0; k < out.length; k++) out[k] = out[k].replace(/^(\s{0,3})#{1,6}(?=\s)/, "$1###");
-    let inActionItems = false;
-    for (let k = 0; k < out.length; k++) {
-      const heading = out[k].match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/);
-      if (heading) {
-        inActionItems = /^action items?\b/i.test(heading[1].trim());
-        continue;
-      }
-      if (inActionItems) out[k] = out[k].replace(/^(\s*)[-*+]\s+(?!\[[ xX]\]\s)/, "$1- [ ] ");
-    }
-    return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-  }
-  __name(sanitizeSummaryMarkdown, "sanitizeSummaryMarkdown");
-  function sectionJsonInstruction(count2) {
-    return [
-      "Additionally, divide the transcript into a handful of topic sections in time order.",
-      `Each line below is numbered like [N], from 0 to ${count2 - 1}.`,
-      "At the end of every non-heading summary line, add one or two citations. Use {{cite:S:E}} when transcript line E directly supports that wording, where S is the zero-based index into your sections array. Use the broader {{cite:S}} only when the line synthesizes several turns in that topic and no single transcript line is sufficient.",
-      "For multiple sources use one marker such as {{cite:1:8,2:14}}. Every E must fall inside section S. Choose only the most direct source or two, and do not put citation markers on headings.",
-      "Respond with ONLY a JSON object \u2014 no code fence, no text before or after \u2014 of the form:",
-      '{"summary": "<the markdown summary with {{cite:0:3}} or {{cite:0}} markers, as one JSON string>", "sections": [{"title": "<short topic label, no timestamps>", "start": <first transcript line number>, "end": <last transcript line number>}]}',
-      "Sections must be in order, must not overlap, and together must cover every line from 0 to " + (count2 - 1) + ". Aim for 3\u20138 sections."
-    ].join("\n");
-  }
-  __name(sectionJsonInstruction, "sectionJsonInstruction");
-  function parseSummaryAndSections(raw, count2) {
-    const text = String(raw || "").trim();
-    const unfenced = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-    let obj = null;
-    try {
-      obj = JSON.parse(unfenced);
-    } catch {
-    }
-    if (!obj) {
-      const start = unfenced.indexOf("{");
-      const end = unfenced.lastIndexOf("}");
-      if (start >= 0 && end > start) {
-        try {
-          obj = JSON.parse(unfenced.slice(start, end + 1));
-        } catch {
-        }
-      }
-    }
-    if (!obj || typeof obj !== "object") return { summary: text, sections: [] };
-    const summary = typeof obj.summary === "string" && obj.summary.trim() ? obj.summary : text;
-    return { summary, sections: normalizeSections(Array.isArray(obj.sections) ? obj.sections : [], count2) };
-  }
-  __name(parseSummaryAndSections, "parseSummaryAndSections");
-  function normalizeSections(rawSections, count2) {
-    const out = [];
-    for (let sourceIndex = 0; sourceIndex < rawSections.length; sourceIndex++) {
-      const s = rawSections[sourceIndex];
-      if (!s || typeof s !== "object") continue;
-      const title = String(s.title || "").trim();
-      let start = Math.floor(Number(s.start));
-      let end = Math.floor(Number(s.end));
-      if (!title || !Number.isFinite(start) || !Number.isFinite(end)) continue;
-      start = Math.max(0, Math.min(start, count2 - 1));
-      end = Math.max(start, Math.min(end, count2 - 1));
-      out.push({ title, start, end, sourceIndex });
-    }
-    out.sort((a, b) => a.start - b.start);
-    const clean = [];
-    let cursor = -1;
-    for (const s of out) {
-      if (s.start <= cursor) s.start = cursor + 1;
-      if (s.start > s.end || s.start > count2 - 1) continue;
-      clean.push(s);
-      cursor = s.end;
-    }
-    if (clean.length) {
-      clean[0].start = 0;
-      for (let i = 1; i < clean.length; i++) clean[i - 1].end = clean[i].start - 1;
-      clean[clean.length - 1].end = count2 - 1;
-    }
-    return clean;
-  }
-  __name(normalizeSections, "normalizeSections");
   function firstStringVal(...values) {
     for (const v of values) {
       if (typeof v === "string" && v.trim()) return v.trim();

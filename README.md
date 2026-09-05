@@ -38,10 +38,16 @@ Enjoy! 🙏
   "when the bot joins" are the same moment.
 - The transcript and Claude summary are written directly into the Meeting page body, where headings,
   tasks, speaker blocks, and citation links render correctly. There are no Transcript or Summary text properties.
+  New meetings start with four top-level headings: **Summary**, **Action items**, **Notes**, and **Transcript**.
+  Notes is for you — the plugin never overwrites what you type there. The live transcript only appends under
+  Transcript, so it does not reshuffle Summary or Notes.
 - `Participant Names` keeps the finalized Recall roster as plain text, including unmatched people.
-- `Attendees` is an automatically created multi-record collection-link property. Restrict it to your
-  People/Contacts collection, then optionally map unique exact email or display-name matches into it.
-  Creating missing People records is available as a separate option and is off by default.
+- `Attendees` is an automatically created multi-record collection-link property. Matching is on by default:
+  confident unique email or display-name matches are linked. Restrict Attendees to your People/Contacts
+  collection when you can; if you leave it unrestricted, the plugin auto-detects a People/Contacts/Team/Staff
+  collection. Creating missing People records is a separate option and is off by default.
+- `Related` is an unrestricted multi-record collection-link so you can attach a meeting to a job, client,
+  or any other record in Thymer.
 - `Recall Bot ID`, `Recall Status`, and `Last Error` track integration state.
 
 On upgrade, the old `Transcript` and `Summary` text properties are hidden and removed from the page/table
@@ -135,9 +141,9 @@ bot, which Recall **guarantees** joins on time. Anything sooner is an *ad-hoc* b
 says to use sparingly and doesn't promise will be punctual. Ad-hoc is still the right call for
 "I'm in a meeting right now" — which is why **Join Now** is always one click away.
 
-Want it fully hands-off? Turn on **Send the bot automatically to scheduled meetings** in settings
-(off by default) and any meeting with a `Join At` 10+ minutes out gets a notetaker with no
-click at all. It deliberately never auto-sends for imminent meetings, so a bot is never billed
+Want it fully hands-off? **Send the bot automatically to scheduled meetings** is on by default, so any
+meeting with a `Join At` 10+ minutes out gets a notetaker with no click at all. Turn it off if you
+prefer to book by hand. It deliberately never auto-sends for imminent meetings, so a bot is never billed
 sitting in an empty room.
 
 Clicking a booked **Scheduled** bot cancels it through Recall's scheduled-bot delete operation; it
@@ -146,19 +152,21 @@ does not try to use the active-call leave operation. The Meeting can be schedule
 You can also send one from the **Recall Status** column in the table view, or from the microphone
 button on an inline reference to a Meeting record in the editor.
 
-### 6. Optional: link attendees to People
+### 6. Attendees and Related
 
-The plugin creates the multi-record `Attendees` collection-link property automatically. In **Field
-Mapping**, enable **Map Participant Names (plaintext) to Attendees (collection items)?** and select
-the relation to use. Then open that property in the Meetings collection settings, limit its links to
-one collection, and choose your People or Contacts collection. The relation restriction is the source
-of truth for where matching occurs.
+The plugin creates the multi-record `Attendees` collection-link property automatically. Matching is on
+by default: at meeting finalization, Recall's participant artifact supplies the full roster, including
+people who never spoke. Every display name is written to `Participant Names`, then only confident
+matches are attached to `Attendees`. Ambiguous names stay in the text field.
 
-At meeting finalization, Recall's participant artifact supplies the full roster, including people
-who never spoke. The plugin writes every display name to `Participant Names`, then attaches only
-confident matches to `Attendees`. Ambiguous names stay safely in the text field. If **Create missing
-People records when mapping** is enabled, an unmatched named participant with no exact email or name
-candidate creates one new record in the restricted People collection; ambiguous matches are never created.
+You do not have to discover a mapping toggle to get this. Restrict Attendees to your People or Contacts
+collection for the tightest matches; if the relation is unrestricted, matching uses an auto-detected
+People/Contacts/Team/Staff collection. If **Create missing People records when mapping** is enabled, an
+unmatched named participant with no exact email or name candidate creates one new record; ambiguous
+matches are never created.
+
+`Related` is a separate unrestricted multi-record link. Use it to connect a meeting to a job, client,
+project, or any other record from anywhere in Thymer.
 
 &nbsp;
 
@@ -171,9 +179,10 @@ candidate creates one new record in the restricted People collection; ambiguous 
 | **Recall media retention** | How long future bots keep Recall’s audio/video, transcript, participant, and debug artifacts. Defaults to 7 days, inside Recall’s free storage window. |
 | **Anthropic API key** / **Claude model** | Key and model used to write the summary. |
 | **Costs** | One-hour planning estimate for Recall plus every Claude model, with the selected model highlighted and storage shown separately. |
-| **Field mapping** | Point Meeting URL, Join At, Participant Names, and Attendees at existing properties instead of the plugin defaults. Transcript and summary always use the page body. |
-| **Map Participant Names (plaintext) to Attendees (collection items)?** | Optionally attach confident matches through the selected multi-record relation. Existing links are preserved. |
-| **Create missing People records when mapping** | Create an unambiguous missing named participant in the relation's restricted People collection. Off by default. |
+| **Field mapping** | Point Meeting URL, Join At, Participant Names, Attendees, and Related at existing properties instead of the plugin defaults. Transcript, summary, action items, and notes always use the page body. |
+| **Map Participant Names (plaintext) to Attendees (collection items)?** | On by default. Attach confident matches through the selected multi-record relation. Existing links are preserved. If Attendees is unrestricted, matching uses an auto-detected People/Contacts collection. |
+| **Create missing People records when mapping** | Create an unambiguous missing named participant in the People collection used for matching. Off by default. |
+| **Send the bot automatically to scheduled meetings** | On by default. When Join At is at least 10 minutes out, book the notetaker automatically. Cancel anytime. |
 | **Bot name** | The name the notetaker shows in the meeting. |
 | **Bot image** | Optional. A public HTTPS JPEG, 16:9, ideally 1280×720 and under 1.3 MB. Sent to Recall as `automatic_video_output`. |
 | **Join chat message** | Optional message the bot posts when it joins. |
@@ -220,8 +229,14 @@ GET recordings[].media_shortcuts.participant_events.data.participants_download_u
 The default interval is 30 seconds. You can also click **Repair Meeting** later on a Meeting record
 with a `Recall Bot ID`. Repair re-fetches Recall's authoritative final artifacts and fills only missing
 plugin-owned transcript entries, summary body items, citations, and attendee links. It does not
-replace an existing summary, task state, manual attendee relation, or unowned body content. Use the
-record's **Diagnostics** action to see received webhook events, parsed rows, last-event time, KV state,
+replace an existing summary, task state, manual attendee relation, or unowned body content. If the
+summary landed as one glued blob (`Planningnn### Overview`, literal `\n`), Repair also runs
+**Heal mashed summaries**. That debug repair lives on the open meeting's nav button, in
+**Plugin: Meetings → Setup → Diagnostics**, and as `Meetings: Heal mashed summaries` in the command
+palette. It rewrites only plugin-owned Summary / Action items nodes — never Notes or Transcript —
+and leaves already-healthy outlines alone.
+
+Use the record's **Diagnostics** action to see received webhook events, parsed rows, last-event time, KV state,
 transcript artifacts, realtime endpoints, and bridge version. Diagnostics copies a support-ready,
 allow-listed report to the clipboard (and logs a fallback to the console) without including keys,
 meeting URLs, transcript wording, or Recall account data.
@@ -243,9 +258,10 @@ Recall perfect diarization is enabled with
 `recording_config.transcript.diarization.use_separate_streams_when_available`.
 
 Topic-section summaries cite the most relevant wording or topic heading with native Thymer reference
-chips. Action items are written as real interactive tasks, and the plugin marks every body node it
-creates with persistent ownership metadata so retries and other devices recover the same structure
-instead of replaying the transcript or duplicating the summary.
+chips. Action items are written as real interactive tasks under their own heading. If you typed
+anything under **Notes**, Claude treats that as higher priority than the transcript. The plugin marks
+every body node it creates with persistent ownership metadata so retries and other devices recover the
+same structure instead of replaying the transcript or duplicating the summary.
 
 
 
