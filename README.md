@@ -230,7 +230,8 @@ The default interval is 30 seconds. You can also click **Repair Meeting** later 
 with a `Recall Bot ID`. Repair re-fetches Recall's authoritative final artifacts and fills only missing
 plugin-owned transcript entries, summary body items, citations, and attendee links. It does not
 replace an existing summary, task state, manual attendee relation, or unowned body content. If the
-summary landed as one glued blob (`Planningnn### Overview`, literal `\n`), Repair also runs
+summary landed as one glued blob (`Planningnn### Overview`, literal `\n`) or leftover
+`{ "summary": ... }` JSON, Repair also runs
 **Heal mashed summaries**. That debug repair lives on the open meeting's nav button, in
 **Plugin: Meetings → Setup → Diagnostics**, and as `Meetings: Heal mashed summaries` in the command
 palette. It rewrites only plugin-owned Summary / Action items nodes — never Notes or Transcript —

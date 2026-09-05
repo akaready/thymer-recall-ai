@@ -3634,6 +3634,16 @@ ${report}
 
   // summary-format.js
   var SUMMARY_WRAPPER_TITLES = /* @__PURE__ */ new Set(["meeting notes", "summary", "meeting summary", "notes", "meeting recap", "recap"]);
+  var SUMMARY_JSON_PREFIX = /^\s*\{\s*"summary"\s*:/i;
+  var SUMMARY_JSON_STRING_PREFIX = /^\s*\{\s*"summary"\s*:\s*"/i;
+  var SUMMARY_JSON_NEXT_KEY = /"\s*,\s*"[^"]+"\s*:/;
+  var SUMMARY_JSON_SECTIONS_LINE = /^\s*(?:"\s*,\s*)?"sections"\s*:/i;
+  var SUMMARY_JSON_CLOSER_LINE = /^\s*"?\s*\}+\s*$/;
+  var GLUED_BRACE_QUOTE_SECTIONS = /\}\"\s*,\s*"sections"\s*:/i;
+  var QUOTE_COMMA_SECTIONS = /"\s*,\s*"sections"\s*:/i;
+  var LEFTOVER_SECTIONS_KEY = /"sections"\s*:\s*\[/i;
+  var LEFTOVER_CHAPTER_OBJECT = /\{\s*"title"\s*:\s*"[^"]*"\s*,\s*"start"\s*:\s*-?\d+\s*,\s*"end"\s*:\s*-?\d+/;
+  var DANGLING_JSON_CLOSER = /([.!?])\}\s*"?\s*$/;
   function isTableSeparatorRow(line) {
     return /\|/.test(line) && /-/.test(line) && /^[\s|:-]+$/.test(line);
   }
@@ -3649,20 +3659,112 @@ ${report}
     return /nn#{1,6}\s|n#{1,6}\s|nn---|n-\s/.test(text);
   }
   __name(looksLikeGluedMarkdown, "looksLikeGluedMarkdown");
+  function stripSummaryJsonFence(text) {
+    return String(text || "").replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
+  }
+  __name(stripSummaryJsonFence, "stripSummaryJsonFence");
+  function trimLeadingJsonJunk(s, index) {
+    let cut = index;
+    while (cut > 0 && /[\s,\[\]}"]/.test(s[cut - 1])) cut--;
+    return s.slice(0, cut);
+  }
+  __name(trimLeadingJsonJunk, "trimLeadingJsonJunk");
+  function stripTrailingClaudeEnvelope(text) {
+    let s = String(text || "");
+    if (!s) return s;
+    const glued = s.search(GLUED_BRACE_QUOTE_SECTIONS);
+    if (glued >= 0) s = s.slice(0, glued);
+    else {
+      const quoted = s.search(QUOTE_COMMA_SECTIONS);
+      if (quoted >= 0) s = s.slice(0, quoted);
+      else {
+        const sections = s.search(LEFTOVER_SECTIONS_KEY);
+        if (sections >= 0 && /"start"\s*:/.test(s) && /"end"\s*:/.test(s)) {
+          s = trimLeadingJsonJunk(s, sections);
+        } else {
+          const chapter = s.search(LEFTOVER_CHAPTER_OBJECT);
+          if (chapter >= 0) s = trimLeadingJsonJunk(s, chapter);
+        }
+      }
+    }
+    return s.replace(DANGLING_JSON_CLOSER, "$1");
+  }
+  __name(stripTrailingClaudeEnvelope, "stripTrailingClaudeEnvelope");
+  function looksLikeLeftoverSummaryJson(text) {
+    const s = String(text || "");
+    if (!s.trim()) return false;
+    const t = stripSummaryJsonFence(s).trim();
+    if (SUMMARY_JSON_PREFIX.test(t)) return true;
+    if (SUMMARY_JSON_SECTIONS_LINE.test(t) || SUMMARY_JSON_CLOSER_LINE.test(t)) return true;
+    if (SUMMARY_JSON_NEXT_KEY.test(s) && /"sections"\s*:/i.test(s)) return true;
+    if (GLUED_BRACE_QUOTE_SECTIONS.test(s)) return true;
+    if (LEFTOVER_SECTIONS_KEY.test(s) && /"start"\s*:/.test(s) && /"end"\s*:/.test(s)) return true;
+    if (LEFTOVER_CHAPTER_OBJECT.test(s)) return true;
+    if (DANGLING_JSON_CLOSER.test(t)) return true;
+    return false;
+  }
+  __name(looksLikeLeftoverSummaryJson, "looksLikeLeftoverSummaryJson");
+  function tryParseSummaryObject(text) {
+    const unfenced = stripSummaryJsonFence(text).trim();
+    let obj = null;
+    try {
+      obj = JSON.parse(unfenced);
+    } catch {
+    }
+    if (!obj || typeof obj !== "object") {
+      const start = unfenced.indexOf("{");
+      const end = unfenced.lastIndexOf("}");
+      if (start >= 0 && end > start) {
+        try {
+          obj = JSON.parse(unfenced.slice(start, end + 1));
+        } catch {
+          obj = null;
+        }
+      }
+    }
+    if (obj && typeof obj === "object" && typeof obj.summary === "string") return obj.summary;
+    return null;
+  }
+  __name(tryParseSummaryObject, "tryParseSummaryObject");
+  function unescapeJsonStringFragment(text) {
+    return String(text || "").replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n").replace(/\\t/g, "	").replace(/\\"/g, '"');
+  }
+  __name(unescapeJsonStringFragment, "unescapeJsonStringFragment");
+  function unwrapSummaryJsonEnvelope(text) {
+    const original = String(text == null ? "" : text);
+    if (!looksLikeLeftoverSummaryJson(original)) return original;
+    const s = stripSummaryJsonFence(original);
+    const parsed = tryParseSummaryObject(s);
+    if (parsed != null) return parsed;
+    let body = s;
+    const prefix = body.match(SUMMARY_JSON_STRING_PREFIX);
+    if (prefix) body = body.slice(prefix[0].length);
+    const nextKey = body.search(SUMMARY_JSON_NEXT_KEY);
+    if (nextKey >= 0) {
+      body = body.slice(0, nextKey);
+    } else if (prefix) {
+      body = body.replace(/"\s*,?\s*\}\s*$/, "");
+    } else if (SUMMARY_JSON_SECTIONS_LINE.test(body.trim()) || SUMMARY_JSON_CLOSER_LINE.test(body.trim())) {
+      return "";
+    }
+    return unescapeJsonStringFragment(stripTrailingClaudeEnvelope(body));
+  }
+  __name(unwrapSummaryJsonEnvelope, "unwrapSummaryJsonEnvelope");
   function looksLikeMashedSummary(text) {
     const s = String(text == null ? "" : text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     if (!s.trim()) return false;
+    if (looksLikeLeftoverSummaryJson(s)) return true;
     if (s.includes("\n")) return false;
     if (s.includes("\\n") || s.includes("\\r") || s.includes("\\t")) return true;
     return looksLikeGluedMarkdown(s);
   }
   __name(looksLikeMashedSummary, "looksLikeMashedSummary");
   function recoverSummaryMarkdown(text) {
-    let s = String(text == null ? "" : text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-    if (s.includes("\n")) return s;
+    let s = stripTrailingClaudeEnvelope(unwrapSummaryJsonEnvelope(String(text == null ? "" : text).replace(/\r\n/g, "\n").replace(/\r/g, "\n")));
     if (s.includes("\\n") || s.includes("\\r") || s.includes("\\t")) {
-      return s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\t/g, "	");
+      s = s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\t/g, "	");
     }
+    if (s.includes("\n")) return s;
     if (!looksLikeGluedMarkdown(s)) return s;
     return s.replace(/nn(#{1,6}\s)/g, "\n\n$1").replace(/n(#{1,6}\s)/g, "\n$1").replace(/nn(---)/g, "\n\n$1").replace(/n(---)/g, "\n$1").replace(/n(-\s)/g, "\n$1").replace(/n(\|)/g, "\n$1").replace(/(#{1,6}\s[^\n]+)n([A-Z])/g, "$1\n$2");
   }
@@ -4312,7 +4414,7 @@ ${report}
   __name(formatRelativeTime, "formatRelativeTime");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.23.1";
+  var PLUGIN_VERSION = "1.23.2";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -6982,7 +7084,11 @@ ${recovered}`;
       for (const blob of blobs) {
         if (!blob || blob.isRoot || !blob.line) continue;
         const recovered = sanitizeSummaryMarkdown(recoverSummaryMarkdown(blob.text));
-        if (!recovered || looksLikeMashedSummary(recovered)) continue;
+        if (looksLikeMashedSummary(recovered)) continue;
+        if (!recovered) {
+          if (typeof blob.line.delete === "function" && await blob.line.delete() === false) return false;
+          continue;
+        }
         const parentGuid = blob.line.parent_guid;
         const parent = (items || []).find((item) => item.guid === parentGuid) || null;
         const siblings = (items || []).filter((item) => item.parent_guid === parentGuid);
