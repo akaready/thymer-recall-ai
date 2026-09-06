@@ -3961,12 +3961,50 @@ ${report}
     return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   }
   __name(sanitizeSummaryMarkdown, "sanitizeSummaryMarkdown");
+  var DEFAULT_SUMMARY_PROMPT = [
+    "Summarize this meeting as clean Markdown for a Thymer outline note. Follow these formatting rules exactly:",
+    "- Do NOT add a title or top-level heading \u2014 the note already has Summary and Action items headings.",
+    "- Start with ### Overview: one short paragraph (2\u20134 sentences, about 80 words max). Capture what was decided and what remains open \u2014 not a recap of who said what.",
+    '- Then ### Decisions and ### Open Questions with brief "- " bullets only (one idea each, at most 5\u20137 bullets per section). Skip any section with nothing to say.',
+    '- After the summary, output a separate section headed exactly "### Action Items" with one "- [ ] " checkbox each, written "<action> \u2014 <owner>" (drop "\u2014 <owner>" when no owner is named). Do NOT put Action Items inside the summary.',
+    "- Never use numbered lists (1. 2. or 1) 2)). Never rewrite or narrate the transcript. No play-by-play. No long prose under bullets.",
+    "- Never use horizontal rules (--- or ***), never use Markdown tables, and do not leave blank lines inside a section.",
+    "- If HUMAN NOTES are provided, treat them as higher priority than the transcript: they are the participant's own record of what mattered. Prefer them when they conflict with or focus the spoken discussion."
+  ].join("\n");
+  var LEGACY_SUMMARY_PROMPTS = Object.freeze([
+    "Summarize this meeting transcript for a Thymer note. Include: 1) a concise overview, 2) decisions made, 3) action items with owners when mentioned, and 4) open questions. Keep the output skimmable and factual.",
+    [
+      "Summarize this meeting transcript as clean Markdown for a Thymer outline note. Follow these formatting rules exactly:",
+      "- Do NOT add a title or top-level heading \u2014 the note already has a Summary heading, so start directly with the first section.",
+      '- Give each section its own "### " heading: Overview, Decisions, Action Items, Open Questions. Include a section only when it has content.',
+      '- Overview: one short paragraph. Decisions: one "- " bullet each. Action Items: one "- [ ] " checkbox each, written "<action> \u2014 <owner>" (drop the "\u2014 <owner>" when no owner is named). Open Questions: one "- " bullet each.',
+      "- Never use horizontal rules (--- or ***), never use Markdown tables, and do not leave blank lines inside a section.",
+      "Be concise and factual."
+    ].join("\n"),
+    [
+      "Summarize this meeting as clean Markdown for a Thymer outline note. Follow these formatting rules exactly:",
+      "- Do NOT add a title or top-level heading \u2014 the note already has Summary and Action items headings.",
+      '- Summary sections each get a "### " heading: Overview, Decisions, Open Questions. Include a section only when it has content. Do NOT put Action Items inside the summary.',
+      '- After the summary, output a separate section headed exactly "### Action Items" with one "- [ ] " checkbox each, written "<action> \u2014 <owner>" (drop "\u2014 <owner>" when no owner is named).',
+      '- Overview: one short paragraph. Decisions: one "- " bullet each. Open Questions: one "- " bullet each.',
+      "- Never use horizontal rules (--- or ***), never use Markdown tables, and do not leave blank lines inside a section.",
+      "- If HUMAN NOTES are provided, treat them as higher priority than the transcript: they are the participant's own record of what mattered. Prefer them when they conflict with or focus the spoken discussion.",
+      "Be concise and factual."
+    ].join("\n")
+  ]);
+  function resolveSummaryPrompt(stored) {
+    const text = typeof stored === "string" ? stored : "";
+    if (!text || LEGACY_SUMMARY_PROMPTS.includes(text)) return DEFAULT_SUMMARY_PROMPT;
+    return text;
+  }
+  __name(resolveSummaryPrompt, "resolveSummaryPrompt");
   function sectionJsonInstruction(count2) {
     return [
-      "Additionally, divide the transcript into a handful of topic sections in time order.",
+      'Additionally, divide the transcript into a handful of topic sections in time order \u2014 for the JSON "sections" array only. Do not write those topics as extra long prose in the markdown summary.',
       `Each line below is numbered like [N], from 0 to ${count2 - 1}.`,
       "At the end of every non-heading summary line, add one or two citations. Use {{cite:S:E}} when transcript line E directly supports that wording, where S is the zero-based index into your sections array. Use the broader {{cite:S}} only when the line synthesizes several turns in that topic and no single transcript line is sufficient.",
       "For multiple sources use one marker such as {{cite:1:8,2:14}}. Every E must fall inside section S. Choose only the most direct source or two, and do not put citation markers on headings.",
+      'Keep the markdown summary brief: one short Overview paragraph, then brief "- " bullets under ### Decisions and ### Open Questions. Never numbered lists. Do not rewrite or narrate the transcript.',
       "Put real newlines in the JSON summary string. Use JSON string escaping so each line break is a real newline in the parsed value \u2014 do not write the two characters backslash and n as visible text, and do not glue headings together.",
       'Do NOT put Action Items inside the summary \u2014 they go in a separate "### Action Items" block that the plugin will hoist out of the summary.',
       "Respond with ONLY a JSON object \u2014 no code fence, no text before or after \u2014 of the form:",
@@ -4810,7 +4848,7 @@ ${report}
   __name(openParticipantConfirmDialog, "openParticipantConfirmDialog");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.23.4";
+  var PLUGIN_VERSION = "1.23.5";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -4902,16 +4940,7 @@ ${report}
     transcriptSections: false,
     sectionHeadingTemplate: "{Topic} | {Range}",
     sectionRangeStyle: "clock",
-    summaryPrompt: [
-      "Summarize this meeting as clean Markdown for a Thymer outline note. Follow these formatting rules exactly:",
-      "- Do NOT add a title or top-level heading \u2014 the note already has Summary and Action items headings.",
-      '- Summary sections each get a "### " heading: Overview, Decisions, Open Questions. Include a section only when it has content. Do NOT put Action Items inside the summary.',
-      '- After the summary, output a separate section headed exactly "### Action Items" with one "- [ ] " checkbox each, written "<action> \u2014 <owner>" (drop "\u2014 <owner>" when no owner is named).',
-      '- Overview: one short paragraph. Decisions: one "- " bullet each. Open Questions: one "- " bullet each.',
-      "- Never use horizontal rules (--- or ***), never use Markdown tables, and do not leave blank lines inside a section.",
-      "- If HUMAN NOTES are provided, treat them as higher priority than the transcript: they are the participant's own record of what mattered. Prefer them when they conflict with or focus the spoken discussion.",
-      "Be concise and factual."
-    ].join("\n"),
+    summaryPrompt: DEFAULT_SUMMARY_PROMPT,
     transcriptHeadingText: "\u{1F399}\uFE0F Transcript",
     transcriptHeadingLevel: "h2",
     summaryHeadingText: "\u{1F4DD} Summary",
@@ -4923,17 +4952,6 @@ ${report}
     bodySectionOrder: DEFAULT_BODY_SECTION_ORDER,
     citationStyle: "name-time"
   });
-  var LEGACY_SUMMARY_PROMPTS = Object.freeze([
-    "Summarize this meeting transcript for a Thymer note. Include: 1) a concise overview, 2) decisions made, 3) action items with owners when mentioned, and 4) open questions. Keep the output skimmable and factual.",
-    [
-      "Summarize this meeting transcript as clean Markdown for a Thymer outline note. Follow these formatting rules exactly:",
-      "- Do NOT add a title or top-level heading \u2014 the note already has a Summary heading, so start directly with the first section.",
-      '- Give each section its own "### " heading: Overview, Decisions, Action Items, Open Questions. Include a section only when it has content.',
-      '- Overview: one short paragraph. Decisions: one "- " bullet each. Action Items: one "- [ ] " checkbox each, written "<action> \u2014 <owner>" (drop the "\u2014 <owner>" when no owner is named). Open Questions: one "- " bullet each.',
-      "- Never use horizontal rules (--- or ***), never use Markdown tables, and do not leave blank lines inside a section.",
-      "Be concise and factual."
-    ].join("\n")
-  ]);
   var HEADING_LEVEL_OPTIONS = [
     ["h1", "Heading 1 (largest)"],
     ["h2", "Heading 2"],
@@ -4978,7 +4996,7 @@ ${report}
       transcriptSections: bool("transcriptSections"),
       sectionHeadingTemplate: str("sectionHeadingTemplate"),
       sectionRangeStyle: normalizeSectionRangeStyle(src.sectionRangeStyle),
-      summaryPrompt: LEGACY_SUMMARY_PROMPTS.includes(str("summaryPrompt")) ? DEFAULT_SETTINGS.summaryPrompt : str("summaryPrompt"),
+      summaryPrompt: resolveSummaryPrompt(str("summaryPrompt")),
       transcriptHeadingText: str("transcriptHeadingText"),
       transcriptHeadingLevel: ["h1", "h2", "h3", "none"].includes(src.transcriptHeadingLevel) ? src.transcriptHeadingLevel : DEFAULT_SETTINGS.transcriptHeadingLevel,
       summaryHeadingText: str("summaryHeadingText"),
@@ -6470,14 +6488,14 @@ ${notes}`;
       }
       const wantSections = !!this._settings.transcriptSections && Array.isArray(entries) && entries.length > 0;
       if (!wantSections) {
-        const raw2 = await this._callClaude(basePrompt, transcriptText, 1400);
+        const raw2 = await this._callClaude(basePrompt, transcriptText, 800);
         return { summary: sanitizeSummaryMarkdown(recoverSummaryMarkdown(raw2)), sections: [], citations: [] };
       }
       const prompt = `${basePrompt}
 
 ${sectionJsonInstruction(entries.length)}`;
       const numbered = entries.map((e, i) => `[${i}] ${e.speaker}: ${e.text}`).join("\n");
-      const raw = await this._callClaude(prompt, numbered, 2600);
+      const raw = await this._callClaude(prompt, numbered, 1200);
       const parsed = parseSummaryAndSections(raw, entries.length);
       const sanitized = sanitizeSummaryMarkdown(parsed.summary);
       const cited = extractSummaryCitations(sanitized, parsed.sections);
@@ -8849,7 +8867,7 @@ ${recovered}`;
             label: "Generation",
             body: [
               this._modelSelectInput("Claude model", "anthropicModel"),
-              this._textareaInput("Summary prompt", "summaryPrompt", 8)
+              this._textareaInput("Summary prompt", "summaryPrompt", 8, DEFAULT_SETTINGS.summaryPrompt)
             ]
           })
         ] : []
@@ -9200,7 +9218,7 @@ ${recovered}`;
         hint: missing && !fields.length ? `This collection has no ${emptyTypeLabel || (types || []).join(" or ")} property for Recall.ai to use. Create one above.` : ""
       });
     }
-    _textareaInput(label, key, rows = 4) {
+    _textareaInput(label, key, rows = 4, placeholder = "") {
       return h(
         "label",
         { class: `${ROOT_CLASS}-field` },
@@ -9208,6 +9226,7 @@ ${recovered}`;
         h("textarea", {
           rows,
           value: this._draft[key] || "",
+          placeholder,
           onInput: /* @__PURE__ */ __name((event) => this._updateSetting(key, event.target.value), "onInput")
         })
       );

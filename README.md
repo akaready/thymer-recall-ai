@@ -185,7 +185,7 @@ project, or any other record from anywhere in Thymer.
 | **Bot image** | Optional. A public HTTPS JPEG, 16:9, ideally 1280×720 and under 1.3 MB. Sent to Recall as `automatic_video_output`. |
 | **Join chat message** | Optional message the bot posts when it joins. |
 | **Poll interval** | How often the plugin checks Recall for progress. |
-| **Summary prompt** | The instructions Claude follows when summarizing. |
+| **Summary prompt** | The instructions Claude follows when summarizing. Default: one short Overview paragraph, then brief `- ` bullets under Decisions / Open Questions (never numbered), and a separate `### Action Items` checkbox list. |
 
 The retention setting is sent as `recording_config.retention` on every future bot. Seven days is the
 default because Recall does not charge for media stored for seven days or less, while still leaving a
