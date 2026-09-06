@@ -4744,6 +4744,196 @@ ${text}`;
   }
   __name(formatMeetingWhen, "formatMeetingWhen");
 
+  // confirm-dialog-helpers.js
+  var MEETINGS_GITHUB_REPO = "https://github.com/akaready/thymer-recall-ai";
+  var GITHUB_ISSUE_URL_MAX = 7e3;
+  function normalizeConfirmBody(body) {
+    if (body && typeof body === "object") {
+      return {
+        intro: String(body.intro || ""),
+        items: Array.isArray(body.items) ? body.items.map((item) => String(item || "")).filter(Boolean) : [],
+        outro: String(body.outro || "")
+      };
+    }
+    return { intro: String(body || ""), items: [], outro: "" };
+  }
+  __name(normalizeConfirmBody, "normalizeConfirmBody");
+  function regenerateConfirmCopy(value) {
+    if (value === "actions") {
+      return "This will replace the Action items list. Summary, Notes, and Transcript stay. Checkboxes you edited will be overwritten.";
+    }
+    if (value === "both") {
+      return "This will replace the Summary section and the Action items list. Notes and Transcript stay. Checkboxes you edited will be overwritten.";
+    }
+    return "This will replace the Summary section. Notes, Transcript, and Action items stay.";
+  }
+  __name(regenerateConfirmCopy, "regenerateConfirmCopy");
+  function buildGitHubIssueUrl(options) {
+    const repo = String(options.repo || MEETINGS_GITHUB_REPO).replace(/\/+$/, "");
+    const title = String(options.title || "Meetings diagnostics");
+    const body = String(options.body || "");
+    const maxLength = Number(options.maxLength) > 0 ? Number(options.maxLength) : GITHUB_ISSUE_URL_MAX;
+    const base = `${repo}/issues/new`;
+    const withParams = /* @__PURE__ */ __name((issueTitle, issueBody) => `${base}?title=${encodeURIComponent(issueTitle)}&body=${encodeURIComponent(issueBody)}`, "withParams");
+    const full = withParams(title, body);
+    if (full.length <= maxLength) return { url: full, truncated: false, copyFull: false };
+    const note = "\n\n---\nThe full diagnostic report is in the clipboard (the GitHub URL was too long).";
+    let cut = body;
+    const suffix = `\u2026${note}`;
+    while (cut.length > 240 && withParams(title, cut + suffix).length > maxLength) {
+      cut = cut.slice(0, Math.max(240, Math.floor(cut.length * 0.72)));
+    }
+    const truncated = withParams(title, cut + suffix);
+    if (truncated.length <= maxLength) return { url: truncated, truncated: true, copyFull: true };
+    return { url: base, truncated: true, copyFull: true };
+  }
+  __name(buildGitHubIssueUrl, "buildGitHubIssueUrl");
+  async function copyTextToClipboard(text) {
+    try {
+      const write = typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText;
+      if (write) {
+        await write.call(navigator.clipboard, String(text || ""));
+        return true;
+      }
+    } catch {
+    }
+    return false;
+  }
+  __name(copyTextToClipboard, "copyTextToClipboard");
+  var NAV_TIP_CLASS = "plg-recall-ai__nav-tip";
+  var HOVER_BOUND = "overlayHoverBound";
+  function overlayHoverStyles(kind = "ghost") {
+    if (kind === "save" || kind === "primary") {
+      return {
+        background: "rgba(16, 185, 129, 0.28)",
+        outline: "2px solid #10b981",
+        outlineOffset: "2px"
+      };
+    }
+    return {
+      background: "rgba(127, 127, 127, 0.22)",
+      outline: "2px solid rgba(127, 127, 127, 0.85)",
+      outlineOffset: "2px"
+    };
+  }
+  __name(overlayHoverStyles, "overlayHoverStyles");
+  function applyOverlayHoverStyles(el2, kind = "ghost") {
+    if (!el2 || !el2.style) return el2;
+    const styles = overlayHoverStyles(kind);
+    el2.style.setProperty("background", styles.background, "important");
+    el2.style.setProperty("outline", styles.outline, "important");
+    el2.style.setProperty("outline-offset", styles.outlineOffset, "important");
+    return el2;
+  }
+  __name(applyOverlayHoverStyles, "applyOverlayHoverStyles");
+  function clearOverlayHoverStyles(el2) {
+    if (!el2 || !el2.style) return el2;
+    el2.style.removeProperty("background");
+    el2.style.removeProperty("outline");
+    el2.style.removeProperty("outline-offset");
+    return el2;
+  }
+  __name(clearOverlayHoverStyles, "clearOverlayHoverStyles");
+  function attachOverlayButtonHover(el2, kind = "ghost") {
+    if (!el2 || !el2.addEventListener) return el2;
+    if (el2.dataset && el2.dataset[HOVER_BOUND] === "1") return el2;
+    if (el2.dataset) el2.dataset[HOVER_BOUND] = "1";
+    const kindOf = /* @__PURE__ */ __name(() => typeof kind === "function" ? kind() : kind, "kindOf");
+    el2.addEventListener("mouseenter", () => applyOverlayHoverStyles(el2, kindOf()));
+    el2.addEventListener("mouseleave", () => {
+      if (el2.classList && el2.classList.contains("is-selected")) {
+        applyOverlayHoverStyles(el2, "save");
+        return;
+      }
+      clearOverlayHoverStyles(el2);
+    });
+    return el2;
+  }
+  __name(attachOverlayButtonHover, "attachOverlayButtonHover");
+  function overlayLocalCss(rootClass) {
+    const skip = `.${rootClass}-confirm-skip`;
+    const save = `.${rootClass}-confirm-save`;
+    const choice = `.${rootClass}-choice-item`;
+    return [
+      `${skip}:hover,${choice}:hover{background:rgba(127,127,127,0.22)!important;outline:2px solid rgba(127,127,127,0.85)!important;outline-offset:2px!important}`,
+      `${save}:hover,${choice}.is-selected,${choice}.is-selected:hover{background:rgba(16,185,129,0.28)!important;outline:2px solid #10b981!important;outline-offset:2px!important}`
+    ].join("");
+  }
+  __name(overlayLocalCss, "overlayLocalCss");
+  function mountOverlaySurface(root, rootClass) {
+    if (!root || !root.querySelectorAll) return root;
+    const styleId = `${rootClass}-overlay-css`;
+    if (!root.querySelector(`style#${styleId}`)) {
+      const style = document.createElement("style");
+      style.id = styleId;
+      style.textContent = overlayLocalCss(rootClass);
+      root.insertBefore(style, root.firstChild);
+    }
+    const saveClass = `${rootClass}-confirm-save`;
+    for (const btn of root.querySelectorAll("button")) {
+      const kind = /* @__PURE__ */ __name(() => {
+        if (btn.classList.contains("is-selected") || btn.classList.contains(saveClass)) return "save";
+        return "ghost";
+      }, "kind");
+      attachOverlayButtonHover(btn, kind);
+      if (btn.classList.contains("is-selected")) applyOverlayHoverStyles(btn, "save");
+    }
+    return root;
+  }
+  __name(mountOverlaySurface, "mountOverlaySurface");
+  function escapeHtmlAttr(text) {
+    return String(text || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  __name(escapeHtmlAttr, "escapeHtmlAttr");
+  function iconNavHtmlLabel(text) {
+    const safe = escapeHtmlAttr(text);
+    return `<span class="${NAV_TIP_CLASS} tooltip" title="${safe}" aria-label="${safe}" data-tooltip="${safe}" data-tooltip-dir="top" data-tps-tip="${safe}"></span>`;
+  }
+  __name(iconNavHtmlLabel, "iconNavHtmlLabel");
+  function navTipCss() {
+    return [
+      `.panel-menubar :is(button,.button-minimal,[role="button"]):has(.${NAV_TIP_CLASS}){position:relative}`,
+      `.${NAV_TIP_CLASS}{position:absolute;inset:0;z-index:1}`
+    ].join("");
+  }
+  __name(navTipCss, "navTipCss");
+  function navButtonElement(button2) {
+    if (!button2) return null;
+    try {
+      if (typeof button2.getElement === "function") {
+        const el2 = button2.getElement();
+        if (el2) return el2;
+      }
+    } catch {
+    }
+    if (button2.element) return button2.element;
+    return null;
+  }
+  __name(navButtonElement, "navButtonElement");
+  function stampNavTooltip(el2, text) {
+    if (!el2 || !text || typeof el2.setAttribute !== "function") return el2;
+    el2.setAttribute("title", text);
+    el2.setAttribute("aria-label", text);
+    el2.setAttribute("data-tooltip", text);
+    el2.setAttribute("data-tooltip-dir", "top");
+    el2.setAttribute("data-tps-tip", text);
+    if (el2.classList && !el2.classList.contains("tooltip")) el2.classList.add("tooltip");
+    return el2;
+  }
+  __name(stampNavTooltip, "stampNavTooltip");
+  function bindNavTooltip(button2, text) {
+    const label = String(text || "");
+    if (!button2 || !label) return false;
+    try {
+      if (typeof button2.setTooltip === "function") button2.setTooltip(label);
+    } catch {
+    }
+    const el2 = navButtonElement(button2);
+    if (el2) stampNavTooltip(el2, label);
+    return true;
+  }
+  __name(bindNavTooltip, "bindNavTooltip");
+
   // participant-confirm-drafts.js
   function draftsFromUnmatched(participants) {
     const drafts = [];
@@ -4890,6 +5080,7 @@ ${text}`;
       }
     });
     document.body.appendChild(overlayEl);
+    mountOverlaySurface(overlayEl, rootClass);
     detachKey = /* @__PURE__ */ __name((event) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -4902,63 +5093,6 @@ ${text}`;
     if (first && typeof first.focus === "function") first.focus();
   }
   __name(openParticipantConfirmDialog, "openParticipantConfirmDialog");
-
-  // confirm-dialog-helpers.js
-  var MEETINGS_GITHUB_REPO = "https://github.com/akaready/thymer-recall-ai";
-  var GITHUB_ISSUE_URL_MAX = 7e3;
-  function normalizeConfirmBody(body) {
-    if (body && typeof body === "object") {
-      return {
-        intro: String(body.intro || ""),
-        items: Array.isArray(body.items) ? body.items.map((item) => String(item || "")).filter(Boolean) : [],
-        outro: String(body.outro || "")
-      };
-    }
-    return { intro: String(body || ""), items: [], outro: "" };
-  }
-  __name(normalizeConfirmBody, "normalizeConfirmBody");
-  function regenerateConfirmCopy(value) {
-    if (value === "actions") {
-      return "This will replace the Action items list. Summary, Notes, and Transcript stay. Checkboxes you edited will be overwritten.";
-    }
-    if (value === "both") {
-      return "This will replace the Summary section and the Action items list. Notes and Transcript stay. Checkboxes you edited will be overwritten.";
-    }
-    return "This will replace the Summary section. Notes, Transcript, and Action items stay.";
-  }
-  __name(regenerateConfirmCopy, "regenerateConfirmCopy");
-  function buildGitHubIssueUrl(options) {
-    const repo = String(options.repo || MEETINGS_GITHUB_REPO).replace(/\/+$/, "");
-    const title = String(options.title || "Meetings diagnostics");
-    const body = String(options.body || "");
-    const maxLength = Number(options.maxLength) > 0 ? Number(options.maxLength) : GITHUB_ISSUE_URL_MAX;
-    const base = `${repo}/issues/new`;
-    const withParams = /* @__PURE__ */ __name((issueTitle, issueBody) => `${base}?title=${encodeURIComponent(issueTitle)}&body=${encodeURIComponent(issueBody)}`, "withParams");
-    const full = withParams(title, body);
-    if (full.length <= maxLength) return { url: full, truncated: false, copyFull: false };
-    const note = "\n\n---\nThe full diagnostic report is in the clipboard (the GitHub URL was too long).";
-    let cut = body;
-    const suffix = `\u2026${note}`;
-    while (cut.length > 240 && withParams(title, cut + suffix).length > maxLength) {
-      cut = cut.slice(0, Math.max(240, Math.floor(cut.length * 0.72)));
-    }
-    const truncated = withParams(title, cut + suffix);
-    if (truncated.length <= maxLength) return { url: truncated, truncated: true, copyFull: true };
-    return { url: base, truncated: true, copyFull: true };
-  }
-  __name(buildGitHubIssueUrl, "buildGitHubIssueUrl");
-  async function copyTextToClipboard(text) {
-    try {
-      const write = typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText;
-      if (write) {
-        await write.call(navigator.clipboard, String(text || ""));
-        return true;
-      }
-    } catch {
-    }
-    return false;
-  }
-  __name(copyTextToClipboard, "copyTextToClipboard");
 
   // confirm-dialog.js
   var overlayEl2 = null;
@@ -5005,6 +5139,7 @@ ${text}`;
       if (event.target === root) closeConfirmDialog(cancelValue);
     });
     document.body.appendChild(root);
+    mountOverlaySurface(root, rootClass);
     detachKey2 = /* @__PURE__ */ __name((event) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -5112,6 +5247,8 @@ ${text}`;
             const on = other === btn;
             other.classList.toggle("is-selected", on);
             other.setAttribute("aria-pressed", on ? "true" : "false");
+            if (on) applyOverlayHoverStyles(other, "save");
+            else clearOverlayHoverStyles(other);
           }
           lede.textContent = copyFor(item.value);
           applyBtn.disabled = false;
@@ -5220,8 +5357,65 @@ ${text}`;
   }
   __name(openReportDialog, "openReportDialog");
 
+  // ../../shared/settings-ui/tooltip.js
+  var TIP_SELECTOR = "[data-tps-tip],[data-cf-tip]";
+  var STYLE_ID = "tps-tip-css";
+  var WIN_FLAG = "__tpsInstantTooltip";
+  function installInstantTooltip() {
+    if (typeof document === "undefined") return;
+    if (typeof window !== "undefined" && /** @type {any} */
+    window[WIN_FLAG]) return;
+    if (typeof window !== "undefined") window[WIN_FLAG] = true;
+    injectTooltipCss();
+    const tip = document.createElement("div");
+    tip.className = "tps-tip";
+    tip.setAttribute("aria-hidden", "true");
+    (document.body || document.documentElement).appendChild(tip);
+    const hide = /* @__PURE__ */ __name(() => tip.classList.remove("is-visible"), "hide");
+    const label = /* @__PURE__ */ __name((el2) => el2.getAttribute("data-tps-tip") || el2.getAttribute("data-cf-tip") || "", "label");
+    document.addEventListener("mouseover", (e) => {
+      const t = e.target instanceof Element ? e.target.closest(TIP_SELECTOR) : null;
+      if (!t) {
+        hide();
+        return;
+      }
+      const text = label(t);
+      if (!text) {
+        hide();
+        return;
+      }
+      tip.textContent = text;
+      const r = t.getBoundingClientRect();
+      tip.style.left = `${r.left + r.width / 2}px`;
+      tip.style.top = `${r.top}px`;
+      tip.classList.add("is-visible");
+    }, true);
+    document.addEventListener("mouseout", (e) => {
+      const t = e.target instanceof Element ? e.target.closest(TIP_SELECTOR) : null;
+      const to = e.relatedTarget instanceof Element ? e.relatedTarget : null;
+      if (t && (!to || !t.contains(to))) hide();
+    }, true);
+    window.addEventListener("scroll", hide, true);
+    window.addEventListener("blur", hide);
+  }
+  __name(installInstantTooltip, "installInstantTooltip");
+  function injectTooltipCss() {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = [
+      ".tps-tip{position:fixed;z-index:2147483000;transform:translate(-50%,calc(-100% - 8px));",
+      "padding:3px 8px;border-radius:var(--tps-radius-sm,5px);background:var(--tps-text,#1a1a1a);",
+      "color:var(--tps-panel-bg,#fff);font-size:11px;font-weight:500;line-height:1.3;white-space:nowrap;",
+      "pointer-events:none;opacity:0;box-shadow:0 2px 8px rgba(0,0,0,.35)}",
+      ".tps-tip.is-visible{opacity:1}"
+    ].join("");
+    (document.head || document.documentElement).appendChild(style);
+  }
+  __name(injectTooltipCss, "injectTooltipCss");
+
   // plugin.js
-  var PLUGIN_VERSION = "1.23.8";
+  var PLUGIN_VERSION = "1.23.9";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -5544,6 +5738,11 @@ ${text}`;
       this._safe("inject css", () => {
         this.ui.injectCSS(PANEL_CSS);
         this.ui.injectCSS(this._css());
+        this._ensureNavTipCss();
+        try {
+          installInstantTooltip();
+        } catch {
+        }
       });
       this._safe("register settings panel", () => this._registerSettingsPanel());
       this._safe("attach settings lifecycle", () => this._registerSettingsLifecycle());
@@ -5634,33 +5833,47 @@ ${text}`;
       this._navButton = this._createJoinButton();
       this._regenerateButton = this.addCollectionNavigationButton({
         label: "",
+        htmlLabel: iconNavHtmlLabel("Regenerate"),
         icon: "refresh",
         tooltip: "Regenerate",
         onlyWhenExpanded: true,
-        onClick: /* @__PURE__ */ __name(({ record }) => void this._openRegenerateMenu(record), "onClick")
+        onClick: /* @__PURE__ */ __name(({ record, element }) => {
+          this._stampIconNavFromClick(element, "Regenerate");
+          void this._openRegenerateMenu(record);
+        }, "onClick")
       });
       this._syncButton = this.addCollectionNavigationButton({
         label: "",
+        htmlLabel: iconNavHtmlLabel("Repair"),
         icon: "hammer",
         tooltip: "Repair",
         onlyWhenExpanded: true,
-        onClick: /* @__PURE__ */ __name(({ record }) => void this._confirmRepairMeeting(record), "onClick")
+        onClick: /* @__PURE__ */ __name(({ record, element }) => {
+          this._stampIconNavFromClick(element, "Repair");
+          void this._confirmRepairMeeting(record);
+        }, "onClick")
       });
       this._diagnosticsButton = this.addCollectionNavigationButton({
         label: "",
+        htmlLabel: iconNavHtmlLabel("Diagnostics"),
         icon: "stethoscope",
         tooltip: "Diagnostics",
         onlyWhenExpanded: true,
-        onClick: /* @__PURE__ */ __name(({ record }) => void this._showMeetingDiagnostics(record), "onClick")
+        onClick: /* @__PURE__ */ __name(({ record, element }) => {
+          this._stampIconNavFromClick(element, "Diagnostics");
+          void this._showMeetingDiagnostics(record);
+        }, "onClick")
       });
+      this._bindIconNavTooltips();
+      this._scheduleIconNavTipStamp();
     }
     _createJoinButton() {
       return this.addCollectionNavigationButton({
         label: "Join Now",
         // One glyph from the icon slot. htmlLabel-with-icon plus Thymer's default view glyph
         // painted two icons (document + microphone) jammed against "Join Now".
+        // Text label is enough — no tooltip, no custom hover.
         icon: "microphone",
-        tooltip: "Send the notetaker into this meeting now",
         onlyWhenExpanded: true,
         onClick: /* @__PURE__ */ __name(({ record }) => {
           this._activeRecordGuid = record && record.guid || "";
@@ -8626,6 +8839,7 @@ ${recovered}`;
       } catch {
       }
       void this._refreshJoinButtonVisibility(target, state.kind);
+      this._bindIconNavTooltips();
       if (!this._navButton) return;
       try {
         this._navButton.setIcon(state.icon || "microphone");
@@ -8636,8 +8850,53 @@ ${recovered}`;
       } catch {
       }
       try {
-        this._navButton.setTooltip(state.tooltip);
+        this._navButton.setTooltip("");
       } catch {
+      }
+    }
+    _ensureNavTipCss() {
+      if (typeof document === "undefined") return;
+      const id = "plg-recall-ai-nav-tip-css";
+      if (document.getElementById(id)) return;
+      const style = document.createElement("style");
+      style.id = id;
+      style.textContent = navTipCss();
+      (document.head || document.documentElement).appendChild(style);
+    }
+    _bindIconNavTooltips() {
+      bindNavTooltip(this._regenerateButton, "Regenerate");
+      bindNavTooltip(this._syncButton, "Repair");
+      bindNavTooltip(this._diagnosticsButton, "Diagnostics");
+      this._stampIconNavTipsInDom();
+    }
+    _stampIconNavFromClick(element, text) {
+      if (element) stampNavTooltip(element, text);
+      this._bindIconNavTooltips();
+    }
+    _stampIconNavTipsInDom() {
+      if (typeof document === "undefined") return;
+      try {
+        for (const tip of document.querySelectorAll(".plg-recall-ai__nav-tip")) {
+          const label = tip.getAttribute("data-tooltip") || tip.getAttribute("title") || "";
+          if (!label) continue;
+          stampNavTooltip(tip, label);
+          const btn = tip.closest('button, .button-minimal, [role="button"]');
+          if (btn) stampNavTooltip(btn, label);
+        }
+      } catch {
+      }
+    }
+    _scheduleIconNavTipStamp() {
+      const run = /* @__PURE__ */ __name(() => this._bindIconNavTooltips(), "run");
+      try {
+        run();
+      } catch {
+      }
+      for (const ms of [0, 50, 200, 600]) {
+        try {
+          setTimeout(run, ms);
+        } catch {
+        }
       }
     }
     async _recordHasTranscriptContent(record) {
@@ -8702,8 +8961,7 @@ ${recovered}`;
       const IDLE = {
         kind: "idle",
         icon: "microphone",
-        label: "Join Now",
-        tooltip: "Send the notetaker into this meeting now"
+        label: "Join Now"
       };
       if (!record) return IDLE;
       const status = this._text(record, FIELDS.STATUS).toLowerCase();
@@ -8711,56 +8969,47 @@ ${recovered}`;
       if (status === "summarizing") return {
         kind: "summarizing",
         icon: "loader-2",
-        label: "Summarizing",
-        tooltip: "Generating the meeting summary"
+        label: "Summarizing"
       };
       if (status === "cancelling") return {
         kind: "cancelling",
         icon: "loader-2",
-        label: "Cancelling",
-        tooltip: "Cancelling the scheduled bot"
+        label: "Cancelling"
       };
       if (status === "processing transcript") return {
         kind: "processing",
         icon: "loader-2",
-        label: "Processing Transcript",
-        tooltip: "Waiting for the transcript to finish"
+        label: "Processing Transcript"
       };
       if (botId && (status === "summary_failed" || status === "error" || isFatalStatus(status))) return {
         kind: "repair",
         icon: "alert-circle",
-        label: "Repair",
-        tooltip: status === "summary_failed" ? "Transcript saved; summary failed \u2014 click to repair" : "Meeting processing needs attention \u2014 click to repair"
+        label: "Repair"
       };
       if (botId && COMPLETED_MEETING_STATUSES.has(status)) return {
         kind: "done",
         icon: "circle-check",
-        label: "Done",
-        tooltip: status === "transcribed" ? "Meeting transcript saved" : "Meeting transcribed and summarized"
+        label: "Done"
       };
       if (botId && isMeetingEndedStatus(status)) return {
         kind: "processing",
         icon: "loader-2",
-        label: "Processing Transcript",
-        tooltip: "Waiting for Recall\u2019s authoritative transcript"
+        label: "Processing Transcript"
       };
       if (botId && botJoinMs(this._joinAtMs(record)) > Date.now() && !isTerminalStatus(status) && status !== "error") return {
         kind: "scheduled",
         icon: "calendar",
-        label: "Scheduled",
-        tooltip: "The notetaker is booked \u2014 click to cancel it"
+        label: "Scheduled"
       };
       if (botId && !isTerminalStatus(status) && status !== "error") return {
         kind: "recording",
         icon: "circle-dot",
-        label: "Recording",
-        tooltip: "Bot is in this meeting \u2014 click to stop it"
+        label: "Recording"
       };
       if (this._isScheduledDispatch(record)) return {
         kind: "schedulable",
         icon: "calendar",
-        label: "Schedule Bot",
-        tooltip: "Book the notetaker now; it joins when the meeting starts"
+        label: "Schedule Bot"
       };
       return IDLE;
     }
@@ -10150,6 +10399,16 @@ ${recovered}`;
 				background: color-mix(in srgb, var(--tps-text, currentColor) 12%, transparent);
 				outline: 2px solid color-mix(in srgb, var(--tps-text, currentColor) 45%, transparent);
 				outline-offset: 1px;
+			}
+			/* Icon-only nav hit-area. Also injected on document.head \u2014 injectCSS may not
+			   restyle the host menubar. No extra glyph in this span. */
+			.panel-menubar :is(button, .button-minimal, [role="button"]):has(.${ROOT_CLASS}__nav-tip) {
+				position: relative;
+			}
+			.${ROOT_CLASS}__nav-tip {
+				position: absolute;
+				inset: 0;
+				z-index: 1;
 			}
 			/* Icon is a direct child of the nav button now (no wrapper) \u2014 space it from the text the way
 			   Thymer's own view buttons do, with an inline margin rather than a flex gap. */
