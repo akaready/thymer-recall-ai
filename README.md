@@ -224,18 +224,22 @@ GET recordings[].media_shortcuts.transcript.data.download_url from the bot respo
 GET recordings[].media_shortcuts.participant_events.data.participants_download_url
 ```
 
-The default interval is 30 seconds. You can also click **Repair Meeting** later on a Meeting record
-with a `Recall Bot ID`. Repair re-fetches Recall's authoritative final artifacts and fills only missing
-plugin-owned transcript entries, summary body items, citations, and attendee links. It does not
-replace an existing summary, task state, manual attendee relation, or unowned body content. If the
-summary landed as one glued blob (`Planningnn### Overview`, literal `\n`) or leftover
-`{ "summary": ... }` JSON, Repair also runs **Heal mashed summaries**.
+The default interval is 30 seconds. You can also click the hammer (**Repair Meeting**) later on a
+Meeting record with a `Recall Bot ID`. Repair asks first, then re-fetches Recall's authoritative
+final artifacts and fills only **missing** plugin-owned transcript turns, summary / action-item
+sections, citations, and attendee links. It does not replace a healthy existing summary, task
+checkboxes, Notes, or unowned body content. If the summary landed as one glued blob
+(`Planningnn### Overview`, literal `\n`) or leftover `{ "summary": ... }` JSON, Repair also runs
+**Heal mashed summaries** on those plugin-owned nodes.
 
-**Regenerate summary** is a separate action-bar button on an open Meeting. It re-runs the current
-summary prompt against the existing transcript (and anything you typed under **Notes**, treated as
-higher-priority context), then rewrites **Summary** and **Action items** only. It does not join a
-new bot, and it does not overwrite Notes or Transcript. If there is no transcript yet, the button
-toasts that there is nothing to summarize.
+**Join Now** hides from the action bar once the Transcript section has content (empty heading still
+shows Join). Recording / scheduled / processing states stay visible so you can stop or cancel.
+
+**Regenerate** is one refresh icon on the action bar. It opens a menu — **Summary** or **Action
+items** — then a confirm overlay before writing. Summary rewrite leaves Action items, Notes, and
+Transcript alone. Action-item rewrite leaves Summary, Notes, and Transcript alone (`- [ ] `
+checkboxes, `"<action> — <owner>"`; edited checkboxes are overwritten). It does not join a new bot.
+No transcript yet toasts that there is nothing to summarize. Cancel does nothing.
 
 **Heal mashed summaries** and **Apply to existing meetings** live in
 **Plugin: Meetings → Setup → Diagnostics** only — they are not in the command palette.
@@ -244,7 +248,7 @@ and leaves already-healthy outlines alone. Apply heading format relabels, resize
 the four section headings on Meetings records and inserts an empty heading for any missing
 section (for example Action items on older meetings).
 
-Use the record's **Diagnostics** action to see received webhook events, parsed rows, last-event time, KV state,
+Use the record's stethoscope (**Diagnostics**) action to see received webhook events, parsed rows, last-event time, KV state,
 transcript artifacts, realtime endpoints, and bridge version. Diagnostics copies a support-ready,
 allow-listed report to the clipboard (and logs a fallback to the console) without including keys,
 meeting URLs, transcript wording, or Recall account data.

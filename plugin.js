@@ -3998,6 +3998,45 @@ ${report}
     return text;
   }
   __name(resolveSummaryPrompt, "resolveSummaryPrompt");
+  var DEFAULT_ACTION_ITEMS_PROMPT = [
+    "Extract action items from this meeting as clean Markdown for a Thymer outline note. Follow these formatting rules exactly:",
+    "- Do NOT add a title or top-level heading \u2014 the note already has an Action items heading.",
+    '- Output a section headed exactly "### Action Items" with one "- [ ] " checkbox each, written "<action> \u2014 <owner>" (drop "\u2014 <owner>" when no owner is named).',
+    "- Never use numbered lists (1. 2. or 1) 2)). Never write a Summary, Overview, Decisions, or Open Questions.",
+    "- Never use horizontal rules (--- or ***), never use Markdown tables, and do not leave blank lines inside the list.",
+    "- If HUMAN NOTES are provided, treat them as higher priority than the transcript: they are the participant's own record of what mattered. Prefer them when they name follow-ups or owners."
+  ].join("\n");
+  function splitSummaryAndActionItems(md) {
+    const lines = String(md || "").replace(/\r\n?/g, "\n").split("\n");
+    const summary = [];
+    const actions = [];
+    let inActions = false;
+    for (const line of lines) {
+      const heading = line.match(/^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/);
+      if (heading) {
+        inActions = /^action items?\b/i.test(heading[1].trim());
+        if (inActions) {
+          actions.push(line);
+          continue;
+        }
+      }
+      if (inActions) actions.push(line);
+      else summary.push(line);
+    }
+    return {
+      summary: summary.join("\n").replace(/\n{3,}/g, "\n\n").trim(),
+      actionItems: actions.join("\n").replace(/\n{3,}/g, "\n\n").trim()
+    };
+  }
+  __name(splitSummaryAndActionItems, "splitSummaryAndActionItems");
+  function ensureActionItemsHeading(md) {
+    const text = String(md || "").trim();
+    if (!text) return "";
+    if (/^#{1,6}\s+action items?\b/im.test(text)) return text;
+    return `### Action Items
+${text}`;
+  }
+  __name(ensureActionItemsHeading, "ensureActionItemsHeading");
   function sectionJsonInstruction(count2) {
     return [
       'Additionally, divide the transcript into a handful of topic sections in time order \u2014 for the JSON "sections" array only. Do not write those topics as extra long prose in the markdown summary.',
@@ -4847,8 +4886,146 @@ ${report}
   }
   __name(openParticipantConfirmDialog, "openParticipantConfirmDialog");
 
+  // confirm-dialog.js
+  var overlayEl2 = null;
+  var detachKey2 = null;
+  var settle = null;
+  function closeConfirmDialog(value = false) {
+    const done = settle;
+    settle = null;
+    if (detachKey2) {
+      window.removeEventListener("keydown", detachKey2, true);
+      detachKey2 = null;
+    }
+    try {
+      overlayEl2?.remove();
+    } catch {
+    }
+    overlayEl2 = null;
+    if (done) done(value);
+  }
+  __name(closeConfirmDialog, "closeConfirmDialog");
+  function openConfirmDialog(options) {
+    closeConfirmDialog(false);
+    const rootClass = options.rootClass || "plg-recall-ai";
+    const title = String(options.title || "Confirm");
+    const body = String(options.body || "");
+    const confirmLabel = options.confirmLabel || "Continue";
+    const cancelLabel = options.cancelLabel || "Cancel";
+    return new Promise((resolve) => {
+      settle = resolve;
+      const dialog = h(
+        "div",
+        {
+          class: `${rootClass}-confirm-dialog`,
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-labelledby": `${rootClass}-ask-title`
+        },
+        h("h2", { class: `${rootClass}-confirm-title`, id: `${rootClass}-ask-title` }, title),
+        h("p", { class: `${rootClass}-confirm-lede` }, body),
+        h(
+          "div",
+          { class: `${rootClass}-confirm-actions` },
+          h("button", {
+            type: "button",
+            class: `${rootClass}-confirm-skip`,
+            onClick: /* @__PURE__ */ __name(() => closeConfirmDialog(false), "onClick")
+          }, cancelLabel),
+          h("button", {
+            type: "button",
+            class: `${rootClass}-confirm-save`,
+            onClick: /* @__PURE__ */ __name(() => closeConfirmDialog(true), "onClick")
+          }, confirmLabel)
+        )
+      );
+      const root = (
+        /** @type {HTMLElement} */
+        h("div", { class: `${rootClass}-confirm-overlay` }, dialog)
+      );
+      overlayEl2 = root;
+      root.addEventListener("mousedown", (event) => {
+        if (event.target === root) closeConfirmDialog(false);
+      });
+      document.body.appendChild(root);
+      detachKey2 = /* @__PURE__ */ __name((event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        closeConfirmDialog(false);
+      }, "detachKey");
+      window.addEventListener("keydown", detachKey2, true);
+      const primary = (
+        /** @type {HTMLElement|null} */
+        root.querySelector(`.${rootClass}-confirm-save`)
+      );
+      if (primary && typeof primary.focus === "function") primary.focus();
+    });
+  }
+  __name(openConfirmDialog, "openConfirmDialog");
+  function openChoiceMenu(options) {
+    closeConfirmDialog(null);
+    const rootClass = options.rootClass || "plg-recall-ai";
+    const title = String(options.title || "Choose");
+    const items = Array.isArray(options.items) ? options.items : [];
+    return new Promise((resolve) => {
+      settle = resolve;
+      const buttons = items.map((item) => h(
+        "button",
+        {
+          type: "button",
+          class: `${rootClass}-choice-item`,
+          onClick: /* @__PURE__ */ __name(() => closeConfirmDialog(item.value), "onClick")
+        },
+        h("span", { class: `${rootClass}-choice-item-label` }, item.label),
+        item.detail ? h("span", { class: `${rootClass}-choice-item-detail` }, item.detail) : null
+      ));
+      const dialog = h(
+        "div",
+        {
+          class: `${rootClass}-confirm-dialog ${rootClass}-choice-dialog`,
+          role: "menu",
+          "aria-labelledby": `${rootClass}-choice-title`
+        },
+        h("h2", { class: `${rootClass}-confirm-title`, id: `${rootClass}-choice-title` }, title),
+        h("div", { class: `${rootClass}-choice-list` }, ...buttons),
+        h(
+          "div",
+          { class: `${rootClass}-confirm-actions` },
+          h("button", {
+            type: "button",
+            class: `${rootClass}-confirm-skip`,
+            onClick: /* @__PURE__ */ __name(() => closeConfirmDialog(null), "onClick")
+          }, "Cancel")
+        )
+      );
+      const root = (
+        /** @type {HTMLElement} */
+        h("div", { class: `${rootClass}-confirm-overlay` }, dialog)
+      );
+      overlayEl2 = root;
+      root.addEventListener("mousedown", (event) => {
+        if (event.target === root) closeConfirmDialog(null);
+      });
+      document.body.appendChild(root);
+      detachKey2 = /* @__PURE__ */ __name((event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        closeConfirmDialog(null);
+      }, "detachKey");
+      window.addEventListener("keydown", detachKey2, true);
+      const first = (
+        /** @type {HTMLElement|null} */
+        root.querySelector(`.${rootClass}-choice-item`)
+      );
+      if (first && typeof first.focus === "function") first.focus();
+    });
+  }
+  __name(openChoiceMenu, "openChoiceMenu");
+
   // plugin.js
-  var PLUGIN_VERSION = "1.23.6";
+  var PLUGIN_VERSION = "1.23.7";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -5209,6 +5386,7 @@ ${report}
       this._regenerateButton = null;
       this._diagnosticsButton = null;
       this._regenerateInFlight = /* @__PURE__ */ new Map();
+      this._regenerateActionsInFlight = /* @__PURE__ */ new Map();
       this._healInFlight = null;
       this._healRecordInFlight = /* @__PURE__ */ new Map();
       this._cleanupInFlight = null;
@@ -5256,17 +5434,36 @@ ${report}
       this._draft = { ...this._settings };
     }
     _registerNavigationButtons() {
-      this._navButton = this.addCollectionNavigationButton({
+      this._navButton = this._createJoinButton();
+      this._syncButton = this.addCollectionNavigationButton({
+        label: "",
+        icon: "hammer",
+        tooltip: "Repair Meeting \u2014 fill missing transcript or summary from Recall; heal leftover JSON. Does not regenerate a healthy summary.",
+        onlyWhenExpanded: true,
+        onClick: /* @__PURE__ */ __name(({ record }) => void this._confirmRepairMeeting(record), "onClick")
+      });
+      this._regenerateButton = this.addCollectionNavigationButton({
+        label: "",
+        icon: "refresh",
+        tooltip: "Regenerate Summary or Action items from this transcript",
+        onlyWhenExpanded: true,
+        onClick: /* @__PURE__ */ __name(({ record }) => void this._openRegenerateMenu(record), "onClick")
+      });
+      this._diagnosticsButton = this.addCollectionNavigationButton({
+        label: "",
+        icon: "stethoscope",
+        tooltip: "Copy bridge, webhook, parser, and transcript diagnostics for this meeting",
+        onlyWhenExpanded: true,
+        onClick: /* @__PURE__ */ __name(({ record }) => void this._showMeetingDiagnostics(record), "onClick")
+      });
+    }
+    _createJoinButton() {
+      return this.addCollectionNavigationButton({
         label: "Join Now",
-        // No separate `icon` — the htmlLabel carries it, so we never render a second static glyph
-        // beside the animated one (the double half-circle).
-        htmlLabel: navButtonLabel("idle"),
+        // One glyph from the icon slot. htmlLabel-with-icon plus Thymer's default view glyph
+        // painted two icons (document + microphone) jammed against "Join Now".
+        icon: "microphone",
         tooltip: "Send the notetaker into this meeting now",
-        // ONLY when a record is open. With `false` this button rendered in the COLLECTION nav
-        // strip, sitting beside the view tabs as though "Join Now" were a view — and there is no
-        // active record at collection level, so the only thing it could do there was toast "Open a
-        // Meeting record first". A button shown where it cannot work is worse than no button.
-        // Sending a bot from the table is already handled per-row, in the Recall Status cell.
         onlyWhenExpanded: true,
         onClick: /* @__PURE__ */ __name(({ record }) => {
           this._activeRecordGuid = record && record.guid || "";
@@ -5276,30 +5473,9 @@ ${report}
           if (kind === "summarizing" || kind === "processing" || kind === "cancelling") {
             return this._toast("Still working", "The meeting is over and the transcript is being processed. Nothing to do.");
           }
-          if (kind === "done" || kind === "repair") return void this._syncRecord(record, { summarize: true, repair: true });
+          if (kind === "done" || kind === "repair") return void this._confirmRepairMeeting(record);
           void this._startBot(record, { immediate: true });
         }, "onClick")
-      });
-      this._syncButton = this.addCollectionNavigationButton({
-        label: "Repair Meeting",
-        icon: "refresh",
-        tooltip: "Safely fill in missing transcript, summary, citations, and attendees",
-        onlyWhenExpanded: true,
-        onClick: /* @__PURE__ */ __name(({ record }) => void this._syncRecord(record, { summarize: true, repair: true }), "onClick")
-      });
-      this._regenerateButton = this.addCollectionNavigationButton({
-        label: "Regenerate summary",
-        icon: "sparkles",
-        tooltip: "Re-run the summary prompt on this meeting\u2019s transcript and notes. Rewrites Summary and Action items only.",
-        onlyWhenExpanded: true,
-        onClick: /* @__PURE__ */ __name(({ record }) => void this._regenerateSummary(record), "onClick")
-      });
-      this._diagnosticsButton = this.addCollectionNavigationButton({
-        label: "Diagnostics",
-        icon: "activity",
-        tooltip: "Copy bridge, webhook, parser, and transcript diagnostics for this meeting",
-        onlyWhenExpanded: true,
-        onClick: /* @__PURE__ */ __name(({ record }) => void this._showMeetingDiagnostics(record), "onClick")
       });
     }
     /**
@@ -5537,6 +5713,7 @@ ${report}
         this._commandItem = null;
       }
       closeParticipantConfirmDialog();
+      closeConfirmDialog(false);
       try {
         if (this._navButton && this._navButton.remove) this._navButton.remove();
       } catch {
@@ -5570,6 +5747,7 @@ ${report}
       if (this._skeletonInFlight && this._skeletonInFlight.clear) this._skeletonInFlight.clear();
       if (this._healRecordInFlight && this._healRecordInFlight.clear) this._healRecordInFlight.clear();
       if (this._regenerateInFlight && this._regenerateInFlight.clear) this._regenerateInFlight.clear();
+      if (this._regenerateActionsInFlight && this._regenerateActionsInFlight.clear) this._regenerateActionsInFlight.clear();
       if (this._diagnosticsByRecord && this._diagnosticsByRecord.clear) this._diagnosticsByRecord.clear();
       this._setupDoctorInFlight = null;
       this._healInFlight = null;
@@ -6744,9 +6922,47 @@ ${transcriptText}` }]
         return "";
       }
     }
+    async _openRegenerateMenu(record) {
+      const choice = await openChoiceMenu({
+        rootClass: ROOT_CLASS,
+        title: "Regenerate",
+        items: [
+          { label: "Summary", value: "summary", detail: "Replace Overview, Decisions, and Open Questions. Action items stay." },
+          { label: "Action items", value: "actions", detail: "Replace the checkbox list. Summary stays. Edited checkboxes are overwritten." }
+        ]
+      });
+      if (choice === "summary") return this._regenerateSummary(record);
+      if (choice === "actions") return this._regenerateActionItems(record);
+      return false;
+    }
+    async _confirmBodyWrite({ title, body, confirmLabel = "Continue" }) {
+      return openConfirmDialog({
+        rootClass: ROOT_CLASS,
+        title,
+        body,
+        confirmLabel,
+        cancelLabel: "Cancel"
+      });
+    }
+    async _confirmRepairMeeting(record) {
+      const ok = await this._confirmBodyWrite({
+        title: "Repair Meeting",
+        body: [
+          "Repair fills missing pieces from Recall. It will:",
+          "\u2022 Fetch the latest transcript and append any missing plugin-owned turns (it does not wipe an existing Transcript)",
+          "\u2022 Write Summary / Action items only if those sections are missing or incomplete",
+          "\u2022 Heal leftover JSON or a glued \u201Cmashed\u201D summary blob on plugin-owned Summary / Action items nodes",
+          "\u2022 Refresh bot status and check attendees",
+          "It will not overwrite Notes. It will not regenerate a healthy existing Summary or Action items \u2014 use Regenerate for that."
+        ].join("\n"),
+        confirmLabel: "Repair meeting"
+      });
+      if (!ok) return false;
+      return this._syncRecord(record, { summarize: true, repair: true });
+    }
     /**
      * Re-run the current summary prompt against the existing transcript + Notes.
-     * Rewrites Summary and Action items only. Never touches Notes, Transcript, or bot join.
+     * Rewrites Summary only. Never touches Action items, Notes, Transcript, or bot join.
      */
     async _regenerateSummary(record) {
       if (this._disabled) {
@@ -6761,6 +6977,12 @@ ${transcriptText}` }]
         this._toast("Claude API key required", "Open Plugin: Meetings and add a Claude API key.");
         return false;
       }
+      const confirmed = await this._confirmBodyWrite({
+        title: "Regenerate summary",
+        body: "This will replace the Summary section. Notes, Transcript, and Action items stay.",
+        confirmLabel: "Replace summary"
+      });
+      if (!confirmed) return false;
       if (!this._regenerateInFlight) this._regenerateInFlight = /* @__PURE__ */ new Map();
       return runCoalesced(this._regenerateInFlight, record.guid, async () => {
         const transcriptText = await this._readTranscriptForSummary(record);
@@ -6775,13 +6997,15 @@ ${transcriptText}` }]
         try {
           const { summary, citations } = await this._createSummary(record, transcriptText, []);
           if (!summary) throw new Error("Claude returned an empty summary.");
-          const written = await this._replaceSummaryBody(record, summary, citations);
+          const summaryOnly = splitSummaryAndActionItems(summary).summary;
+          if (!summaryOnly) throw new Error("Claude returned an empty summary.");
+          const written = await this._replaceSummaryBody(record, summaryOnly, citations, { section: "summary" });
           if (!written) throw new Error("Thymer could not write the summary to the meeting body.");
           this._setField(record, FIELDS.LAST_ERROR, "");
           this._setField(record, FIELDS.STATUS, "summarized");
           this._updateNavButtonForRecord(record);
-          this._log("summary regenerated", { characters: summary.length });
-          this._toast("Summary regenerated", "Summary and Action items were rewritten. Notes and Transcript were left alone.");
+          this._log("summary regenerated", { characters: summaryOnly.length });
+          this._toast("Summary regenerated", "Summary was rewritten. Action items, Notes, and Transcript were left alone.");
           return true;
         } catch (err) {
           this._setField(record, FIELDS.LAST_ERROR, `Summary failed: ${this._errorMessage(err)}`);
@@ -6792,6 +7016,73 @@ ${transcriptText}` }]
           return false;
         }
       });
+    }
+    /**
+     * Re-run Action items only from the existing transcript + Notes.
+     * Never touches Summary, Notes, Transcript, or bot join.
+     */
+    async _regenerateActionItems(record) {
+      if (this._disabled) {
+        this._toast("Meetings is off", "Turn the plugin on to regenerate action items.");
+        return false;
+      }
+      if (!record || !this._isOurRecord(record)) {
+        this._toast("Open a Meeting record first", "Regenerate action items only runs on a Meetings collection record.");
+        return false;
+      }
+      if (!this._settings.anthropicApiKey) {
+        this._toast("Claude API key required", "Open Plugin: Meetings and add a Claude API key.");
+        return false;
+      }
+      const confirmed = await this._confirmBodyWrite({
+        title: "Regenerate action items",
+        body: "This will replace the Action items list. Summary, Notes, and Transcript stay. Checkboxes you edited will be overwritten.",
+        confirmLabel: "Replace action items"
+      });
+      if (!confirmed) return false;
+      if (!this._regenerateActionsInFlight) this._regenerateActionsInFlight = /* @__PURE__ */ new Map();
+      return runCoalesced(this._regenerateActionsInFlight, record.guid, async () => {
+        const transcriptText = await this._readTranscriptForSummary(record);
+        if (!String(transcriptText || "").trim()) {
+          this._toast("Nothing to summarize", "This meeting has no transcript yet.");
+          return false;
+        }
+        const previousStatus = this._text(record, FIELDS.STATUS);
+        this._setField(record, FIELDS.STATUS, "summarizing");
+        this._updateNavButtonForRecord(record);
+        this._toast("Regenerating action items", "Re-running action items against this transcript and notes.");
+        try {
+          const markdown = await this._createActionItems(record, transcriptText);
+          if (!markdown) throw new Error("Claude returned no action items.");
+          const written = await this._replaceSummaryBody(record, markdown, [], { section: "actions" });
+          if (!written) throw new Error("Thymer could not write action items to the meeting body.");
+          this._setField(record, FIELDS.LAST_ERROR, "");
+          this._setField(record, FIELDS.STATUS, previousStatus === "summarized" || previousStatus === "transcribed" ? previousStatus : "summarized");
+          this._updateNavButtonForRecord(record);
+          this._log("action items regenerated", { characters: markdown.length });
+          this._toast("Action items regenerated", "Action items were rewritten. Summary, Notes, and Transcript were left alone.");
+          return true;
+        } catch (err) {
+          this._setField(record, FIELDS.LAST_ERROR, `Action items failed: ${this._errorMessage(err)}`);
+          this._setField(record, FIELDS.STATUS, previousStatus || "summary_failed");
+          this._updateNavButtonForRecord(record);
+          this._log("action items regenerate failed", { error: this._errorMessage(err) });
+          this._toast("Could not regenerate action items", this._errorMessage(err));
+          return false;
+        }
+      });
+    }
+    async _createActionItems(record, transcriptText) {
+      let prompt = DEFAULT_ACTION_ITEMS_PROMPT;
+      const notes = await this._readNotesText(record);
+      if (notes) {
+        prompt = `${prompt}
+
+HUMAN NOTES (higher priority than the transcript \u2014 treat as ground truth when they conflict; extract follow-ups and owners from them):
+${notes}`;
+      }
+      const raw = await this._callClaude(prompt, transcriptText, 600);
+      return ensureActionItemsHeading(sanitizeSummaryMarkdown(recoverSummaryMarkdown(raw)));
     }
     /**
      * Stream the transcript into the record body LIVE, under a collapsible "🎙️ Transcript" heading —
@@ -7341,6 +7632,9 @@ ${transcriptText}` }]
     async _writeSummaryToBody(record, summary, citations = [], sectionAnchors = [], turnAnchors = [], options = {}) {
       if (!record || typeof record.insertFromMarkdown !== "function" || !summary || !summary.trim()) return false;
       const force = !!(options && options.force);
+      const section2 = options && options.section === "summary" ? "summary" : options && options.section === "actions" ? "actions" : "all";
+      const writeSummary = section2 === "all" || section2 === "summary";
+      const writeActions = section2 === "all" || section2 === "actions";
       await this._ensureMeetingSkeleton(record);
       const flagKey = this._bodyKey(record, "summary-body");
       const botId = this._text(record, FIELDS.BOT_ID) || "current";
@@ -7350,7 +7644,7 @@ ${transcriptText}` }]
       let actionHead = this._findOwnedLine(items, botId, BODY_ROLES.ACTION_ITEMS);
       const summaryDone = !!(head && Number(this._lineMeta(head, LINE_META.COMPLETE)) === 1);
       const actionsDone = !!(actionHead && Number(this._lineMeta(actionHead, LINE_META.COMPLETE)) === 1);
-      if (!force && summaryDone && actionsDone) {
+      if (!force && writeSummary && writeActions && summaryDone && actionsDone) {
         await this._restoreMarkedSummaryReferences(items, botId);
         try {
           localStorage.setItem(flagKey, botId);
@@ -7358,6 +7652,11 @@ ${transcriptText}` }]
         }
         return true;
       }
+      if (!force && writeSummary && !writeActions && summaryDone) {
+        await this._restoreMarkedSummaryReferences(items, botId);
+        return true;
+      }
+      if (!force && writeActions && !writeSummary && actionsDone) return true;
       try {
         const state = localStorage.getItem(flagKey) || "";
         if (!force && !head && state === botId) return true;
@@ -7372,7 +7671,7 @@ ${transcriptText}` }]
         return false;
       }, "fail");
       try {
-        if (!head) {
+        if (writeSummary && !head) {
           let txHeadGuid = "";
           try {
             txHeadGuid = localStorage.getItem(this._bodyKey(record, "tx-head")) || "";
@@ -7390,7 +7689,7 @@ ${transcriptText}` }]
           head = items.find((li) => !before.has(li.guid)) || null;
           if (!head) return fail();
         }
-        if (!actionHead) {
+        if (writeActions && !actionHead) {
           const spec = BODY_SECTION_ORDER.find((item) => item.role === BODY_ROLES.ACTION_ITEMS);
           const { text, level } = spec ? this._headingForSpec(spec) : { text: "\u2705 Action items", level: "h2" };
           const anchorMd = this._headingAnchorMd(text, level);
@@ -7400,8 +7699,8 @@ ${transcriptText}` }]
             actionHead = items.find((li) => !before.has(li.guid)) || null;
           }
         }
-        await this._markOwnedLine(head, botId, BODY_ROLES.SUMMARY, { complete: false });
-        if (actionHead) await this._markOwnedLine(actionHead, botId, BODY_ROLES.ACTION_ITEMS, { complete: false });
+        if (writeSummary && head) await this._markOwnedLine(head, botId, BODY_ROLES.SUMMARY, { complete: false });
+        if (writeActions && actionHead) await this._markOwnedLine(actionHead, botId, BODY_ROLES.ACTION_ITEMS, { complete: false });
         const { preamble, groups } = groupSummaryLines(summary, citations);
         const isActionGroup = /* @__PURE__ */ __name((heading) => /^action items?\b/i.test(String(heading || "")), "isActionGroup");
         const summaryGroups = [];
@@ -7438,34 +7737,36 @@ ${transcriptText}` }]
           }
           return created || after;
         }, "insertOwnedLine");
-        let afterPreamble = null;
-        for (const entry of preamble) {
-          afterPreamble = await insertOwnedLine(entry, head, afterPreamble, "summary_item", summaryItemIndex++);
-        }
-        for (const g of summaryGroups) {
-          let sec = (items || []).find((item) => String(this._lineMeta(item, LINE_META.ROLE) || "") === "summary_section" && Number(this._lineMeta(item, LINE_META.SECTION_ID)) === g.groupIndex) || null;
-          if (!sec) {
-            const b = new Set(items.map((li) => li.guid));
-            if (await record.insertFromMarkdown(`### ${this._escMd(g.heading)}`, head, afterOf(head.guid)) === false) continue;
-            items = await record.getLineItems(false);
-            sec = items.find((li) => li.parent_guid === head.guid && !b.has(li.guid)) || null;
-            if (sec) await this._markOwnedLine(sec, botId, "summary_section", { sectionId: g.groupIndex });
+        if (writeSummary && head) {
+          let afterPreamble = null;
+          for (const entry of preamble) {
+            afterPreamble = await insertOwnedLine(entry, head, afterPreamble, "summary_item", summaryItemIndex++);
           }
-          if (sec && g.content.length) {
-            let afterContent = null;
-            for (const entry of g.content) afterContent = await insertOwnedLine(entry, sec, afterContent, "summary_item", summaryItemIndex++);
+          for (const g of summaryGroups) {
+            let sec = (items || []).find((item) => String(this._lineMeta(item, LINE_META.ROLE) || "") === "summary_section" && Number(this._lineMeta(item, LINE_META.SECTION_ID)) === g.groupIndex) || null;
+            if (!sec) {
+              const b = new Set(items.map((li) => li.guid));
+              if (await record.insertFromMarkdown(`### ${this._escMd(g.heading)}`, head, afterOf(head.guid)) === false) continue;
+              items = await record.getLineItems(false);
+              sec = items.find((li) => li.parent_guid === head.guid && !b.has(li.guid)) || null;
+              if (sec) await this._markOwnedLine(sec, botId, "summary_section", { sectionId: g.groupIndex });
+            }
+            if (sec && g.content.length) {
+              let afterContent = null;
+              for (const entry of g.content) afterContent = await insertOwnedLine(entry, sec, afterContent, "summary_item", summaryItemIndex++);
+            }
           }
         }
-        if (actionHead) {
+        if (writeActions && actionHead) {
           let afterAction = null;
           for (const g of actionGroups) {
             for (const entry of g.content) afterAction = await insertOwnedLine(entry, actionHead, afterAction, "action_item", actionItemIndex++);
           }
         }
-        const expectedItems = preamble.length + summaryGroups.reduce((sum, group) => sum + group.content.length, 0) + actionGroups.reduce((sum, group) => sum + group.content.length, 0);
+        const expectedItems = (writeSummary ? preamble.length + summaryGroups.reduce((sum, group) => sum + group.content.length, 0) : 0) + (writeActions ? actionGroups.reduce((sum, group) => sum + group.content.length, 0) : 0);
         if (writtenItems !== expectedItems) return fail();
-        await this._markOwnedLine(head, botId, BODY_ROLES.SUMMARY, { complete: true });
-        if (actionHead) await this._markOwnedLine(actionHead, botId, BODY_ROLES.ACTION_ITEMS, { complete: true });
+        if (writeSummary && head) await this._markOwnedLine(head, botId, BODY_ROLES.SUMMARY, { complete: true });
+        if (writeActions && actionHead) await this._markOwnedLine(actionHead, botId, BODY_ROLES.ACTION_ITEMS, { complete: true });
         try {
           localStorage.setItem(flagKey, botId);
         } catch {
@@ -7479,24 +7780,28 @@ ${transcriptText}` }]
       }
     }
     /**
-     * Delete owned Summary / Action items content, then write a fresh outline.
+     * Delete owned Summary and/or Action items content, then write a fresh outline.
      * Leaves Notes and Transcript (and their descendants) untouched.
+     * `options.section`: 'all' | 'summary' | 'actions'
      */
-    async _replaceSummaryBody(record, summary, citations = []) {
+    async _replaceSummaryBody(record, summary, citations = [], options = {}) {
       if (!record || typeof record.getLineItems !== "function") return false;
+      const section2 = options && options.section === "summary" ? "summary" : options && options.section === "actions" ? "actions" : "all";
       let items = await record.getLineItems(false);
-      if (!await this._deleteHealRewriteNodes(items, [])) return false;
+      if (!await this._deleteHealRewriteNodes(items, [], section2)) return false;
       items = await record.getLineItems(false);
       const botId = this._text(record, FIELDS.BOT_ID) || TEMPLATE_OWNER;
       const head = this._findOwnedLine(items, botId, BODY_ROLES.SUMMARY);
       const actionHead = this._findOwnedLine(items, botId, BODY_ROLES.ACTION_ITEMS);
-      if (head) await this._markOwnedLine(head, botId, BODY_ROLES.SUMMARY, { complete: false });
-      if (actionHead) await this._markOwnedLine(actionHead, botId, BODY_ROLES.ACTION_ITEMS, { complete: false });
-      try {
-        localStorage.removeItem(this._bodyKey(record, "summary-body"));
-      } catch {
+      if ((section2 === "all" || section2 === "summary") && head) await this._markOwnedLine(head, botId, BODY_ROLES.SUMMARY, { complete: false });
+      if ((section2 === "all" || section2 === "actions") && actionHead) await this._markOwnedLine(actionHead, botId, BODY_ROLES.ACTION_ITEMS, { complete: false });
+      if (section2 === "all") {
+        try {
+          localStorage.removeItem(this._bodyKey(record, "summary-body"));
+        } catch {
+        }
       }
-      return this._writeSummaryToBody(record, summary, citations, [], [], { force: true });
+      return this._writeSummaryToBody(record, summary, citations, [], [], { force: true, section: section2 });
     }
     _lineIsUnder(items, line, rootGuid) {
       if (!line || !rootGuid || line.guid === rootGuid) return false;
@@ -7563,8 +7868,13 @@ ${transcriptText}` }]
       }
       return blobs;
     }
-    async _deleteHealRewriteNodes(items, blobs) {
-      const rewriteRoles = /* @__PURE__ */ new Set(["summary_item", "summary_section", "action_item"]);
+    async _deleteHealRewriteNodes(items, blobs, section2 = "all") {
+      const rewriteRoles = /* @__PURE__ */ new Set();
+      if (section2 === "all" || section2 === "summary") {
+        rewriteRoles.add("summary_item");
+        rewriteRoles.add("summary_section");
+      }
+      if (section2 === "all" || section2 === "actions") rewriteRoles.add("action_item");
       const blobGuids = new Set((blobs || []).filter((blob) => blob && blob.line && !blob.isRoot).map((blob) => blob.line.guid));
       const toDelete = (Array.isArray(items) ? items : []).filter((line) => {
         const role = String(this._lineMeta(line, LINE_META.ROLE) || "");
@@ -7679,6 +7989,33 @@ ${recovered}`;
       }
       return result;
     }
+    async _confirmHealMashedSummaries() {
+      const ok = await this._confirmBodyWrite({
+        title: "Heal mashed summaries",
+        body: "This scans every meeting and rewrites plugin-owned Summary / Action items nodes that look like leftover JSON or one glued blob. Healthy outlines, Notes, and Transcript are left alone.",
+        confirmLabel: "Heal summaries"
+      });
+      if (!ok) return;
+      return this._healMashedSummariesBulk();
+    }
+    async _confirmApplyHeadingFormat() {
+      const ok = await this._confirmBodyWrite({
+        title: "Apply heading format",
+        body: "This relabels, resizes, and reorders the four section headings (Summary, Action items, Notes, Transcript) on every Meetings record to match current settings. It may insert an empty heading for a missing section. It does not rewrite the text under those headings or re-summarize.",
+        confirmLabel: "Apply headings"
+      });
+      if (!ok) return;
+      return this._applyHeadingFormatBulk();
+    }
+    async _confirmCleanupEmptySkeleton() {
+      const ok = await this._confirmBodyWrite({
+        title: "Remove empty leaked skeleton",
+        body: "This deletes empty default meeting headings on the page you have open. Headings with your notes or other text underneath are left alone.",
+        confirmLabel: "Remove empty headings"
+      });
+      if (!ok) return;
+      return this._cleanupEmptySkeletonFromActivePage();
+    }
     async _healMashedSummariesBulk() {
       if (this._healInFlight) return this._healInFlight;
       if (this._disabled) {
@@ -7719,7 +8056,7 @@ ${recovered}`;
               variant: "ghost",
               size: "md",
               disabled: !!this._healInFlight || !!this._disabled,
-              onClick: /* @__PURE__ */ __name(() => void this._healMashedSummariesBulk(), "onClick")
+              onClick: /* @__PURE__ */ __name(() => void this._confirmHealMashedSummaries(), "onClick")
             })
           ),
           h(
@@ -7735,7 +8072,7 @@ ${recovered}`;
               variant: "ghost",
               size: "md",
               disabled: !!this._headingRepairInFlight || !!this._disabled,
-              onClick: /* @__PURE__ */ __name(() => void this._applyHeadingFormatBulk(), "onClick")
+              onClick: /* @__PURE__ */ __name(() => void this._confirmApplyHeadingFormat(), "onClick")
             })
           ),
           h(
@@ -7751,7 +8088,7 @@ ${recovered}`;
               variant: "ghost",
               size: "md",
               disabled: !!this._cleanupInFlight || !!this._disabled,
-              onClick: /* @__PURE__ */ __name(() => void this._cleanupEmptySkeletonFromActivePage(), "onClick")
+              onClick: /* @__PURE__ */ __name(() => void this._confirmCleanupEmptySkeleton(), "onClick")
             })
           ),
           h(
@@ -8001,47 +8338,83 @@ ${recovered}`;
         }
       })();
       const pinVisible = !!(pageRecord && pageRecord.guid);
-      try {
-        this._navButton && this._navButton.setOnlyWhenExpanded(!pinVisible);
-      } catch {
-      }
-      try {
-        this._syncButton && this._syncButton.setOnlyWhenExpanded(!pinVisible);
-      } catch {
-      }
-      try {
-        this._regenerateButton && this._regenerateButton.setOnlyWhenExpanded(!pinVisible);
-      } catch {
-      }
-      try {
-        this._diagnosticsButton && this._diagnosticsButton.setOnlyWhenExpanded(!pinVisible);
-      } catch {
+      const chrome = [this._navButton, this._syncButton, this._regenerateButton, this._diagnosticsButton];
+      for (const button2 of chrome) {
+        try {
+          button2 && button2.setOnlyWhenExpanded(!pinVisible);
+        } catch {
+        }
       }
       if (!this._navButton && !this._regenerateButton) return;
       const target = record || this._activeRecordGuid && this._recordsByGuid.get(this._activeRecordGuid) || null;
       const state = this._recordVisualState(target);
+      const regenBusy = !pinVisible || state.kind === "summarizing";
       try {
         if (this._regenerateButton && typeof this._regenerateButton.setDisabled === "function") {
-          this._regenerateButton.setDisabled(!pinVisible || state.kind === "summarizing");
+          this._regenerateButton.setDisabled(regenBusy);
         }
       } catch {
       }
+      void this._refreshJoinButtonVisibility(target, state.kind);
       if (!this._navButton) return;
       try {
-        this._navButton.setIcon(null);
+        this._navButton.setIcon(state.icon || "microphone");
       } catch {
       }
       try {
-        this._navButton.setHtmlLabel(navButtonLabel(state.kind));
+        this._navButton.setLabel(state.label);
       } catch {
-        try {
-          this._navButton.setLabel(state.label);
-        } catch {
-        }
       }
       try {
         this._navButton.setTooltip(state.tooltip);
       } catch {
+      }
+    }
+    async _recordHasTranscriptContent(record) {
+      if (!record) return false;
+      const text = await this._readTranscriptText(record);
+      return !!String(text || "").trim();
+    }
+    _setNavButtonHidden(button2, hidden) {
+      if (!button2) return false;
+      try {
+        if (typeof button2.setHidden === "function") {
+          button2.setHidden(!!hidden);
+          return true;
+        }
+      } catch {
+      }
+      try {
+        if (typeof button2.setVisible === "function") {
+          button2.setVisible(!hidden);
+          return true;
+        }
+      } catch {
+      }
+      return false;
+    }
+    async _refreshJoinButtonVisibility(record, kind) {
+      const liveKinds = /* @__PURE__ */ new Set(["recording", "scheduled", "processing", "cancelling", "summarizing"]);
+      let hide = false;
+      try {
+        hide = !liveKinds.has(kind) && await this._recordHasTranscriptContent(record);
+      } catch {
+        hide = false;
+      }
+      if (this._setNavButtonHidden(this._navButton, hide)) return;
+      if (hide && this._navButton && typeof this._navButton.remove === "function") {
+        try {
+          this._navButton.remove();
+        } catch {
+        }
+        this._navButton = null;
+        return;
+      }
+      if (!hide && !this._navButton) {
+        try {
+          this._navButton = this._createJoinButton();
+        } catch {
+        }
       }
     }
     /** Meeting Date as epoch ms, or null when unset/unparseable. */
@@ -9762,6 +10135,7 @@ ${recovered}`;
 				color: var(--tps-text-muted, var(--text-muted, inherit));
 				font-size: 13px;
 				line-height: 1.45;
+				white-space: pre-wrap;
 			}
 			.${ROOT_CLASS}-confirm-list { display: grid; gap: 12px; }
 			.${ROOT_CLASS}-confirm-row {
@@ -9800,6 +10174,36 @@ ${recovered}`;
 			}
 			.${ROOT_CLASS}-confirm-save {
 				border-color: var(--tps-accent, currentColor);
+			}
+			.${ROOT_CLASS}-choice-list {
+				display: grid;
+				gap: 8px;
+				margin: 0 0 12px;
+			}
+			.${ROOT_CLASS}-choice-item {
+				display: grid;
+				gap: 2px;
+				width: 100%;
+				padding: 10px 12px;
+				border-radius: 8px;
+				border: 1px solid var(--tps-divider, rgba(127,127,127,0.2));
+				background: transparent;
+				color: inherit;
+				text-align: left;
+				cursor: pointer;
+			}
+			.${ROOT_CLASS}-choice-item:hover,
+			.${ROOT_CLASS}-choice-item:focus {
+				border-color: var(--tps-accent, currentColor);
+				outline: none;
+			}
+			.${ROOT_CLASS}-choice-item-label {
+				font-weight: 600;
+			}
+			.${ROOT_CLASS}-choice-item-detail {
+				color: var(--tps-text-muted, var(--text-muted, inherit));
+				font-size: 12px;
+				line-height: 1.4;
 			}
 		`;
     }
@@ -10037,21 +10441,6 @@ ${recovered}`;
     return "";
   }
   __name(propertyValueToText, "propertyValueToText");
-  function navButtonLabel(kind) {
-    const label = /* @__PURE__ */ __name((iconHtml, text) => `${iconHtml}<span class="${ROOT_CLASS}__nav-text">${text}</span>`, "label");
-    const icon = /* @__PURE__ */ __name((cls) => `<i class="ti ti-${cls} ${ROOT_CLASS}__nav-ico" aria-hidden="true"></i>`, "icon");
-    const spinner = `<span class="ti ${ROOT_CLASS}__nav-ico ${ROOT_CLASS}__nav-spinner" aria-hidden="true"></span>`;
-    if (kind === "recording") return label(`<i class="ti ti-microphone ${ROOT_CLASS}__nav-ico ${ROOT_CLASS}__nav-mic" aria-hidden="true"></i>`, "Recording");
-    if (kind === "summarizing") return label(spinner, "Summarizing");
-    if (kind === "processing") return label(spinner, "Processing Transcript");
-    if (kind === "cancelling") return label(spinner, "Cancelling");
-    if (kind === "repair") return label(icon("alert-circle"), "Repair");
-    if (kind === "done") return label(icon("circle-check"), "Done");
-    if (kind === "scheduled") return label(icon("clock"), "Scheduled");
-    if (kind === "schedulable") return label(icon("calendar"), "Schedule Bot");
-    return label(icon("microphone"), "Join Now");
-  }
-  __name(navButtonLabel, "navButtonLabel");
   return __toCommonJS(plugin_exports);
 })();
 var Plugin = plugins.Plugin;
