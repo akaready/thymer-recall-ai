@@ -4848,7 +4848,7 @@ ${report}
   __name(openParticipantConfirmDialog, "openParticipantConfirmDialog");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.23.5";
+  var PLUGIN_VERSION = "1.23.6";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -5206,7 +5206,9 @@ ${report}
       this._commandItem = null;
       this._navButton = null;
       this._syncButton = null;
+      this._regenerateButton = null;
       this._diagnosticsButton = null;
+      this._regenerateInFlight = /* @__PURE__ */ new Map();
       this._healInFlight = null;
       this._healRecordInFlight = /* @__PURE__ */ new Map();
       this._cleanupInFlight = null;
@@ -5284,6 +5286,13 @@ ${report}
         tooltip: "Safely fill in missing transcript, summary, citations, and attendees",
         onlyWhenExpanded: true,
         onClick: /* @__PURE__ */ __name(({ record }) => void this._syncRecord(record, { summarize: true, repair: true }), "onClick")
+      });
+      this._regenerateButton = this.addCollectionNavigationButton({
+        label: "Regenerate summary",
+        icon: "sparkles",
+        tooltip: "Re-run the summary prompt on this meeting\u2019s transcript and notes. Rewrites Summary and Action items only.",
+        onlyWhenExpanded: true,
+        onClick: /* @__PURE__ */ __name(({ record }) => void this._regenerateSummary(record), "onClick")
       });
       this._diagnosticsButton = this.addCollectionNavigationButton({
         label: "Diagnostics",
@@ -5537,6 +5546,10 @@ ${report}
       } catch {
       }
       try {
+        if (this._regenerateButton && this._regenerateButton.remove) this._regenerateButton.remove();
+      } catch {
+      }
+      try {
         if (this._diagnosticsButton && this._diagnosticsButton.remove) this._diagnosticsButton.remove();
       } catch {
       }
@@ -5556,6 +5569,7 @@ ${report}
       if (this._botCreateInFlight && this._botCreateInFlight.clear) this._botCreateInFlight.clear();
       if (this._skeletonInFlight && this._skeletonInFlight.clear) this._skeletonInFlight.clear();
       if (this._healRecordInFlight && this._healRecordInFlight.clear) this._healRecordInFlight.clear();
+      if (this._regenerateInFlight && this._regenerateInFlight.clear) this._regenerateInFlight.clear();
       if (this._diagnosticsByRecord && this._diagnosticsByRecord.clear) this._diagnosticsByRecord.clear();
       this._setupDoctorInFlight = null;
       this._healInFlight = null;
@@ -6699,6 +6713,86 @@ ${transcriptText}` }]
         return "";
       }
     }
+    /** Existing Transcript heading descendants — the on-page artifact, not a new Recall fetch. */
+    async _readTranscriptText(record) {
+      if (!record || typeof record.getLineItems !== "function") return "";
+      try {
+        const items = await record.getLineItems(false);
+        const root = this._sectionRoot(items, record, BODY_ROLES.TRANSCRIPT, "transcriptHeadingText", "Transcript");
+        if (!root) return "";
+        return notesTextFromItems(items, root.guid);
+      } catch {
+        return "";
+      }
+    }
+    /**
+     * Prefer the meeting body's Transcript. If that is empty and a bot already exists, fetch
+     * Recall's artifact — never create or join a bot.
+     */
+    async _readTranscriptForSummary(record) {
+      const fromBody = await this._readTranscriptText(record);
+      if (fromBody) return fromBody;
+      const botId = this._text(record, FIELDS.BOT_ID);
+      if (!botId || !this._settings.recallApiKey) return "";
+      try {
+        const transcript = await this._fetchRecallJson(`/api/v1/bot/${encodeURIComponent(botId)}/transcript/`);
+        const rawEntries = transcriptEntries(transcript);
+        const live = !!(transcript && transcript.live);
+        const entries = live ? rawEntries : coalesceAdjacentTranscriptEntries(rawEntries);
+        return entriesToText(entries, this._settings);
+      } catch {
+        return "";
+      }
+    }
+    /**
+     * Re-run the current summary prompt against the existing transcript + Notes.
+     * Rewrites Summary and Action items only. Never touches Notes, Transcript, or bot join.
+     */
+    async _regenerateSummary(record) {
+      if (this._disabled) {
+        this._toast("Meetings is off", "Turn the plugin on to regenerate a summary.");
+        return false;
+      }
+      if (!record || !this._isOurRecord(record)) {
+        this._toast("Open a Meeting record first", "Regenerate summary only runs on a Meetings collection record.");
+        return false;
+      }
+      if (!this._settings.anthropicApiKey) {
+        this._toast("Claude API key required", "Open Plugin: Meetings and add a Claude API key.");
+        return false;
+      }
+      if (!this._regenerateInFlight) this._regenerateInFlight = /* @__PURE__ */ new Map();
+      return runCoalesced(this._regenerateInFlight, record.guid, async () => {
+        const transcriptText = await this._readTranscriptForSummary(record);
+        if (!String(transcriptText || "").trim()) {
+          this._toast("Nothing to summarize", "This meeting has no transcript yet.");
+          return false;
+        }
+        const previousStatus = this._text(record, FIELDS.STATUS);
+        this._setField(record, FIELDS.STATUS, "summarizing");
+        this._updateNavButtonForRecord(record);
+        this._toast("Regenerating summary", "Re-running the summary prompt against this transcript and notes.");
+        try {
+          const { summary, citations } = await this._createSummary(record, transcriptText, []);
+          if (!summary) throw new Error("Claude returned an empty summary.");
+          const written = await this._replaceSummaryBody(record, summary, citations);
+          if (!written) throw new Error("Thymer could not write the summary to the meeting body.");
+          this._setField(record, FIELDS.LAST_ERROR, "");
+          this._setField(record, FIELDS.STATUS, "summarized");
+          this._updateNavButtonForRecord(record);
+          this._log("summary regenerated", { characters: summary.length });
+          this._toast("Summary regenerated", "Summary and Action items were rewritten. Notes and Transcript were left alone.");
+          return true;
+        } catch (err) {
+          this._setField(record, FIELDS.LAST_ERROR, `Summary failed: ${this._errorMessage(err)}`);
+          this._setField(record, FIELDS.STATUS, previousStatus === "summarized" ? "summary_failed" : previousStatus || "summary_failed");
+          this._updateNavButtonForRecord(record);
+          this._log("summary regenerate failed", { error: this._errorMessage(err) });
+          this._toast("Could not regenerate summary", this._errorMessage(err));
+          return false;
+        }
+      });
+    }
     /**
      * Stream the transcript into the record body LIVE, under a collapsible "🎙️ Transcript" heading —
      * append-only, one utterance at a time, so it grows as the meeting runs. Takes STRUCTURED entries
@@ -7384,6 +7478,26 @@ ${transcriptText}` }]
         return false;
       }
     }
+    /**
+     * Delete owned Summary / Action items content, then write a fresh outline.
+     * Leaves Notes and Transcript (and their descendants) untouched.
+     */
+    async _replaceSummaryBody(record, summary, citations = []) {
+      if (!record || typeof record.getLineItems !== "function") return false;
+      let items = await record.getLineItems(false);
+      if (!await this._deleteHealRewriteNodes(items, [])) return false;
+      items = await record.getLineItems(false);
+      const botId = this._text(record, FIELDS.BOT_ID) || TEMPLATE_OWNER;
+      const head = this._findOwnedLine(items, botId, BODY_ROLES.SUMMARY);
+      const actionHead = this._findOwnedLine(items, botId, BODY_ROLES.ACTION_ITEMS);
+      if (head) await this._markOwnedLine(head, botId, BODY_ROLES.SUMMARY, { complete: false });
+      if (actionHead) await this._markOwnedLine(actionHead, botId, BODY_ROLES.ACTION_ITEMS, { complete: false });
+      try {
+        localStorage.removeItem(this._bodyKey(record, "summary-body"));
+      } catch {
+      }
+      return this._writeSummaryToBody(record, summary, citations, [], [], { force: true });
+    }
     _lineIsUnder(items, line, rootGuid) {
       if (!line || !rootGuid || line.guid === rootGuid) return false;
       const byGuid = new Map((Array.isArray(items) ? items : []).map((item) => [item.guid, item]));
@@ -7896,12 +8010,23 @@ ${recovered}`;
       } catch {
       }
       try {
+        this._regenerateButton && this._regenerateButton.setOnlyWhenExpanded(!pinVisible);
+      } catch {
+      }
+      try {
         this._diagnosticsButton && this._diagnosticsButton.setOnlyWhenExpanded(!pinVisible);
       } catch {
       }
-      if (!this._navButton) return;
+      if (!this._navButton && !this._regenerateButton) return;
       const target = record || this._activeRecordGuid && this._recordsByGuid.get(this._activeRecordGuid) || null;
       const state = this._recordVisualState(target);
+      try {
+        if (this._regenerateButton && typeof this._regenerateButton.setDisabled === "function") {
+          this._regenerateButton.setDisabled(!pinVisible || state.kind === "summarizing");
+        }
+      } catch {
+      }
+      if (!this._navButton) return;
       try {
         this._navButton.setIcon(null);
       } catch {

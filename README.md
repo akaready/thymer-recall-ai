@@ -231,6 +231,12 @@ replace an existing summary, task state, manual attendee relation, or unowned bo
 summary landed as one glued blob (`Planningnn### Overview`, literal `\n`) or leftover
 `{ "summary": ... }` JSON, Repair also runs **Heal mashed summaries**.
 
+**Regenerate summary** is a separate action-bar button on an open Meeting. It re-runs the current
+summary prompt against the existing transcript (and anything you typed under **Notes**, treated as
+higher-priority context), then rewrites **Summary** and **Action items** only. It does not join a
+new bot, and it does not overwrite Notes or Transcript. If there is no transcript yet, the button
+toasts that there is nothing to summarize.
+
 **Heal mashed summaries** and **Apply to existing meetings** live in
 **Plugin: Meetings → Setup → Diagnostics** only — they are not in the command palette.
 Heal rewrites only plugin-owned Summary / Action items nodes — never Notes or Transcript —
