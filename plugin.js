@@ -4726,6 +4726,23 @@ ${text}`;
     return Number(meetingMs) - botLeadMs;
   }
   __name(botJoinMs, "botJoinMs");
+  function scheduleBlockReason(meetingMs, now = Date.now()) {
+    if (meetingMs == null || !Number.isFinite(Number(meetingMs))) return "missing";
+    if (Number(meetingMs) <= now) return "past";
+    if (!isSchedulableMeeting(meetingMs, now)) return "too_soon";
+    return null;
+  }
+  __name(scheduleBlockReason, "scheduleBlockReason");
+  function formatMeetingWhen(iso) {
+    const ms = Date.parse(String(iso || ""));
+    if (!Number.isFinite(ms)) return "";
+    try {
+      return new Date(ms).toLocaleString(void 0, { dateStyle: "medium", timeStyle: "short" });
+    } catch {
+      return new Date(ms).toISOString();
+    }
+  }
+  __name(formatMeetingWhen, "formatMeetingWhen");
 
   // participant-confirm-drafts.js
   function draftsFromUnmatched(participants) {
@@ -4886,6 +4903,63 @@ ${text}`;
   }
   __name(openParticipantConfirmDialog, "openParticipantConfirmDialog");
 
+  // confirm-dialog-helpers.js
+  var MEETINGS_GITHUB_REPO = "https://github.com/akaready/thymer-recall-ai";
+  var GITHUB_ISSUE_URL_MAX = 7e3;
+  function normalizeConfirmBody(body) {
+    if (body && typeof body === "object") {
+      return {
+        intro: String(body.intro || ""),
+        items: Array.isArray(body.items) ? body.items.map((item) => String(item || "")).filter(Boolean) : [],
+        outro: String(body.outro || "")
+      };
+    }
+    return { intro: String(body || ""), items: [], outro: "" };
+  }
+  __name(normalizeConfirmBody, "normalizeConfirmBody");
+  function regenerateConfirmCopy(value) {
+    if (value === "actions") {
+      return "This will replace the Action items list. Summary, Notes, and Transcript stay. Checkboxes you edited will be overwritten.";
+    }
+    if (value === "both") {
+      return "This will replace the Summary section and the Action items list. Notes and Transcript stay. Checkboxes you edited will be overwritten.";
+    }
+    return "This will replace the Summary section. Notes, Transcript, and Action items stay.";
+  }
+  __name(regenerateConfirmCopy, "regenerateConfirmCopy");
+  function buildGitHubIssueUrl(options) {
+    const repo = String(options.repo || MEETINGS_GITHUB_REPO).replace(/\/+$/, "");
+    const title = String(options.title || "Meetings diagnostics");
+    const body = String(options.body || "");
+    const maxLength = Number(options.maxLength) > 0 ? Number(options.maxLength) : GITHUB_ISSUE_URL_MAX;
+    const base = `${repo}/issues/new`;
+    const withParams = /* @__PURE__ */ __name((issueTitle, issueBody) => `${base}?title=${encodeURIComponent(issueTitle)}&body=${encodeURIComponent(issueBody)}`, "withParams");
+    const full = withParams(title, body);
+    if (full.length <= maxLength) return { url: full, truncated: false, copyFull: false };
+    const note = "\n\n---\nThe full diagnostic report is in the clipboard (the GitHub URL was too long).";
+    let cut = body;
+    const suffix = `\u2026${note}`;
+    while (cut.length > 240 && withParams(title, cut + suffix).length > maxLength) {
+      cut = cut.slice(0, Math.max(240, Math.floor(cut.length * 0.72)));
+    }
+    const truncated = withParams(title, cut + suffix);
+    if (truncated.length <= maxLength) return { url: truncated, truncated: true, copyFull: true };
+    return { url: base, truncated: true, copyFull: true };
+  }
+  __name(buildGitHubIssueUrl, "buildGitHubIssueUrl");
+  async function copyTextToClipboard(text) {
+    try {
+      const write = typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText;
+      if (write) {
+        await write.call(navigator.clipboard, String(text || ""));
+        return true;
+      }
+    } catch {
+    }
+    return false;
+  }
+  __name(copyTextToClipboard, "copyTextToClipboard");
+
   // confirm-dialog.js
   var overlayEl2 = null;
   var detachKey2 = null;
@@ -4905,12 +4979,46 @@ ${text}`;
     if (done) done(value);
   }
   __name(closeConfirmDialog, "closeConfirmDialog");
+  function confirmBodyNodes(rootClass, body) {
+    const parts = normalizeConfirmBody(body);
+    const nodes = [];
+    if (parts.intro) nodes.push(h("p", { class: `${rootClass}-confirm-lede` }, parts.intro));
+    if (parts.items.length) {
+      nodes.push(h(
+        "ul",
+        { class: `${rootClass}-confirm-bullets` },
+        ...parts.items.map((item) => h("li", {}, item))
+      ));
+    }
+    if (parts.outro) nodes.push(h("p", { class: `${rootClass}-confirm-note` }, parts.outro));
+    if (!nodes.length) nodes.push(h("p", { class: `${rootClass}-confirm-lede` }, ""));
+    return nodes;
+  }
+  __name(confirmBodyNodes, "confirmBodyNodes");
+  function attachOverlayChrome(rootClass, cancelValue) {
+    const root = (
+      /** @type {HTMLElement} */
+      overlayEl2
+    );
+    if (!root) return;
+    root.addEventListener("mousedown", (event) => {
+      if (event.target === root) closeConfirmDialog(cancelValue);
+    });
+    document.body.appendChild(root);
+    detachKey2 = /* @__PURE__ */ __name((event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeConfirmDialog(cancelValue);
+    }, "detachKey");
+    window.addEventListener("keydown", detachKey2, true);
+  }
+  __name(attachOverlayChrome, "attachOverlayChrome");
   function openConfirmDialog(options) {
     closeConfirmDialog(false);
     const rootClass = options.rootClass || "plg-recall-ai";
     const title = String(options.title || "Confirm");
-    const body = String(options.body || "");
-    const confirmLabel = options.confirmLabel || "Continue";
+    const confirmLabel = options.confirmLabel || "Apply";
     const cancelLabel = options.cancelLabel || "Cancel";
     return new Promise((resolve) => {
       settle = resolve;
@@ -4923,7 +5031,7 @@ ${text}`;
           "aria-labelledby": `${rootClass}-ask-title`
         },
         h("h2", { class: `${rootClass}-confirm-title`, id: `${rootClass}-ask-title` }, title),
-        h("p", { class: `${rootClass}-confirm-lede` }, body),
+        ...confirmBodyNodes(rootClass, options.body),
         h(
           "div",
           { class: `${rootClass}-confirm-actions` },
@@ -4939,55 +5047,87 @@ ${text}`;
           }, confirmLabel)
         )
       );
-      const root = (
-        /** @type {HTMLElement} */
-        h("div", { class: `${rootClass}-confirm-overlay` }, dialog)
-      );
-      overlayEl2 = root;
-      root.addEventListener("mousedown", (event) => {
-        if (event.target === root) closeConfirmDialog(false);
-      });
-      document.body.appendChild(root);
-      detachKey2 = /* @__PURE__ */ __name((event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        event.stopPropagation();
-        closeConfirmDialog(false);
-      }, "detachKey");
-      window.addEventListener("keydown", detachKey2, true);
+      overlayEl2 = /** @type {HTMLElement} */
+      h("div", { class: `${rootClass}-confirm-overlay` }, dialog);
+      attachOverlayChrome(rootClass, false);
       const primary = (
         /** @type {HTMLElement|null} */
-        root.querySelector(`.${rootClass}-confirm-save`)
+        overlayEl2.querySelector(`.${rootClass}-confirm-save`)
       );
       if (primary && typeof primary.focus === "function") primary.focus();
     });
   }
   __name(openConfirmDialog, "openConfirmDialog");
-  function openChoiceMenu(options) {
+  function openChoiceApplyDialog(options) {
     closeConfirmDialog(null);
     const rootClass = options.rootClass || "plg-recall-ai";
     const title = String(options.title || "Choose");
     const items = Array.isArray(options.items) ? options.items : [];
+    const confirmLabel = options.confirmLabel || "Apply";
+    const copyFor = /* @__PURE__ */ __name((value) => {
+      if (typeof options.confirmCopy === "function") return options.confirmCopy(value);
+      if (options.confirmCopy && options.confirmCopy[value]) return options.confirmCopy[value];
+      return regenerateConfirmCopy(value);
+    }, "copyFor");
     return new Promise((resolve) => {
       settle = resolve;
-      const buttons = items.map((item) => h(
-        "button",
-        {
+      let selected = null;
+      const lede = (
+        /** @type {HTMLElement} */
+        h(
+          "p",
+          { class: `${rootClass}-confirm-lede` },
+          "Choose Summary, Action items, or both. Apply runs the rewrite."
+        )
+      );
+      const applyBtn = (
+        /** @type {HTMLButtonElement} */
+        h("button", {
           type: "button",
-          class: `${rootClass}-choice-item`,
-          onClick: /* @__PURE__ */ __name(() => closeConfirmDialog(item.value), "onClick")
-        },
-        h("span", { class: `${rootClass}-choice-item-label` }, item.label),
-        item.detail ? h("span", { class: `${rootClass}-choice-item-detail` }, item.detail) : null
-      ));
+          class: `${rootClass}-confirm-save`,
+          disabled: true,
+          onClick: /* @__PURE__ */ __name(() => {
+            if (!selected) return;
+            closeConfirmDialog(selected);
+          }, "onClick")
+        }, confirmLabel)
+      );
+      const buttons = items.map((item) => {
+        const btn = (
+          /** @type {HTMLButtonElement} */
+          h(
+            "button",
+            {
+              type: "button",
+              class: `${rootClass}-choice-item`,
+              "aria-pressed": "false"
+            },
+            h("span", { class: `${rootClass}-choice-item-label` }, item.label),
+            item.detail ? h("span", { class: `${rootClass}-choice-item-detail` }, item.detail) : null
+          )
+        );
+        btn.addEventListener("click", () => {
+          selected = item.value;
+          for (const other of buttons) {
+            const on = other === btn;
+            other.classList.toggle("is-selected", on);
+            other.setAttribute("aria-pressed", on ? "true" : "false");
+          }
+          lede.textContent = copyFor(item.value);
+          applyBtn.disabled = false;
+        });
+        return btn;
+      });
       const dialog = h(
         "div",
         {
           class: `${rootClass}-confirm-dialog ${rootClass}-choice-dialog`,
-          role: "menu",
+          role: "dialog",
+          "aria-modal": "true",
           "aria-labelledby": `${rootClass}-choice-title`
         },
         h("h2", { class: `${rootClass}-confirm-title`, id: `${rootClass}-choice-title` }, title),
+        lede,
         h("div", { class: `${rootClass}-choice-list` }, ...buttons),
         h(
           "div",
@@ -4996,36 +5136,92 @@ ${text}`;
             type: "button",
             class: `${rootClass}-confirm-skip`,
             onClick: /* @__PURE__ */ __name(() => closeConfirmDialog(null), "onClick")
-          }, "Cancel")
+          }, "Cancel"),
+          applyBtn
         )
       );
-      const root = (
-        /** @type {HTMLElement} */
-        h("div", { class: `${rootClass}-confirm-overlay` }, dialog)
-      );
-      overlayEl2 = root;
-      root.addEventListener("mousedown", (event) => {
-        if (event.target === root) closeConfirmDialog(null);
-      });
-      document.body.appendChild(root);
-      detachKey2 = /* @__PURE__ */ __name((event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        event.stopPropagation();
-        closeConfirmDialog(null);
-      }, "detachKey");
-      window.addEventListener("keydown", detachKey2, true);
+      overlayEl2 = /** @type {HTMLElement} */
+      h("div", { class: `${rootClass}-confirm-overlay` }, dialog);
+      attachOverlayChrome(rootClass, null);
       const first = (
         /** @type {HTMLElement|null} */
-        root.querySelector(`.${rootClass}-choice-item`)
+        overlayEl2.querySelector(`.${rootClass}-choice-item`)
       );
       if (first && typeof first.focus === "function") first.focus();
     });
   }
-  __name(openChoiceMenu, "openChoiceMenu");
+  __name(openChoiceApplyDialog, "openChoiceApplyDialog");
+  function openReportDialog(options) {
+    closeConfirmDialog(null);
+    const rootClass = options.rootClass || "plg-recall-ai";
+    const title = String(options.title || "Diagnostics");
+    const report = String(options.report || "");
+    const issueTitle = String(options.issueTitle || "Meetings diagnostics");
+    const repo = options.repo || MEETINGS_GITHUB_REPO;
+    return new Promise((resolve) => {
+      settle = resolve;
+      const dialog = h(
+        "div",
+        {
+          class: `${rootClass}-confirm-dialog ${rootClass}-report-dialog`,
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-labelledby": `${rootClass}-report-title`
+        },
+        h("h2", { class: `${rootClass}-confirm-title`, id: `${rootClass}-report-title` }, title),
+        h(
+          "p",
+          { class: `${rootClass}-confirm-lede` },
+          "Bridge, webhook, parser, and transcript diagnostics for this meeting. Nothing is written to the meeting body."
+        ),
+        h("pre", { class: `${rootClass}-confirm-report` }, report),
+        h(
+          "div",
+          { class: `${rootClass}-confirm-actions` },
+          h("button", {
+            type: "button",
+            class: `${rootClass}-confirm-skip`,
+            onClick: /* @__PURE__ */ __name(async () => {
+              const ok = await copyTextToClipboard(report);
+              options.onCopied?.(ok);
+            }, "onClick")
+          }, "Copy to clipboard"),
+          h("button", {
+            type: "button",
+            class: `${rootClass}-confirm-save`,
+            onClick: /* @__PURE__ */ __name(async () => {
+              const plan = buildGitHubIssueUrl({ repo, title: issueTitle, body: report });
+              let copied = false;
+              if (plan.copyFull) copied = await copyTextToClipboard(report);
+              options.onSubmit?.({ truncated: plan.truncated, copied });
+              try {
+                window.open(plan.url, "_blank", "noopener");
+              } catch {
+              }
+              closeConfirmDialog(null);
+            }, "onClick")
+          }, "Submit bug"),
+          h("button", {
+            type: "button",
+            class: `${rootClass}-confirm-skip`,
+            onClick: /* @__PURE__ */ __name(() => closeConfirmDialog(null), "onClick")
+          }, "Cancel")
+        )
+      );
+      overlayEl2 = /** @type {HTMLElement} */
+      h("div", { class: `${rootClass}-confirm-overlay` }, dialog);
+      attachOverlayChrome(rootClass, null);
+      const first = (
+        /** @type {HTMLElement|null} */
+        overlayEl2.querySelector(`.${rootClass}-confirm-skip`)
+      );
+      if (first && typeof first.focus === "function") first.focus();
+    });
+  }
+  __name(openReportDialog, "openReportDialog");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.23.7";
+  var PLUGIN_VERSION = "1.23.8";
   var MIN_BRIDGE_VERSION = "1.22.1";
   var REQUIRED_BRIDGE_CAPABILITIES = Object.freeze([
     "append-only-realtime",
@@ -5411,6 +5607,7 @@ ${text}`;
       this._workspaceCollectionsLoaded = false;
       this._workspaceCollectionsPromise = null;
       this._autoScheduled = /* @__PURE__ */ new Set();
+      this._lastJoinAtByGuid = /* @__PURE__ */ new Map();
       this._activeRecordGuid = "";
       this._settingsStore = createSettingsStore(this, {
         slug: "recall-ai",
@@ -5435,24 +5632,24 @@ ${text}`;
     }
     _registerNavigationButtons() {
       this._navButton = this._createJoinButton();
-      this._syncButton = this.addCollectionNavigationButton({
-        label: "",
-        icon: "hammer",
-        tooltip: "Repair Meeting \u2014 fill missing transcript or summary from Recall; heal leftover JSON. Does not regenerate a healthy summary.",
-        onlyWhenExpanded: true,
-        onClick: /* @__PURE__ */ __name(({ record }) => void this._confirmRepairMeeting(record), "onClick")
-      });
       this._regenerateButton = this.addCollectionNavigationButton({
         label: "",
         icon: "refresh",
-        tooltip: "Regenerate Summary or Action items from this transcript",
+        tooltip: "Regenerate",
         onlyWhenExpanded: true,
         onClick: /* @__PURE__ */ __name(({ record }) => void this._openRegenerateMenu(record), "onClick")
+      });
+      this._syncButton = this.addCollectionNavigationButton({
+        label: "",
+        icon: "hammer",
+        tooltip: "Repair",
+        onlyWhenExpanded: true,
+        onClick: /* @__PURE__ */ __name(({ record }) => void this._confirmRepairMeeting(record), "onClick")
       });
       this._diagnosticsButton = this.addCollectionNavigationButton({
         label: "",
         icon: "stethoscope",
-        tooltip: "Copy bridge, webhook, parser, and transcript diagnostics for this meeting",
+        tooltip: "Diagnostics",
         onlyWhenExpanded: true,
         onClick: /* @__PURE__ */ __name(({ record }) => void this._showMeetingDiagnostics(record), "onClick")
       });
@@ -5688,9 +5885,11 @@ ${text}`;
         if (rec && rec.guid) this._recordsByGuid.set(rec.guid, rec);
         if (rec) void this._ensureMeetingSkeleton(rec);
       }));
-      this._handlerIds.push(on("record.updated", () => {
+      this._handlerIds.push(on("record.updated", (ev) => {
         this._scheduleRecordRefresh();
         this._updateNavButtonForActiveRecord();
+        const rec = ev && typeof ev.getRecord === "function" ? ev.getRecord() : ev;
+        if (rec && this._isOurRecord(rec)) void this._handleMeetingDateUpdate(rec);
       }));
       this._handlerIds.push(on("record.moved", () => this._scheduleRecordRefresh()));
       this._handlerIds.push(on("reload", () => {
@@ -6144,7 +6343,14 @@ ${text}`;
         this._setField(record, FIELDS.STATUS, json.status || latestRecallStatus(json.recall || json) || "bot.created");
         this._log("bot created", { botId, status: json.status || latestRecallStatus(json.recall || json) || "bot.created" });
         this._updateNavButtonForRecord(record);
-        this._toast("Bot created", botId);
+        const meetingIso = this._joinAtIso(record);
+        const scheduledFor = !immediate && recallJoinAtIso(meetingIso);
+        if (scheduledFor) {
+          const when = formatMeetingWhen(meetingIso);
+          this._toast("Bot scheduled", when ? `Bot scheduled for ${when}.` : "The notetaker is booked and will join two minutes before the meeting Date.");
+        } else {
+          this._toast("Bot created", botId);
+        }
         this._ensurePolling(record, botId);
       } catch (err) {
         this._setField(record, FIELDS.STATUS, "error");
@@ -6923,19 +7129,23 @@ ${transcriptText}` }]
       }
     }
     async _openRegenerateMenu(record) {
-      const choice = await openChoiceMenu({
+      const choice = await openChoiceApplyDialog({
         rootClass: ROOT_CLASS,
         title: "Regenerate",
         items: [
-          { label: "Summary", value: "summary", detail: "Replace Overview, Decisions, and Open Questions. Action items stay." },
-          { label: "Action items", value: "actions", detail: "Replace the checkbox list. Summary stays. Edited checkboxes are overwritten." }
-        ]
+          { label: "Summary", value: "summary", detail: "Rewrite Overview, Decisions, and Open Questions." },
+          { label: "Action items", value: "actions", detail: "Rewrite the checkbox list." },
+          { label: "Both", value: "both", detail: "Rewrite Summary and Action items together." }
+        ],
+        confirmCopy: regenerateConfirmCopy,
+        confirmLabel: "Apply"
       });
-      if (choice === "summary") return this._regenerateSummary(record);
-      if (choice === "actions") return this._regenerateActionItems(record);
+      if (choice === "summary") return this._regenerateSummary(record, { confirmed: true });
+      if (choice === "actions") return this._regenerateActionItems(record, { confirmed: true });
+      if (choice === "both") return this._regenerateBoth(record);
       return false;
     }
-    async _confirmBodyWrite({ title, body, confirmLabel = "Continue" }) {
+    async _confirmBodyWrite({ title, body, confirmLabel = "Apply" }) {
       return openConfirmDialog({
         rootClass: ROOT_CLASS,
         title,
@@ -6947,15 +7157,17 @@ ${transcriptText}` }]
     async _confirmRepairMeeting(record) {
       const ok = await this._confirmBodyWrite({
         title: "Repair Meeting",
-        body: [
-          "Repair fills missing pieces from Recall. It will:",
-          "\u2022 Fetch the latest transcript and append any missing plugin-owned turns (it does not wipe an existing Transcript)",
-          "\u2022 Write Summary / Action items only if those sections are missing or incomplete",
-          "\u2022 Heal leftover JSON or a glued \u201Cmashed\u201D summary blob on plugin-owned Summary / Action items nodes",
-          "\u2022 Refresh bot status and check attendees",
-          "It will not overwrite Notes. It will not regenerate a healthy existing Summary or Action items \u2014 use Regenerate for that."
-        ].join("\n"),
-        confirmLabel: "Repair meeting"
+        body: {
+          intro: "Repair fills missing pieces from Recall. It will:",
+          items: [
+            "Fetch the latest transcript and append any missing plugin-owned turns (it does not wipe an existing Transcript)",
+            "Write Summary / Action items only if those sections are missing or incomplete",
+            "Heal leftover JSON or a glued \u201Cmashed\u201D summary blob on plugin-owned Summary / Action items nodes",
+            "Refresh bot status and check attendees"
+          ],
+          outro: "It will not overwrite Notes. It will not regenerate a healthy existing Summary or Action items \u2014 use Regenerate for that."
+        },
+        confirmLabel: "Apply"
       });
       if (!ok) return false;
       return this._syncRecord(record, { summarize: true, repair: true });
@@ -6964,7 +7176,7 @@ ${transcriptText}` }]
      * Re-run the current summary prompt against the existing transcript + Notes.
      * Rewrites Summary only. Never touches Action items, Notes, Transcript, or bot join.
      */
-    async _regenerateSummary(record) {
+    async _regenerateSummary(record, { confirmed = false } = {}) {
       if (this._disabled) {
         this._toast("Meetings is off", "Turn the plugin on to regenerate a summary.");
         return false;
@@ -6977,12 +7189,14 @@ ${transcriptText}` }]
         this._toast("Claude API key required", "Open Plugin: Meetings and add a Claude API key.");
         return false;
       }
-      const confirmed = await this._confirmBodyWrite({
-        title: "Regenerate summary",
-        body: "This will replace the Summary section. Notes, Transcript, and Action items stay.",
-        confirmLabel: "Replace summary"
-      });
-      if (!confirmed) return false;
+      if (!confirmed) {
+        const ok = await this._confirmBodyWrite({
+          title: "Regenerate summary",
+          body: regenerateConfirmCopy("summary"),
+          confirmLabel: "Apply"
+        });
+        if (!ok) return false;
+      }
       if (!this._regenerateInFlight) this._regenerateInFlight = /* @__PURE__ */ new Map();
       return runCoalesced(this._regenerateInFlight, record.guid, async () => {
         const transcriptText = await this._readTranscriptForSummary(record);
@@ -7021,7 +7235,7 @@ ${transcriptText}` }]
      * Re-run Action items only from the existing transcript + Notes.
      * Never touches Summary, Notes, Transcript, or bot join.
      */
-    async _regenerateActionItems(record) {
+    async _regenerateActionItems(record, { confirmed = false } = {}) {
       if (this._disabled) {
         this._toast("Meetings is off", "Turn the plugin on to regenerate action items.");
         return false;
@@ -7034,12 +7248,14 @@ ${transcriptText}` }]
         this._toast("Claude API key required", "Open Plugin: Meetings and add a Claude API key.");
         return false;
       }
-      const confirmed = await this._confirmBodyWrite({
-        title: "Regenerate action items",
-        body: "This will replace the Action items list. Summary, Notes, and Transcript stay. Checkboxes you edited will be overwritten.",
-        confirmLabel: "Replace action items"
-      });
-      if (!confirmed) return false;
+      if (!confirmed) {
+        const ok = await this._confirmBodyWrite({
+          title: "Regenerate action items",
+          body: regenerateConfirmCopy("actions"),
+          confirmLabel: "Apply"
+        });
+        if (!ok) return false;
+      }
       if (!this._regenerateActionsInFlight) this._regenerateActionsInFlight = /* @__PURE__ */ new Map();
       return runCoalesced(this._regenerateActionsInFlight, record.guid, async () => {
         const transcriptText = await this._readTranscriptForSummary(record);
@@ -7068,6 +7284,60 @@ ${transcriptText}` }]
           this._updateNavButtonForRecord(record);
           this._log("action items regenerate failed", { error: this._errorMessage(err) });
           this._toast("Could not regenerate action items", this._errorMessage(err));
+          return false;
+        }
+      });
+    }
+    /**
+     * Rewrite Summary and Action items in one Apply. Notes and Transcript stay.
+     */
+    async _regenerateBoth(record) {
+      if (this._disabled) {
+        this._toast("Meetings is off", "Turn the plugin on to regenerate the meeting write-up.");
+        return false;
+      }
+      if (!record || !this._isOurRecord(record)) {
+        this._toast("Open a Meeting record first", "Regenerate only runs on a Meetings collection record.");
+        return false;
+      }
+      if (!this._settings.anthropicApiKey) {
+        this._toast("Claude API key required", "Open Plugin: Meetings and add a Claude API key.");
+        return false;
+      }
+      if (!this._regenerateInFlight) this._regenerateInFlight = /* @__PURE__ */ new Map();
+      return runCoalesced(this._regenerateInFlight, record.guid, async () => {
+        const transcriptText = await this._readTranscriptForSummary(record);
+        if (!String(transcriptText || "").trim()) {
+          this._toast("Nothing to summarize", "This meeting has no transcript yet.");
+          return false;
+        }
+        const previousStatus = this._text(record, FIELDS.STATUS);
+        this._setField(record, FIELDS.STATUS, "summarizing");
+        this._updateNavButtonForRecord(record);
+        this._toast("Regenerating summary and action items", "Re-running both sections against this transcript and notes.");
+        try {
+          const { summary, citations } = await this._createSummary(record, transcriptText, []);
+          if (!summary) throw new Error("Claude returned an empty summary.");
+          const summaryOnly = splitSummaryAndActionItems(summary).summary;
+          if (!summaryOnly) throw new Error("Claude returned an empty summary.");
+          const markdown = await this._createActionItems(record, transcriptText);
+          if (!markdown) throw new Error("Claude returned no action items.");
+          const wroteSummary = await this._replaceSummaryBody(record, summaryOnly, citations, { section: "summary" });
+          if (!wroteSummary) throw new Error("Thymer could not write the summary to the meeting body.");
+          const wroteActions = await this._replaceSummaryBody(record, markdown, [], { section: "actions" });
+          if (!wroteActions) throw new Error("Thymer could not write action items to the meeting body.");
+          this._setField(record, FIELDS.LAST_ERROR, "");
+          this._setField(record, FIELDS.STATUS, "summarized");
+          this._updateNavButtonForRecord(record);
+          this._log("summary and action items regenerated", { summary: summaryOnly.length, actions: markdown.length });
+          this._toast("Meeting regenerated", "Summary and Action items were rewritten. Notes and Transcript were left alone.");
+          return true;
+        } catch (err) {
+          this._setField(record, FIELDS.LAST_ERROR, `Regenerate failed: ${this._errorMessage(err)}`);
+          this._setField(record, FIELDS.STATUS, previousStatus === "summarized" ? "summary_failed" : previousStatus || "summary_failed");
+          this._updateNavButtonForRecord(record);
+          this._log("regenerate both failed", { error: this._errorMessage(err) });
+          this._toast("Could not regenerate", this._errorMessage(err));
           return false;
         }
       });
@@ -7993,7 +8263,7 @@ ${recovered}`;
       const ok = await this._confirmBodyWrite({
         title: "Heal mashed summaries",
         body: "This scans every meeting and rewrites plugin-owned Summary / Action items nodes that look like leftover JSON or one glued blob. Healthy outlines, Notes, and Transcript are left alone.",
-        confirmLabel: "Heal summaries"
+        confirmLabel: "Apply"
       });
       if (!ok) return;
       return this._healMashedSummariesBulk();
@@ -8002,7 +8272,7 @@ ${recovered}`;
       const ok = await this._confirmBodyWrite({
         title: "Apply heading format",
         body: "This relabels, resizes, and reorders the four section headings (Summary, Action items, Notes, Transcript) on every Meetings record to match current settings. It may insert an empty heading for a missing section. It does not rewrite the text under those headings or re-summarize.",
-        confirmLabel: "Apply headings"
+        confirmLabel: "Apply"
       });
       if (!ok) return;
       return this._applyHeadingFormatBulk();
@@ -8011,7 +8281,7 @@ ${recovered}`;
       const ok = await this._confirmBodyWrite({
         title: "Remove empty leaked skeleton",
         body: "This deletes empty default meeting headings on the page you have open. Headings with your notes or other text underneath are left alone.",
-        confirmLabel: "Remove empty headings"
+        confirmLabel: "Apply"
       });
       if (!ok) return;
       return this._cleanupEmptySkeletonFromActivePage();
@@ -8476,7 +8746,7 @@ ${recovered}`;
       };
       if (botId && botJoinMs(this._joinAtMs(record)) > Date.now() && !isTerminalStatus(status) && status !== "error") return {
         kind: "scheduled",
-        icon: "clock",
+        icon: "calendar",
         label: "Scheduled",
         tooltip: "The notetaker is booked \u2014 click to cancel it"
       };
@@ -8552,22 +8822,26 @@ ${recovered}`;
           debug
         });
         console.info("[recall-ai] meeting diagnostics\n" + report);
-        let copied = false;
-        try {
-          const write = typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText;
-          if (write) {
-            await write.call(navigator.clipboard, report);
-            copied = true;
-          }
-        } catch {
-        }
-        const summary = [
-          `webhooks ${Number(debug.realtimePosts) || 0}`,
-          `rows ${Number(debug.liveRows) || 0}`,
-          `unparsed ${Number(debug.realtimeParseFailures) || 0}`,
-          `last ${debug.lastRealtimeParseStatus || "unknown"}`
-        ].join(" \xB7 ");
-        this._toast(copied ? "Meeting Diagnostics Copied" : "Meeting Diagnostics", copied ? summary : `${summary} \xB7 Full report logged to the console`);
+        await openReportDialog({
+          rootClass: ROOT_CLASS,
+          title: "Diagnostics",
+          report,
+          issueTitle: `Meetings diagnostics ${botId}`,
+          onCopied: /* @__PURE__ */ __name((ok) => {
+            this._toast(ok ? "Diagnostics copied" : "Could not copy diagnostics", ok ? "The report is on the clipboard." : "Clipboard is blocked \u2014 the full report is in the browser console.");
+          }, "onCopied"),
+          onSubmit: /* @__PURE__ */ __name(({ truncated, copied }) => {
+            if (truncated && copied) {
+              this._toast("Opening GitHub issue", "The URL was too long, so the full report is on the clipboard.");
+              return;
+            }
+            if (truncated) {
+              this._toast("Opening GitHub issue", "The full report is in the browser console \u2014 paste it into the issue if the form is empty.");
+              return;
+            }
+            this._toast("Opening GitHub issue", "A new Meetings issue is prefilled with this report.");
+          }, "onSubmit")
+        });
       } catch (err) {
         this._toast("Unable to load diagnostics", this._errorMessage(err));
       }
@@ -8689,6 +8963,44 @@ ${recovered}`;
       if (!this._settings.recallApiKey) return;
       for (const record of this._recordsByGuid.values()) void this._maybeAutoSchedule(record);
     }
+    /**
+     * React to Date being set, changed, or cleared on a Meetings record.
+     * Future Dates book immediately. Past / too-soon Dates toast Join Now instead of failing silent.
+     */
+    async _handleMeetingDateUpdate(record) {
+      const guid = record && record.guid;
+      if (!guid) return;
+      const iso = this._joinAtIso(record) || "";
+      if (!this._lastJoinAtByGuid.has(guid)) {
+        this._lastJoinAtByGuid.set(guid, iso);
+        return;
+      }
+      const prev = this._lastJoinAtByGuid.get(guid) || "";
+      if (iso === prev) return;
+      this._lastJoinAtByGuid.set(guid, iso);
+      if (!iso) {
+        this._autoScheduled.delete(guid);
+        const prevMs = Date.parse(prev);
+        const wasFuture = Number.isFinite(prevMs) && (botJoinMs(prevMs) || 0) > Date.now();
+        if (wasFuture && this._text(record, FIELDS.BOT_ID)) await this._cancelScheduledBot(record);
+        this._updateNavButtonForRecord(record);
+        return;
+      }
+      if (!this._meetingUrl(record)) {
+        this._toast("Add a meeting link", "Date is set, but the notetaker needs a meeting URL before it can be scheduled.");
+        return;
+      }
+      const blocked = scheduleBlockReason(this._joinAtMs(record));
+      if (blocked) {
+        this._toast(
+          "Join Now needed",
+          blocked === "past" ? "This Date is in the past. Click Join Now to send the notetaker immediately." : "This Date is too soon for a scheduled bot. Click Join Now to send the notetaker immediately."
+        );
+        return;
+      }
+      this._autoScheduled.delete(guid);
+      if (this._settings.autoSchedule) await this._maybeAutoSchedule(record);
+    }
     async _maybeAutoSchedule(record) {
       const guid = record && record.guid;
       if (!guid || this._autoScheduled.has(guid)) return;
@@ -8705,7 +9017,12 @@ ${recovered}`;
         const records = await this.collection.getAllRecords();
         this._recordsByGuid = /* @__PURE__ */ new Map();
         for (const record of records) {
-          if (record && record.guid) this._recordsByGuid.set(record.guid, record);
+          if (record && record.guid) {
+            this._recordsByGuid.set(record.guid, record);
+            if (!this._lastJoinAtByGuid.has(record.guid)) {
+              this._lastJoinAtByGuid.set(record.guid, this._joinAtIso(record) || "");
+            }
+          }
         }
       } catch (err) {
         this._toast("Unable to load meeting records", this._errorMessage(err));
@@ -9805,9 +10122,13 @@ ${recovered}`;
 				cursor: pointer;
 				user-select: none;
 			}
-			.${ROOT_CLASS}__inline-button:hover {
-				border-color: var(--tps-accent, currentColor);
-				color: var(--tps-accent, currentColor);
+			.${ROOT_CLASS}__inline-button:hover,
+			.${ROOT_CLASS}__inline-button:focus-visible {
+				background: color-mix(in srgb, var(--tps-text, currentColor) 14%, transparent);
+				border-color: color-mix(in srgb, var(--tps-text, currentColor) 55%, transparent);
+				color: var(--tps-text, currentColor);
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--tps-text, currentColor) 28%, transparent);
+				outline: none;
 			}
 			.${ROOT_CLASS}__cell {
 				display: inline-flex;
@@ -9823,6 +10144,12 @@ ${recovered}`;
 			}
 			.${ROOT_CLASS}__cell-button {
 				flex: none;
+			}
+			.${ROOT_CLASS}__cell-button:hover,
+			.${ROOT_CLASS}__cell-button:focus-visible {
+				background: color-mix(in srgb, var(--tps-text, currentColor) 12%, transparent);
+				outline: 2px solid color-mix(in srgb, var(--tps-text, currentColor) 45%, transparent);
+				outline-offset: 1px;
 			}
 			/* Icon is a direct child of the nav button now (no wrapper) \u2014 space it from the text the way
 			   Thymer's own view buttons do, with an inline margin rather than a flex gap. */
@@ -10027,15 +10354,13 @@ ${recovered}`;
 				cursor: pointer;
 			}
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-setup-copy-button:hover,
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-setup-copy-button:focus-visible,
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-setup-copy-button--copied {
-				color: var(--tps-accent);
-				background: var(--tps-accent-soft);
-			}
-			.${ROOT_CLASS}-panel .${ROOT_CLASS}-setup-copy-button:focus-visible {
-				color: var(--tps-accent);
-				background: var(--tps-accent-soft);
-				outline: 1px solid var(--tps-accent);
-				outline-offset: 1px;
+				color: var(--tps-text, inherit);
+				background: color-mix(in srgb, var(--tps-text, currentColor) 12%, transparent);
+				border: 1px solid color-mix(in srgb, var(--tps-text, currentColor) 50%, transparent);
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--tps-text, currentColor) 26%, transparent);
+				outline: none;
 			}
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-card {
 				margin-top: var(--tps-space-4);
@@ -10054,10 +10379,12 @@ ${recovered}`;
 				color: var(--tps-accent);
 				font-size: 14px;
 			}
-			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-card .tps-button--ghost:hover {
-				color: var(--tps-accent);
-				border-color: var(--tps-accent);
-				background: var(--tps-accent-soft);
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-card .tps-button--ghost:hover,
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-card .tps-button--ghost:focus-visible {
+				color: var(--tps-text, inherit);
+				background: color-mix(in srgb, var(--tps-text, currentColor) 12%, transparent);
+				border-color: color-mix(in srgb, var(--tps-text, currentColor) 50%, transparent);
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--tps-text, currentColor) 26%, transparent);
 			}
 			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-results {
 				display: grid;
@@ -10113,31 +10440,63 @@ ${recovered}`;
 				display: flex;
 				align-items: center;
 				justify-content: center;
-				background: color-mix(in srgb, #000 42%, transparent);
+				background: color-mix(in srgb, #000 46%, transparent);
 			}
 			.${ROOT_CLASS}-confirm-dialog {
-				width: min(520px, calc(100vw - 32px));
+				width: min(440px, calc(100vw - 40px));
 				max-height: calc(100vh - 48px);
 				overflow: auto;
-				padding: 20px;
+				padding: 22px 24px 18px;
 				border-radius: 12px;
 				background: var(--tps-bg, var(--bg-default, #1c1c1c));
 				color: var(--tps-text, var(--text-default, inherit));
 				border: 1px solid var(--tps-divider, rgba(127,127,127,0.18));
 				box-shadow: 0 16px 48px rgba(0,0,0,0.28);
+				font-family: inherit;
 			}
 			.${ROOT_CLASS}-confirm-title {
-				margin: 0 0 8px;
-				font-size: 18px;
+				margin: 0 0 10px;
+				font-size: 16px;
+				font-weight: 600;
+				letter-spacing: -0.01em;
+				line-height: 1.25;
 			}
-			.${ROOT_CLASS}-confirm-lede {
-				margin: 0 0 16px;
+			.${ROOT_CLASS}-confirm-lede,
+			.${ROOT_CLASS}-confirm-note {
+				margin: 0 0 10px;
 				color: var(--tps-text-muted, var(--text-muted, inherit));
+				font: inherit;
 				font-size: 13px;
+				line-height: 1.5;
+				white-space: normal;
+			}
+			.${ROOT_CLASS}-confirm-note { margin-bottom: 4px; }
+			.${ROOT_CLASS}-confirm-bullets {
+				margin: 0 0 10px;
+				padding-left: 1.2em;
+				font: inherit;
+				font-size: 13px;
+				line-height: 1.5;
+				color: var(--tps-text, inherit);
+			}
+			.${ROOT_CLASS}-confirm-bullets li { margin: 0 0 6px; }
+			.${ROOT_CLASS}-confirm-bullets li:last-child { margin-bottom: 0; }
+			.${ROOT_CLASS}-confirm-report {
+				margin: 0 0 4px;
+				max-height: 36vh;
+				overflow: auto;
+				padding: 10px 12px;
+				border-radius: 8px;
+				border: 1px solid var(--tps-divider, rgba(127,127,127,0.18));
+				background: color-mix(in srgb, var(--tps-text, currentColor) 5%, transparent);
+				color: var(--tps-text, inherit);
+				font: inherit;
+				font-size: 12px;
 				line-height: 1.45;
 				white-space: pre-wrap;
+				word-break: break-word;
 			}
-			.${ROOT_CLASS}-confirm-list { display: grid; gap: 12px; }
+			.${ROOT_CLASS}-confirm-list { display: grid; gap: 12px; margin: 0 0 4px; }
 			.${ROOT_CLASS}-confirm-row {
 				display: grid;
 				grid-template-columns: auto 1fr;
@@ -10156,46 +10515,82 @@ ${recovered}`;
 				border: 1px solid var(--tps-divider, rgba(127,127,127,0.2));
 				background: var(--tps-bg-input, rgba(127,127,127,0.06));
 				color: inherit;
+				font: inherit;
 			}
 			.${ROOT_CLASS}-confirm-actions {
 				display: flex;
+				flex-wrap: wrap;
 				justify-content: flex-end;
 				gap: 8px;
 				margin-top: 16px;
 			}
 			.${ROOT_CLASS}-confirm-save,
-			.${ROOT_CLASS}-confirm-skip {
-				padding: 6px 12px;
-				border-radius: 6px;
-				border: 1px solid var(--tps-divider, rgba(127,127,127,0.2));
+			.${ROOT_CLASS}-confirm-skip,
+			.${ROOT_CLASS}-choice-item {
+				font: inherit;
+				font-size: 13px;
+				font-weight: 500;
+				min-height: 32px;
+				padding: 0 12px;
+				border-radius: 8px;
+				border: 1px solid color-mix(in srgb, var(--tps-text, currentColor) 22%, transparent);
 				background: transparent;
 				color: inherit;
 				cursor: pointer;
+				transition: background-color 80ms ease, border-color 80ms ease, box-shadow 80ms ease;
+			}
+			.${ROOT_CLASS}-confirm-skip:hover,
+			.${ROOT_CLASS}-confirm-skip:focus-visible,
+			.${ROOT_CLASS}-choice-item:hover,
+			.${ROOT_CLASS}-choice-item:focus-visible {
+				background: color-mix(in srgb, var(--tps-text, currentColor) 12%, transparent);
+				border-color: color-mix(in srgb, var(--tps-text, currentColor) 55%, transparent);
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--tps-text, currentColor) 28%, transparent);
+				outline: none;
+			}
+			.${ROOT_CLASS}-confirm-skip:active,
+			.${ROOT_CLASS}-choice-item:active {
+				background: color-mix(in srgb, var(--tps-text, currentColor) 18%, transparent);
 			}
 			.${ROOT_CLASS}-confirm-save {
-				border-color: var(--tps-accent, currentColor);
+				color: var(--enum-green-fg, #10b981);
+				background: color-mix(in srgb, var(--enum-green-fg, #10b981) 14%, transparent);
+				border-color: color-mix(in srgb, var(--enum-green-fg, #10b981) 50%, transparent);
+			}
+			.${ROOT_CLASS}-confirm-save:hover,
+			.${ROOT_CLASS}-confirm-save:focus-visible {
+				background: color-mix(in srgb, var(--enum-green-fg, #10b981) 26%, transparent);
+				border-color: var(--enum-green-fg, #10b981);
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--enum-green-fg, #10b981) 40%, transparent);
+				outline: none;
+			}
+			.${ROOT_CLASS}-confirm-save:active {
+				background: color-mix(in srgb, var(--enum-green-fg, #10b981) 34%, transparent);
+			}
+			.${ROOT_CLASS}-confirm-save:disabled {
+				opacity: 0.45;
+				cursor: default;
+				box-shadow: none;
 			}
 			.${ROOT_CLASS}-choice-list {
 				display: grid;
 				gap: 8px;
-				margin: 0 0 12px;
+				margin: 4px 0 0;
 			}
 			.${ROOT_CLASS}-choice-item {
 				display: grid;
 				gap: 2px;
 				width: 100%;
 				padding: 10px 12px;
-				border-radius: 8px;
-				border: 1px solid var(--tps-divider, rgba(127,127,127,0.2));
-				background: transparent;
-				color: inherit;
 				text-align: left;
-				cursor: pointer;
 			}
-			.${ROOT_CLASS}-choice-item:hover,
-			.${ROOT_CLASS}-choice-item:focus {
-				border-color: var(--tps-accent, currentColor);
-				outline: none;
+			.${ROOT_CLASS}-choice-item.is-selected,
+			.${ROOT_CLASS}-choice-item.is-selected:hover,
+			.${ROOT_CLASS}-choice-item.is-selected:focus-visible {
+				color: var(--enum-green-fg, #10b981);
+				background: color-mix(in srgb, var(--enum-green-fg, #10b981) 16%, transparent);
+				border-color: color-mix(in srgb, var(--enum-green-fg, #10b981) 70%, transparent);
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--enum-green-fg, #10b981) 35%, transparent);
 			}
 			.${ROOT_CLASS}-choice-item-label {
 				font-weight: 600;
@@ -10204,6 +10599,22 @@ ${recovered}`;
 				color: var(--tps-text-muted, var(--text-muted, inherit));
 				font-size: 12px;
 				line-height: 1.4;
+			}
+			.${ROOT_CLASS}-panel .tps-button--ghost:hover,
+			.${ROOT_CLASS}-panel .tps-button--ghost:focus-visible,
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}-doctor-card .tps-button--ghost:hover {
+				color: var(--tps-text, inherit);
+				background: color-mix(in srgb, var(--tps-text, currentColor) 12%, transparent);
+				border-color: color-mix(in srgb, var(--tps-text, currentColor) 50%, transparent);
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--tps-text, currentColor) 26%, transparent);
+				outline: none;
+			}
+			.${ROOT_CLASS}-panel .tps-button--primary:hover,
+			.${ROOT_CLASS}-panel .tps-button--primary:focus-visible {
+				filter: none;
+				background: color-mix(in srgb, var(--tps-accent) 86%, #fff);
+				box-shadow: 0 0 0 2px color-mix(in srgb, var(--tps-accent) 42%, transparent);
+				outline: none;
 			}
 		`;
     }
